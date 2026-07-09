@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+app/session_data/
+environment_data/
+*.zip
+# Claude Code files
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.claude.json
+.mcp.json
+WesternCorridorMappingTeam-main/
+# Rendered output of the .md docs — generated from the markdown sources.
+*.html
+

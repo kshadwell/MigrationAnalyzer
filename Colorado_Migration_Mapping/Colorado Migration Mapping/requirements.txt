@@ -1,0 +1,21 @@
+# Pinned to the versions the app was demoed/validated on (2026-06-22).
+# These exact versions are known-good; bump deliberately, not automatically.
+# Previous loose (>=) bounds preserved in requirements.prev.txt.
+# Target interpreter: Python 3.13 (C:\Program Files\Python313\)
+
+dash==4.1.0
+dash-leaflet==1.1.3
+dash-bootstrap-components==2.0.4
+flask-caching==2.4.0
+plotly==6.7.0
+pandas==3.0.3
+geopandas==1.1.3
+numpy==2.4.5
+scipy==1.17.1
+shapely==2.1.2
+pyproj==3.7.2
+fiona==1.10.1
+rasterio==1.5.0
+scikit-learn==1.8.0
+pyarrow==24.0.0
+openpyxl==3.1.5
