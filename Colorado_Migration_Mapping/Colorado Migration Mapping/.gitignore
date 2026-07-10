@@ -3,6 +3,7 @@ __pycache__/
 app/session_data/
 environment_data/
 *.zip
+!python-3.13/python313.zip
 # Claude Code files
 .claude/
 CLAUDE.md
@@ -12,4 +13,7 @@ CLAUDE.local.md
 WesternCorridorMappingTeam-main/
 # Rendered output of the .md docs — generated from the markdown sources.
 *.html
+# Installed packages inside bundled Python (Setup.bat installs these)
+python-3.13/Lib/
+python-3.13/Scripts/
 

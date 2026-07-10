@@ -75,7 +75,8 @@ try:
     )
     from app.modules.modeling import (
         calc_bbmm_stub,
-        calc_ctmm_stub,
+        calc_ctmm,
+        calc_dbbmm,
         calc_kernel_ud,
         calc_line_buffer,
         create_population_grid,
@@ -121,7 +122,8 @@ except ImportError:
         )
         from modules.modeling import (
             calc_bbmm_stub,
-            calc_ctmm_stub,
+            calc_ctmm,
+            calc_dbbmm,
             calc_kernel_ud,
             calc_line_buffer,
             create_population_grid,
@@ -2174,9 +2176,8 @@ tab2_layout = dbc.Container(
 #     clientside callback during long runs) + DataTable of per-sequence
 #     metadata. All three sit inside one dcc.Loading.
 #
-# Note on stubs: CTMM and dBBMM currently fall back to Kernel / BBMM (see
-# MODEL_COMPARISON_NOTES.md). The dropdown still offers them; the warnings
-# come back attached to each result row's metadata.
+# CTMM and dBBMM call R via Rscript subprocess; CTMM falls back to Kernel UD
+# and dBBMM falls back to regular BBMM if R or required packages are missing.
 tab3_layout = dbc.Container(
     fluid=True,
     children=[
@@ -2619,7 +2620,7 @@ tab5_layout = dbc.Container(
                                         dcc.Slider(
                                             id="raster-overlay-opacity",
                                             min=0, max=1, step=0.05, value=0.7,
-                                            marks={0: "0", 0.5: "0.5", 1: "1"},
+                                            marks={i: {"label": str(i), "style": {"color": "white"}} for i in [0, 0.5, 1]},
                                         ),
                                         dbc.Button(
                                             "Clear overlay",
@@ -2676,7 +2677,7 @@ tab5_layout = dbc.Container(
                                         dcc.Slider(
                                             id="vector-overlay-opacity",
                                             min=0, max=1, step=0.05, value=0.35,
-                                            marks={0: "0", 0.5: "0.5", 1: "1"},
+                                            marks={i: {"label": str(i), "style": {"color": "white"}} for i in [0, 0.5, 1]},
                                         ),
                                         html.Div(id="vector-overlay-info", className="mt-2 small text-muted"),
                                     ]
@@ -2738,6 +2739,7 @@ tab5_layout = dbc.Container(
                                                     "display": "block",
                                                     "fontSize": "0.78rem",
                                                     "marginBottom": "2px",
+                                                    "color": "white",
                                                 },
                                             ),
                                             id="export-checklist-wrap",
@@ -3144,7 +3146,7 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
                     return col
         return None
 
-    id_val = _auto(["LoclAID", "animal_id", "ID", "id", "AnimalID"])
+    id_val = _auto(["TrakAID", "animalTrackerId", "LoclAID", "animalIdLocal", "animal_id", "ID", "id", "AnimalID"])
     ts_val = _auto(["DT_MST", "timestamp", "datetime", "date_time", "DateTime"])
     lon_val = _auto(["Long", "lon", "longitude", "x", "Longitude"])
     lat_val = _auto(["Lat", "lat", "latitude", "y", "Latitude"])
@@ -4292,6 +4294,16 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, processe
             f"No sequences defined for {selected_animal}. Click Auto-detect All to "
             f"detect migrations, or drag a slider to define one manually."
         )
+
+    n_problem = int(animal_df["problem"].sum()) if "problem" in animal_df.columns else 0
+    n_mortality = int(animal_df["mortality_flag"].sum()) if "mortality_flag" in animal_df.columns else 0
+    if n_problem or n_mortality:
+        parts = []
+        if n_problem:
+            parts.append(f"{n_problem:,} problem")
+        if n_mortality:
+            parts.append(f"{n_mortality:,} mortality")
+        confidence_text += f"  Excluded from sequencing: {', '.join(parts)}."
 
     # ---- Render the slider cards ----
     # Always render n_seqs slider cards — filled from active_by_slot if the slot
@@ -6161,6 +6173,42 @@ def render_model_params(model, processed_json):
     elif model == "DBBMM":
         auto_logic = fix_rate_msg or "Dynamic BBMM: window size auto-scaled to fix rate"
         panel = [
+            dbc.Alert(
+                [
+                    "To run dBBMM, ensure ",
+                    html.Strong("R"),
+                    " is installed, along with the packages: ",
+                    html.Code("move"), ", ",
+                    html.Code("sf"), ", ",
+                    html.Code("terra"), ", ",
+                    html.Code("R.utils"), ", ",
+                    html.Code("jsonlite"), ".",
+                    " If R or any package is missing, the model will fall back to regular BBMM.",
+                ],
+                color="info",
+                className="mb-2 py-2 px-3",
+                style={"fontSize": "0.8rem"},
+            ),
+            dbc.Label("Rscript Path (optional)", style={"fontSize": "0.85rem"}),
+            dbc.Input(
+                id={"type": "model-param", "key": "dbbmm_rscript_path"},
+                type="text",
+                placeholder=r"e.g. C:\Program Files\R\R-4.5.2\bin\Rscript.exe",
+                className="mb-1",
+                style={"fontSize": "0.8rem"},
+            ),
+            html.Small(
+                [
+                    "Leave blank to auto-detect. If dBBMM falls back unexpectedly, "
+                    "open R or RStudio and run ",
+                    html.Code('R.home("bin")'),
+                    " to find the correct path, then paste it here with ",
+                    html.Code("\\Rscript.exe"),
+                    " appended.",
+                ],
+                className="text-muted d-block mb-2",
+                style={"fontSize": "0.7rem"},
+            ),
             dbc.Label("Window Size (fixes)", style={"fontSize": "0.85rem"}),
             dbc.Input(id={"type": "model-param", "key": "dbbmm_window"}, type="number", value=31, min=3, step=2, className="mb-2"),
             dbc.Label("Margin (fixes)", style={"fontSize": "0.85rem"}),
@@ -6179,6 +6227,43 @@ def render_model_params(model, processed_json):
         ]
     elif model == "CTMM":
         panel = [
+            dbc.Alert(
+                [
+                    "To run CTMM, ensure ",
+                    html.Strong("R"),
+                    " is installed, along with the packages: ",
+                    html.Code("ctmm"), ", ",
+                    html.Code("move"), ", ",
+                    html.Code("sf"), ", ",
+                    html.Code("terra"), ", ",
+                    html.Code("R.utils"), ", ",
+                    html.Code("jsonlite"), ".",
+                    " If R or any package is missing, the model will fall back to Kernel UD.",
+                ],
+                color="info",
+                className="mb-2 py-2 px-3",
+                style={"fontSize": "0.8rem"},
+            ),
+            dbc.Label("Rscript Path (optional)", style={"fontSize": "0.85rem"}),
+            dbc.Input(
+                id={"type": "model-param", "key": "ctmm_rscript_path"},
+                type="text",
+                placeholder=r"e.g. C:\Program Files\R\R-4.5.2\bin\Rscript.exe",
+                className="mb-1",
+                style={"fontSize": "0.8rem"},
+            ),
+            html.Small(
+                [
+                    "Leave blank to auto-detect. If CTMM falls back unexpectedly, "
+                    "open R or RStudio and run ",
+                    html.Code('R.home("bin")'),
+                    " to find the correct path, then paste it here with ",
+                    html.Code("\\Rscript.exe"),
+                    " appended.",
+                ],
+                className="text-muted d-block mb-2",
+                style={"fontSize": "0.7rem"},
+            ),
             dbc.Label("Info Criterion", style={"fontSize": "0.85rem"}),
             dcc.Dropdown(
                 id={"type": "model-param", "key": "ctmm_criterion"},
@@ -6265,12 +6350,18 @@ def _apply_model_ui_params(config: dict, model: str, p: dict) -> None:
             val = _num_or_none(p.get(src))
             if val is not None:
                 config[dst] = val
+        rpath = (p.get("dbbmm_rscript_path") or "").strip()
+        if rpath:
+            config["rscript_path"] = rpath
     elif m == "CTMM":
         if p.get("ctmm_criterion"):
             config["info_criteria"] = p["ctmm_criterion"]
         c = _num_or_none(p.get("ctmm_contour"))
         if c is not None:
             config["contour"] = c
+        rpath = (p.get("ctmm_rscript_path") or "").strip()
+        if rpath:
+            config["rscript_path"] = rpath
 
 
 @app.callback(
@@ -6420,6 +6511,27 @@ def run_modeling(
         except (TypeError, ValueError):
             range_mindays = 30
 
+        # Keys relevant to the selected model — used for logging and the
+        # version manifest (excludes other-model defaults and machine paths).
+        _SHARED_KEYS = {
+            "num_cores", "max_timeout", "mult4buff", "cell_size", "contour",
+        }
+        _MODEL_KEYS = {
+            "BBMM": _SHARED_KEYS | {
+                "time_step", "bm_var", "location_error", "max_lag",
+                "bm_var_fix_rate_threshold_hours",
+            },
+            "DBBMM": _SHARED_KEYS | {
+                "time_step", "bm_var", "location_error", "max_lag",
+                "dbbmm_margin", "dbbmm_window",
+            },
+            "CTMM": _SHARED_KEYS | {"info_criteria"},
+            "KERNEL": _SHARED_KEYS | {"smooth_param", "subsample"},
+            "LINEBUFF": _SHARED_KEYS | {"buff_distance"},
+            "LINEBUFFER": _SHARED_KEYS | {"buff_distance"},
+        }
+        relevant = _MODEL_KEYS.get(model.upper(), set())
+
         # If a working directory is set, start a NEW output version and drop
         # UDs/Footprints into ModelOutputs/V{n}/. Each model run gets its own
         # version folder; Tab 4/5 population outputs join the same version.
@@ -6431,12 +6543,9 @@ def run_modeling(
             (outputs / "Footprints").mkdir(parents=True, exist_ok=True)
             config["ud_dir"] = str(outputs / "UDs")
             config["footprint_dir"] = str(outputs / "Footprints")
-            # Log the run *and* every model parameter (defaults included) so the
-            # session log alone is enough to reproduce a run. ud_dir/footprint_dir
-            # are excluded — they're machine paths, not modelling choices.
             param_fields = {
                 k: v for k, v in config.items()
-                if k not in ("ud_dir", "footprint_dir", "method")
+                if k in relevant
             }
             # Provenance manifest for this version (params + diff vs parent +
             # shared-input references).
@@ -6451,12 +6560,9 @@ def run_modeling(
                 **param_fields,
             )
 
-        # Parameter list for the processing log — every value used, defaults
-        # included (machine paths excluded). Logged whether or not a workdir is
-        # set so the model section always records what was run.
         param_fields = {
             k: v for k, v in config.items()
-            if k not in ("ud_dir", "footprint_dir", "method")
+            if k in relevant
         }
 
         # Actually run the pipeline.
@@ -7096,8 +7202,8 @@ def generate_pop_outputs(
             "merge_order": list(merge_order_tuple),
             "contour_type": contour_type_norm,
             "contour_levels": contour_levels,
-            "min_area_drop": float(min_drop or 10000),
-            "min_area_fill": float(min_fill or 5000),
+            "min_area_drop": float(min_drop) if min_drop not in (None, "") else 10000.0,
+            "min_area_fill": float(min_fill) if min_fill not in (None, "") else 5000.0,
             "smooth": bool(smooth),
             # ksmooth smoothness (matches R's ksmooth_smoothness). Carried under
             # the legacy "smooth_bandwidth" key the population functions accept.

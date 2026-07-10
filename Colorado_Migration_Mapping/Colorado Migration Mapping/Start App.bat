@@ -2,7 +2,7 @@
 title Colorado Migration Corridor Mapper
 cd /d "%~dp0"
 
-set "PYTHON=C:\Program Files\Python313\python.exe"
+set "PYTHON=%~dp0python-3.13\python.exe"
 set "URL=http://127.0.0.1:8050/"
 
 if not exist "%PYTHON%" (

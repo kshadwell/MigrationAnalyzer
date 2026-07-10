@@ -13,10 +13,12 @@ specifically the helper scripts under ``MAPP3.x_code_workflow/functions/``:
 - CalcBBMM.R          -> :func:`calc_bbmm` (FMV when ``bm_var`` is supplied;
                          estimated motion variance (EB) via Horne 2007
                          likelihood when ``bm_var=None``)
-- CalcDBBMM.R         -> :func:`calc_dbbmm_stub` — *still a stub* that falls
-                         back to BBMM(EB). Full dBBMM needs R's ``move``.
-- CalcCTMM.R          -> :func:`calc_ctmm_stub` — *still a stub* that falls
-                         back to Kernel. Full CTMM needs R's ``ctmm``.
+- CalcDBBMM.R         -> :func:`calc_dbbmm` — calls R's ``move`` package via
+                         Rscript subprocess; falls back to BBMM if R or
+                         required packages are not installed.
+- CalcCTMM.R          -> :func:`calc_ctmm` — calls R's ``ctmm`` package via
+                         Rscript subprocess; falls back to kernel UD if R
+                         or required packages are not installed.
 
 Kernel UD and Line Buffer numbers should be very close to R's, modulo the
 fact that we evaluate the KDE directly (no SpatialPixels boundary effects).
@@ -28,7 +30,7 @@ Public surface that ``main.py`` imports:
 
 - :func:`create_population_grid`
 - :func:`calc_kernel_ud`, :func:`calc_line_buffer`, :func:`calc_bbmm`
-- :func:`calc_bbmm_stub`, :func:`calc_ctmm_stub`, :func:`calc_dbbmm_stub`
+- :func:`calc_bbmm_stub`, :func:`calc_ctmm`, :func:`calc_dbbmm`
 - :func:`calc_seq_distances`
 - :func:`get_model_config`, :func:`run_model`, :func:`run_all_sequences`
 
@@ -904,88 +906,452 @@ def calc_bbmm_stub(
 
 
 # ---------------------------------------------------------------------------
-# 5. calc_ctmm_stub
+# 5. calc_ctmm (real CTMM via R subprocess, kernel UD fallback)
 # ---------------------------------------------------------------------------
 
-def calc_ctmm_stub(
+def _find_rscript() -> str | None:
+    """Locate an Rscript executable that has the required CTMM packages.
+
+    Search order:
+      1. RSCRIPT_PATH env var (user override — full path to Rscript executable)
+      2. R_HOME env var  (+ /bin/Rscript)
+      3. System PATH
+      4. Windows registry (R registers its install path there)
+      5. Common filesystem locations (AppData, Program Files, ~/R)
+
+    Among all found candidates, the first whose library contains the six
+    required packages wins.  Falls back to the newest if none qualifies.
+    """
+    import shutil
+    import os
+    import subprocess as _sp
+
+    candidates: list[str] = []
+
+    def _add(p: str) -> None:
+        if p and os.path.isfile(p) and p not in candidates:
+            candidates.append(p)
+
+    _add(os.environ.get("RSCRIPT_PATH", ""))
+
+    r_home = os.environ.get("R_HOME", "")
+    if r_home:
+        _add(os.path.join(r_home, "bin", "Rscript.exe"))
+        _add(os.path.join(r_home, "bin", "Rscript"))
+
+    rs = shutil.which("Rscript")
+    if rs:
+        _add(rs)
+
+    if os.name == "nt":
+        try:
+            import winreg
+            for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                try:
+                    with winreg.OpenKey(hive, r"SOFTWARE\R-core\R") as key:
+                        install_path, _ = winreg.QueryValueEx(key, "InstallPath")
+                        _add(os.path.join(install_path, "bin", "Rscript.exe"))
+                except OSError:
+                    pass
+        except ImportError:
+            pass
+
+    search_roots = [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "R"),
+        r"C:\Program Files\R",
+        r"C:\Program Files (x86)\R",
+        os.path.expanduser("~/R"),
+    ]
+    for root in search_roots:
+        if not os.path.isdir(root):
+            continue
+        for entry in sorted(os.listdir(root), reverse=True):
+            _add(os.path.join(root, entry, "bin", "Rscript.exe"))
+
+    if not candidates:
+        return None
+
+    required = {"ctmm", "move", "sf", "terra", "R.utils", "jsonlite"}
+    for rscript in candidates:
+        try:
+            out = _sp.run(
+                [rscript, "-e", "cat(installed.packages()[,'Package'],sep='\\n')"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if required.issubset(set(out.stdout.splitlines())):
+                return rscript
+        except Exception:
+            continue
+
+    return candidates[0]
+
+
+def calc_ctmm(
     seq_gdf: gpd.GeoDataFrame,
     seq_name: str,
     pop_grid: PopGrid,
     config: dict[str, Any],
 ) -> tuple[np.ndarray, Polygon | MultiPolygon, dict[str, Any]]:
-    """Stub for Continuous-Time Movement Modelling (CTMM).
+    """Continuous-Time Movement Model via R's ``ctmm`` package.
 
-    Full CTMM requires the R ``ctmm`` package and model selection via AIC/BIC.
-    Falls back to kernel UD as an approximation. The stub still routes the
-    user-supplied ``contour`` and ``mult4buff`` so downstream behaviour is
-    consistent with the other methods.
+    Calls ``ctmm_bridge.R`` via Rscript subprocess, matching CalcCTMM.R from
+    WMI MAPP3.x: ctmm.guess -> ctmm.select (AIC/BIC/AICc, pHREML) ->
+    ctmm::occurrence on the population subgrid -> 99.99% tail cutoff ->
+    contour-based footprint.
+
+    Falls back to kernel UD if R or required R packages are not available.
     """
-    warnings.warn(
-        f"[{seq_name}] Full CTMM requires the R `ctmm` package. "
-        "Falling back to native kernel UD approximation.",
-        UserWarning,
-        stacklevel=2,
-    )
-    logger.warning(
-        "CTMM stub invoked for '%s': info_criteria=%s, contour=%s — using kernel UD as approximation.",
-        seq_name, config.get("info_criteria", "AIC"), config.get("contour", 99),
-    )
-    ud, fp, meta = calc_kernel_ud(
-        seq_gdf,
-        seq_name,
-        pop_grid,
-        smooth_param=config.get("smooth_param"),
-        contour=config.get("contour", 99),
-        mult4buff=config.get("mult4buff", 0.3),
-        ud_dir=config.get("ud_dir"),
-        footprint_dir=config.get("footprint_dir"),
-    )
-    meta["method_note"] = "CTMM stub — produced via kernel UD fallback."
-    return ud, fp, meta
+    import json
+    import os
+    import subprocess
+    import tempfile
+
+    info_criteria = config.get("info_criteria", "AIC")
+    contour = config.get("contour", 99)
+    mult4buff = config.get("mult4buff", 0.3)
+    max_timeout = config.get("max_timeout", 600)
+
+    user_rscript = config.get("rscript_path", "")
+    if user_rscript and os.path.isfile(user_rscript):
+        rscript = user_rscript
+    else:
+        rscript = _find_rscript()
+    if rscript is None:
+        warnings.warn(
+            f"[{seq_name}] R/Rscript not found on this system. "
+            "Falling back to kernel UD approximation. Install R and the "
+            "ctmm, move, sf, terra, R.utils, jsonlite packages for real CTMM.",
+            UserWarning,
+            stacklevel=2,
+        )
+        logger.warning("CTMM: Rscript not found — falling back to kernel UD for '%s'.", seq_name)
+        ud, fp, meta = calc_kernel_ud(
+            seq_gdf, seq_name, pop_grid,
+            smooth_param=config.get("smooth_param"),
+            contour=contour, mult4buff=mult4buff,
+            ud_dir=config.get("ud_dir"),
+            footprint_dir=config.get("footprint_dir"),
+        )
+        meta["method_note"] = "CTMM fallback — R not found; produced via kernel UD."
+        return ud, fp, meta
+
+    bridge_r = os.path.join(os.path.dirname(__file__), "ctmm_bridge.R")
+
+    with tempfile.TemporaryDirectory(prefix="ctmm_") as tmpdir:
+        # Write sequence points as CSV
+        csv_path = os.path.join(tmpdir, "seq_points.csv")
+        coords = np.array([(g.x, g.y) for g in seq_gdf.geometry])
+        ts_col = "date" if "date" in seq_gdf.columns else "timestamp"
+        timestamps = seq_gdf[ts_col] if ts_col in seq_gdf.columns else seq_gdf.iloc[:, 0]
+        csv_df = pd.DataFrame({
+            "x_proj": coords[:, 0],
+            "y_proj": coords[:, 1],
+            "timestamp": pd.to_datetime(timestamps).dt.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        csv_df.to_csv(csv_path, index=False)
+
+        # Write pop grid as a temp tif
+        popgrid_path = os.path.join(tmpdir, "popgrid.tif")
+        nrows, ncols = pop_grid["shape"]
+        with rasterio.open(
+            popgrid_path, "w", driver="GTiff",
+            height=nrows, width=ncols, count=1, dtype="uint8",
+            crs=pop_grid["crs"], transform=pop_grid["transform"],
+        ) as dst:
+            dst.write(np.zeros((nrows, ncols), dtype=np.uint8), 1)
+
+        ud_path = os.path.join(tmpdir, f"{seq_name}.tif")
+        fp_path = os.path.join(tmpdir, f"{seq_name}_fp.tif")
+        meta_path = os.path.join(tmpdir, "meta.json")
+
+        cmd = [
+            rscript, "--vanilla", bridge_r,
+            csv_path, popgrid_path, ud_path, fp_path,
+            str(info_criteria), str(contour), str(mult4buff),
+            str(max_timeout), meta_path,
+        ]
+
+        logger.info("CTMM: running Rscript for '%s' (IC=%s, contour=%s)...", seq_name, info_criteria, contour)
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=max_timeout + 60,
+            )
+        except subprocess.TimeoutExpired:
+            warnings.warn(
+                f"[{seq_name}] CTMM Rscript timed out after {max_timeout + 60}s. "
+                "Falling back to kernel UD.",
+                UserWarning, stacklevel=2,
+            )
+            ud, fp, meta = calc_kernel_ud(
+                seq_gdf, seq_name, pop_grid,
+                smooth_param=config.get("smooth_param"),
+                contour=contour, mult4buff=mult4buff,
+                ud_dir=config.get("ud_dir"),
+                footprint_dir=config.get("footprint_dir"),
+            )
+            meta["method_note"] = "CTMM fallback — Rscript timed out; produced via kernel UD."
+            return ud, fp, meta
+
+        # Check for missing R packages
+        if result.returncode == 2 or "MISSING_PACKAGES:" in result.stdout:
+            missing_line = [l for l in result.stdout.splitlines() if "MISSING_PACKAGES:" in l]
+            missing = missing_line[0].split("MISSING_PACKAGES:")[1] if missing_line else "unknown"
+            warnings.warn(
+                f"[{seq_name}] CTMM requires R packages that are not installed: {missing}. "
+                f"Install them in R with: install.packages(c({', '.join(repr(p) for p in missing.split(','))})). "
+                "Falling back to kernel UD.",
+                UserWarning, stacklevel=2,
+            )
+            ud, fp, meta = calc_kernel_ud(
+                seq_gdf, seq_name, pop_grid,
+                smooth_param=config.get("smooth_param"),
+                contour=contour, mult4buff=mult4buff,
+                ud_dir=config.get("ud_dir"),
+                footprint_dir=config.get("footprint_dir"),
+            )
+            meta["method_note"] = f"CTMM fallback — missing R packages ({missing}); produced via kernel UD."
+            return ud, fp, meta
+
+        # Read metadata from R
+        r_meta = {}
+        if os.path.isfile(meta_path):
+            with open(meta_path, "r") as f:
+                r_meta = json.load(f)
+
+        if result.returncode != 0 or r_meta.get("error", "None") != "None":
+            err_msg = r_meta.get("error", result.stderr[:500] if result.stderr else "Unknown R error")
+            warnings.warn(
+                f"[{seq_name}] CTMM R script failed: {err_msg}. "
+                "Falling back to kernel UD.",
+                UserWarning, stacklevel=2,
+            )
+            ud, fp, meta = calc_kernel_ud(
+                seq_gdf, seq_name, pop_grid,
+                smooth_param=config.get("smooth_param"),
+                contour=contour, mult4buff=mult4buff,
+                ud_dir=config.get("ud_dir"),
+                footprint_dir=config.get("footprint_dir"),
+            )
+            meta["method_note"] = f"CTMM fallback — R error ({err_msg}); produced via kernel UD."
+            return ud, fp, meta
+
+        # Read the UD raster produced by R
+        with rasterio.open(ud_path) as src:
+            ud_full = src.read(1).astype(np.float32)
+
+        # Read the footprint raster produced by R
+        with rasterio.open(fp_path) as src:
+            fp_full = src.read(1).astype(np.uint8)
+
+        # Build footprint polygon from the binary raster
+        fp_shapes = list(rio_shapes(fp_full, mask=(fp_full == 1), transform=pop_grid["transform"]))
+        if fp_shapes:
+            polys = [shape(s) for s, v in fp_shapes if v == 1]
+            footprint_polygon = unary_union(polys) if len(polys) > 1 else polys[0]
+        else:
+            footprint_polygon = Polygon()
+
+        # Copy UD/footprint tifs to the output dirs if requested
+        ud_dir = config.get("ud_dir")
+        fp_dir = config.get("footprint_dir")
+        if ud_dir:
+            import shutil
+            os.makedirs(ud_dir, exist_ok=True)
+            shutil.copy2(ud_path, os.path.join(ud_dir, f"{seq_name}.tif"))
+        if fp_dir:
+            import shutil
+            os.makedirs(fp_dir, exist_ok=True)
+            shutil.copy2(fp_path, os.path.join(fp_dir, f"{seq_name}.tif"))
+
+        metadata: dict[str, Any] = {
+            "method": "CTMM",
+            "ctmm_model": r_meta.get("ctmm_model", "unknown"),
+            "info_criteria": info_criteria,
+            "contour": contour,
+            "mult4buff": mult4buff,
+            "n_fixes": len(seq_gdf),
+            "grid_size": int(r_meta.get("grid_size", 0)),
+            "grid_cell_size": float(r_meta.get("grid_cell_size", pop_grid["cell_size"])),
+            "execution_time_s": float(r_meta.get("execution_time_s", 0)),
+        }
+        logger.info(
+            "CTMM completed for '%s': model=%s, %.1fs",
+            seq_name, metadata["ctmm_model"], metadata["execution_time_s"],
+        )
+        return ud_full, footprint_polygon, metadata
 
 
 # ---------------------------------------------------------------------------
-# 6. calc_dbbmm_stub
+# 6. calc_dbbmm (real dBBMM via R subprocess, BBMM fallback)
 # ---------------------------------------------------------------------------
 
-def calc_dbbmm_stub(
+def calc_dbbmm(
     seq_gdf: gpd.GeoDataFrame,
     seq_name: str,
     pop_grid: PopGrid,
     config: dict[str, Any],
 ) -> tuple[np.ndarray, Polygon | MultiPolygon, dict[str, Any]]:
-    """Stub for the dynamic Brownian Bridge Movement Model (dBBMM).
+    """Dynamic Brownian Bridge Movement Model via R's ``move`` package.
 
-    Full dBBMM requires the R ``move`` package — its
-    ``brownian.bridge.dyn`` uses sliding-window change-point detection over
-    motion variance, which has no Python equivalent. Falls back to regular
-    BBMM (with R's MLE variance estimator).
+    Calls ``dbbmm_bridge.R`` via Rscript subprocess, matching CalcDBBMM.R
+    from WMI MAPP3.x: move::brownian.bridge.dyn with margin/window params,
+    burst segmentation at max_lag, 99.99% tail cutoff, contour footprint.
+
+    Falls back to regular BBMM if R or required R packages are not available.
     """
-    warnings.warn(
-        f"[{seq_name}] Full dBBMM requires the R `move` package. "
-        "Falling back to regular BBMM (estimated motion variance).",
-        UserWarning,
-        stacklevel=2,
-    )
-    logger.warning(
-        "dBBMM stub invoked for '%s': margin=%s, window=%s — using regular BBMM (EB).",
-        seq_name, config.get("dbbmm_margin", 3), config.get("dbbmm_window", 11),
-    )
-    ud, fp, meta = calc_bbmm(
-        seq_gdf,
-        seq_name,
-        pop_grid,
-        bm_var=None,                                     # EB mode (estimate variance)
-        location_error=config.get("location_error", 20.0),
-        max_lag_hours=config.get("max_lag", config.get("max_lag_hours", 8.0)),
-        contour=config.get("contour", 99.0),
-        time_step_min=config.get("time_step", 5.0),
-        mult4buff=config.get("mult4buff", 0.3),
-        ud_dir=config.get("ud_dir"),
-        footprint_dir=config.get("footprint_dir"),
-    )
-    meta["method_note"] = "dBBMM stub — produced via regular BBMM (EB) fallback."
-    return ud, fp, meta
+    import json
+    import os
+    import subprocess
+    import tempfile
+
+    location_error = config.get("location_error", 20.0)
+    max_lag = config.get("max_lag", config.get("max_lag_hours", 8.0))
+    contour = config.get("contour", 99)
+    dbbmm_margin = config.get("dbbmm_margin", 11)
+    dbbmm_window = config.get("dbbmm_window", 31)
+    mult4buff = config.get("mult4buff", 0.3)
+    max_timeout = config.get("max_timeout", 600)
+
+    def _fallback(reason: str):
+        warnings.warn(
+            f"[{seq_name}] {reason} Falling back to regular BBMM (EB).",
+            UserWarning, stacklevel=3,
+        )
+        ud, fp, meta = calc_bbmm(
+            seq_gdf, seq_name, pop_grid,
+            bm_var=None,
+            location_error=location_error,
+            max_lag_hours=max_lag,
+            contour=contour,
+            time_step_min=config.get("time_step", 5.0),
+            mult4buff=mult4buff,
+            ud_dir=config.get("ud_dir"),
+            footprint_dir=config.get("footprint_dir"),
+        )
+        meta["method_note"] = f"dBBMM fallback — {reason} Produced via regular BBMM (EB)."
+        return ud, fp, meta
+
+    user_rscript = config.get("rscript_path", "")
+    if user_rscript and os.path.isfile(user_rscript):
+        rscript = user_rscript
+    else:
+        rscript = _find_rscript()
+
+    if rscript is None:
+        logger.warning("dBBMM: Rscript not found — falling back to BBMM for '%s'.", seq_name)
+        return _fallback(
+            "R/Rscript not found. Install R and the move, sf, terra, "
+            "R.utils, jsonlite packages for real dBBMM."
+        )
+
+    bridge_r = os.path.join(os.path.dirname(__file__), "dbbmm_bridge.R")
+
+    with tempfile.TemporaryDirectory(prefix="dbbmm_") as tmpdir:
+        csv_path = os.path.join(tmpdir, "seq_points.csv")
+        coords = np.array([(g.x, g.y) for g in seq_gdf.geometry])
+        ts_col = "date" if "date" in seq_gdf.columns else "timestamp"
+        timestamps = seq_gdf[ts_col] if ts_col in seq_gdf.columns else seq_gdf.iloc[:, 0]
+        csv_df = pd.DataFrame({
+            "x_proj": coords[:, 0],
+            "y_proj": coords[:, 1],
+            "timestamp": pd.to_datetime(timestamps).dt.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        csv_df.to_csv(csv_path, index=False)
+
+        popgrid_path = os.path.join(tmpdir, "popgrid.tif")
+        nrows, ncols = pop_grid["shape"]
+        with rasterio.open(
+            popgrid_path, "w", driver="GTiff",
+            height=nrows, width=ncols, count=1, dtype="uint8",
+            crs=pop_grid["crs"], transform=pop_grid["transform"],
+        ) as dst:
+            dst.write(np.zeros((nrows, ncols), dtype=np.uint8), 1)
+
+        ud_path = os.path.join(tmpdir, f"{seq_name}.tif")
+        fp_path = os.path.join(tmpdir, f"{seq_name}_fp.tif")
+        meta_path = os.path.join(tmpdir, "meta.json")
+
+        cmd = [
+            rscript, "--vanilla", bridge_r,
+            csv_path, popgrid_path, ud_path, fp_path,
+            str(location_error), str(max_lag), str(contour),
+            str(dbbmm_margin), str(dbbmm_window),
+            str(mult4buff), str(max_timeout), meta_path,
+        ]
+
+        logger.info(
+            "dBBMM: running Rscript for '%s' (margin=%s, window=%s)...",
+            seq_name, dbbmm_margin, dbbmm_window,
+        )
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=max_timeout + 60,
+            )
+        except subprocess.TimeoutExpired:
+            return _fallback(f"Rscript timed out after {max_timeout + 60}s.")
+
+        if result.returncode == 2 or "MISSING_PACKAGES:" in result.stdout:
+            missing_line = [l for l in result.stdout.splitlines() if "MISSING_PACKAGES:" in l]
+            missing = missing_line[0].split("MISSING_PACKAGES:")[1] if missing_line else "unknown"
+            return _fallback(
+                f"Missing R packages ({missing}). Install them in R with: "
+                f"install.packages(c({', '.join(repr(p) for p in missing.split(','))}))."
+            )
+
+        r_meta = {}
+        if os.path.isfile(meta_path):
+            with open(meta_path, "r") as f:
+                r_meta = json.load(f)
+
+        if result.returncode != 0 or r_meta.get("error", "None") != "None":
+            err_msg = r_meta.get("error", result.stderr[:500] if result.stderr else "Unknown R error")
+            return _fallback(f"R error ({err_msg}).")
+
+        with rasterio.open(ud_path) as src:
+            ud_full = src.read(1).astype(np.float32)
+
+        with rasterio.open(fp_path) as src:
+            fp_full = src.read(1).astype(np.uint8)
+
+        fp_shapes = list(rio_shapes(fp_full, mask=(fp_full == 1), transform=pop_grid["transform"]))
+        if fp_shapes:
+            polys = [shape(s) for s, v in fp_shapes if v == 1]
+            footprint_polygon = unary_union(polys) if len(polys) > 1 else polys[0]
+        else:
+            footprint_polygon = Polygon()
+
+        ud_dir = config.get("ud_dir")
+        fp_dir = config.get("footprint_dir")
+        if ud_dir:
+            import shutil
+            os.makedirs(ud_dir, exist_ok=True)
+            shutil.copy2(ud_path, os.path.join(ud_dir, f"{seq_name}.tif"))
+        if fp_dir:
+            import shutil
+            os.makedirs(fp_dir, exist_ok=True)
+            shutil.copy2(fp_path, os.path.join(fp_dir, f"{seq_name}.tif"))
+
+        metadata: dict[str, Any] = {
+            "method": "dBBMM",
+            "dbb_mean_motion_variance": float(r_meta.get("dbb_mean_motion_variance", 0)),
+            "location_error": location_error,
+            "max_lag_hours": max_lag,
+            "dbbmm_margin": dbbmm_margin,
+            "dbbmm_window": dbbmm_window,
+            "contour": contour,
+            "mult4buff": mult4buff,
+            "n_fixes": len(seq_gdf),
+            "grid_size": int(r_meta.get("grid_size", 0)),
+            "grid_cell_size": float(r_meta.get("grid_cell_size", pop_grid["cell_size"])),
+            "execution_time_s": float(r_meta.get("execution_time_s", 0)),
+        }
+        logger.info(
+            "dBBMM completed for '%s': mean_motion_var=%.2f, %.1fs",
+            seq_name, metadata["dbb_mean_motion_variance"], metadata["execution_time_s"],
+        )
+        return ud_full, footprint_polygon, metadata
 
 
 # ---------------------------------------------------------------------------
@@ -1115,9 +1481,9 @@ def run_model(
         if method_key == "BBMM":
             ud_raster, footprint_polygon, method_metadata = calc_bbmm_stub(seq_gdf, seq_name, pop_grid, config)
         elif method_key == "CTMM":
-            ud_raster, footprint_polygon, method_metadata = calc_ctmm_stub(seq_gdf, seq_name, pop_grid, config)
+            ud_raster, footprint_polygon, method_metadata = calc_ctmm(seq_gdf, seq_name, pop_grid, config)
         elif method_key == "DBBMM":
-            ud_raster, footprint_polygon, method_metadata = calc_dbbmm_stub(seq_gdf, seq_name, pop_grid, config)
+            ud_raster, footprint_polygon, method_metadata = calc_dbbmm(seq_gdf, seq_name, pop_grid, config)
         elif method_key == "LINEBUFF":
             ud_raster, footprint_polygon, method_metadata = calc_line_buffer(
                 seq_gdf,

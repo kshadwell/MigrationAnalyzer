@@ -53,10 +53,10 @@ The whole thing runs in a browser tab on your own machine. No cloud, no upload, 
 | When | What |
 |----|----|
 | \~2018–present | **Migration Mapper** (R/Shiny) released by the Wyoming Migration Initiative / Western Corridor Mapping Team. Six apps: data cleaning → sequencing → sequence export → UD modeling → population merging → mapping. Reference codebase is at `WesternCorridorMappingTeam-main/` (when present). |
-| Dec 2025 | `MigrationMapper_FromAppDownload (2).R` is written — a small R script that takes CSV exports from CPW's *Wildlife Tracker* app, applies DOP/satellite quality filters, validates required columns, and writes shapefiles in the exact format Migration Mapper expects. This is the bridge from CPW's data system into the R workflow and is the direct ancestor of the cleaning logic in `data_ingestion.py`. |
+| Dec 2025 | A legacy R prep script (`MigrationMapper_FromAppDownload`) is written — takes CSV exports from CPW's *Wildlife Tracker* app, applies DOP/satellite quality filters, validates required columns, and writes shapefiles in the exact format Migration Mapper expects. This is the bridge from CPW's data system into the R workflow and is the direct ancestor of the cleaning logic in `data_ingestion.py`. (Script no longer in repo.) |
 | Early 2026 | Python/Dash rewrite begins. Goal: single app, automated sequencing, environmental sampling, deployable without an R install. |
 | \~Mar 2026 | MigrationAnalyzer environmental data assembled — USGS 1/3-arc-second DEM tiles covering Colorado, TIGER Census road shapefiles, and a pickled SNODAS daily snow cube (`snodas_colorado.pkl`, \~3.7 GB). |
-| 2026-05-15 | Initial setup on this machine. Python path corrected in batch files; `map_functions.js.rename_me` renamed so Dash serves it. See [Setup Log](#6-setup-log--pending-items). |
+| 2026-05-15 | Initial setup on this machine. Python path corrected in batch files; `map_functions.js` rename issue resolved so Dash serves it. See [Setup Log](#6-setup-log--pending-items). |
 | 2026-05-16 | Comprehensive reference file created (originally named `INFORMATION_K.md`; renamed to `INFORMATION.md` on 2026-07-08). It absorbed the earlier `INFORMATION.md`, which was merged in + deleted 2026-06-09. |
 
 **Lineage of the cleaning code.** The order of operations in `data_ingestion.process_data()` (column auto-remap → DOP filter → satellite filter → bad-coord filter → validation → burst → movement params → NSD → problem points → mortality) mirrors the R script's order exactly. The Python module is essentially a faithful port that adds biological-year handling and three NSD groupings (calendar year, overall, bio year) that the R version computed via separate scripts in `wmiScripts/`.
@@ -112,8 +112,6 @@ Colorado Migration Mapping/            <- THIS is the app's root
 ├── requirements.txt                   <- pip dependencies
 ├── Setup.bat / Start App.bat          <- Windows convenience launchers
 ├── .gitignore                         <- ignores __pycache__, session_data, env data, *.zip
-├── MigrationMapper_FromAppDownload (2).R   <- legacy R prep script (Dec 2025)
-├── .claude/settings.local.json        <- Claude Code permission allow-list for this folder
 ├── app/
 │   ├── main.py                        <- Dash UI + every callback (~2660 lines)
 │   ├── assets/                        <- auto-served at /assets/ by Dash
@@ -124,7 +122,7 @@ Colorado Migration Mapping/            <- THIS is the app's root
 │   │   ├── __init__.py                <- package marker (empty)
 │   │   ├── data_ingestion.py          <- load + clean + compute movement params + NSD
 │   │   ├── sequencing.py              <- auto-detect migrations from NSD shape
-│   │   ├── modeling.py                <- Kernel UD, Line Buffer, BBMM/CTMM/dBBMM stubs
+│   │   ├── modeling.py                <- Kernel UD, Line Buffer, BBMM, CTMM (via R), dBBMM (via R)
 │   │   ├── population_outputs.py      <- merge individual UDs into population products
 │   │   ├── raster_sampler.py          <- sample DEM + SNODAS at every GPS fix
 │   │   ├── road_crossings.py          <- detect road/highway crossings using TIGER shapefile
@@ -134,7 +132,6 @@ Colorado Migration Mapping/            <- THIS is the app's root
 │           ├── processed_data.parquet
 │           ├── road_crossings.json
 │           └── animal_notes.json
-└── (assets/dashExtensions_default.js.rename_me)   <- stub file, see Pending Items
 ```
 
 **External data (not part of the project folder).** The environmental data lives outside this directory:
@@ -237,22 +234,76 @@ Running log of setup actions and decisions on this machine (Windows 11). New dat
 
 ### Pending / To Revisit
 
-- **Possibly delete `assets/dashExtensions_default.js.rename_me`** (top-level `assets/`, 162 bytes). Auto-generated stub (`function0: f => f`) from a `dash_extensions.javascript.assign()` call. NOT currently served by Dash (Dash serves `app/assets/`, not the top-level `assets/`), so it has no effect today. Risk if renamed/served: it overwrites `window.dashExtensions` *without* a `|| {}` guard, which would clobber the real functions in `app/assets/map_functions.js`. So definitely don't rename it. Leaving it for now in case some other tooling expects it. Revisit when confident nothing references it.
-
 #### Active to-do list (added 2026-05-20)
 
 These are the in-flight tasks mirrored from the session task list. 
 
-- **Tab 2: surface excluded-point counts in the sequence card.** Small status line — e.g. *"Excluded from sequencing: 23 problem, 4 mortality."* Keyed per selected animal.
-- **Decide mortality truncation behavior vs. Migration Mapper.** Confirm whether the R Migration Mapper just drops mortality-flagged points or also truncates the animal's timeline at the first confirmed mortality so post-mortality fixes never enter sequencing/modeling. Implement to match.
-- **Diagnose BBMM output divergence vs. canonical reference.** See `MODEL_COMPARISON_NOTES.md §3.3` for the two suspected causes: (1) `scipy.optimize.minimize_scalar` vs. R `optim` for the Horne 2007 MLE, and (2) our `T_total` divisor in `_bbmm_bridge_accumulate` sums only kept segments while R's `sum(time.lag)` sums all pairs including the ones excluded by `max.lag`. Compare per-season `.tif` outputs against the canonical `A37_BBMM_*` set at `K:\MigrationAnalysis\A37\2026.zip` → `OutputData/Jaffe_IndStackedOutput_040226/`. Visual divergence first confirmed 2026-05-18 after wiring `calc_season_banded_outputs` (this item now subsumes that earlier "BBMM per-season UD `.tif` outputs visually differ" Pending note). Additional differences to check beyond the two suspected causes:
+- **Diagnose BBMM output divergence vs. canonical reference.** Two suspected causes: (1) `scipy.optimize.minimize_scalar` vs. R `optim` for the Horne 2007 MLE, and (2) our `T_total` divisor in `_bbmm_bridge_accumulate` sums only kept segments while R's `sum(time.lag)` sums all pairs including the ones excluded by `max.lag`. Compare per-season `.tif` outputs against the canonical `A37_BBMM_*` set at `K:\MigrationAnalysis\A37\2026.zip` → `OutputData/Jaffe_IndStackedOutput_040226/`. Visual divergence first confirmed 2026-05-18 after wiring `calc_season_banded_outputs` (this item now subsumes that earlier "BBMM per-season UD `.tif` outputs visually differ" Pending note). Additional differences to check beyond the two suspected causes:
   - **BBMM motion-variance estimator path**: our Horne (2007) MLE via `scipy.optimize.minimize_scalar` vs. R `BBMM::brownian.motion.variance` — different numerical optimisers, possibly different residual parametrisation.
   - **Bandwidth / grid alignment**: our subgrid is built per-sequence from the seq bbox + `mult4buff`; the R workflow may carry global grid cells more strictly.
   - **`apply_tail_cutoff` placement**: we cut the 99.99% tail on each individual UD *before* averaging. R may apply the cutoff after the population merge.
   - **Population merging step**: our `calc_season_banded_outputs` normalises each individual to sum=1 then averages. R's `CalcPopUse` may do a weighted sum or volume-rank-based aggregation.
   - **Cell-size and CRS**: confirm both pipelines use the same projected CRS and 500 m cell size end-to-end (no implicit reprojection differences).
-- **Implement CTMM and dBBMM (or wire an rpy2/Rscript bridge).** Both are stubs today (`calc_ctmm_stub` falls back to Kernel UD; `calc_dbbmm_stub` falls back to regular BBMM EB). See `MODEL_COMPARISON_NOTES.md §3.4` and `§3.5` for the R-side logic that needs to be reproduced. Three options laid out in `§5`: native Python port (large), rpy2 bridge, Rscript subprocess.
+- **Test CTMM and dBBMM end-to-end.** Implementation done (2026-07-09) but not yet verified with real data — need to confirm R is found, packages load, and output matches expectations.
 
+
+### 2026-07-09 — Real CTMM implementation via R subprocess
+
+Replaced `calc_ctmm_stub` with a full `calc_ctmm` function (`modeling.py`) that calls R's `ctmm` package via an Rscript subprocess. Matches CalcCTMM.R from WMI MAPP3.x: `ctmm.guess` → `ctmm.select` (AIC/BIC/AICc, pHREML) → `ctmm::occurrence` on the population subgrid → 99.99% tail cutoff → contour-based footprint.
+
+**Architecture:** Python writes sequence points as a temp CSV + the population grid as a temp GeoTIFF, calls `Rscript ctmm_bridge.R` with 9 arguments (input CSV, popgrid TIF, UD output TIF, footprint output TIF, info criteria, contour, mult4buff, max timeout, metadata JSON path), then reads back the UD/footprint rasters and metadata JSON. `_find_rscript()` checks PATH then common Windows R install locations.
+
+**R bridge script (`app/modules/ctmm_bridge.R`):** checks for required packages (`ctmm`, `move`, `sf`, `terra`, `R.utils`, `jsonlite`) — exits with code 2 and `MISSING_PACKAGES:...` if any are missing. Builds telemetry via `move::move` → `ctmm::as.telemetry`, runs model selection with timeout, computes occurrence distribution on the cropped pop grid, applies 99.99% tail cutoff, writes UD + footprint TIFs + metadata JSON.
+
+**Graceful fallback:** if R is not installed, required R packages are missing, Rscript times out, or the R script errors, `calc_ctmm` falls back to `calc_kernel_ud` with a warning explaining what to install. The warning is also surfaced in each result row's metadata (`method_note`).
+
+**UI (Tab 3, `main.py`):** when CTMM is selected in the model dropdown, an info alert now reads: *"To run CTMM, ensure R is installed, along with the packages: ctmm, move, sf, terra, R.utils, jsonlite. If R or any package is missing, the model will fall back to Kernel UD."*
+
+**Files touched:** `app/modules/modeling.py` (`_find_rscript`, `calc_ctmm` replacing `calc_ctmm_stub`, `run_model` dispatcher updated), `app/modules/ctmm_bridge.R` (new), `app/main.py` (CTMM param panel info alert, stale comment updated).
+
+### 2026-07-09 — Real dBBMM implementation via R subprocess
+
+Replaced `calc_dbbmm_stub` with a full `calc_dbbmm` function (`modeling.py`) that calls R's `move::brownian.bridge.dyn` via Rscript subprocess. Matches CalcDBBMM.R from WMI MAPP3.x: `move::move` → `move::burst` (segmenting at max_lag gaps) → `brownian.bridge.dyn` with margin/window params → 99.99% tail cutoff → contour footprint.
+
+**Architecture:** Same Rscript bridge pattern as CTMM. Python writes sequence points as temp CSV + pop grid as temp TIF, calls `Rscript dbbmm_bridge.R` with 12 arguments (input CSV, popgrid TIF, UD output TIF, footprint output TIF, location error, max lag, contour, margin, window, mult4buff, max timeout, metadata JSON path), reads back results. Required R packages: `move`, `sf`, `terra`, `R.utils`, `jsonlite`.
+
+**R bridge script (`app/modules/dbbmm_bridge.R`):** Checks for required packages (exits code 2 if missing). Implements the >1/3 max-lag bail, <4 point bail, burst segmentation by connectivity, dynamic BB computation with timeout. Multi-layer result collapsed via `sum(bb)` (matching CalcDBBMM.R). Reports `dbb_mean_motion_variance` in metadata.
+
+**Graceful fallback:** If R is not installed, packages are missing, Rscript times out, or R errors, falls back to regular BBMM (EB) with a warning.
+
+**UI (Tab 3):** Both CTMM and dBBMM panels now have an info alert listing required R packages, plus an optional "Rscript Path" text input with helper text telling users to run `R.home("bin")` in RStudio to find their R install.
+
+**Rscript auto-detection (`_find_rscript`):** Expanded to check `RSCRIPT_PATH` env var, `R_HOME` env var, system PATH, Windows registry (`HKLM/HKCU SOFTWARE\R-core\R`), `AppData\Local\Programs\R`, and `Program Files\R`. Among candidates, prefers the installation whose library contains the required packages.
+
+**Files touched:** `app/modules/modeling.py` (`calc_dbbmm` replacing `calc_dbbmm_stub`, `_find_rscript` expanded), `app/modules/dbbmm_bridge.R` (new), `app/main.py` (dBBMM param panel info alert + Rscript path input, `_apply_model_ui_params` wiring, imports updated).
+
+### 2026-07-09 — Excluded-point counts in Tab 2 sequence card
+
+Added a status line to the `seq-confidence` div in `render_seq_panels` (`main.py`). When the selected animal-year has problem or mortality-flagged points, the sequence card now appends e.g. *"Excluded from sequencing: 23 problem, 4 mortality."* Counts come from `animal_df` (already filtered to the selected animal-year). Nothing shown if no flags.
+
+### 2026-07-09 — Bundled embeddable Python 3.13 for portable deployment
+
+Replaced the hardcoded `C:\Program Files\Python313\python.exe` path in `Setup.bat` and `Start App.bat` with a relative path to a bundled embeddable Python (`python-3.13/python.exe`, ~21 MB). Both batch files now use `%~dp0python-3.13\python.exe`. The bare embeddable Python (no packages) is committed to the repo; `Setup.bat` bootstraps pip on first run (downloads `get-pip.py`), then installs all `requirements.txt` dependencies into `python-3.13/Lib/site-packages/` via `--target`. Installed packages (`Lib/`, `Scripts/`) are gitignored — each user runs Setup.bat once after cloning. The inner `.gitignore` has a `!python-3.13/python313.zip` exception so the stdlib archive isn't blocked by the `*.zip` rule. `python313._pth` has `import site` uncommented so pip and installed packages are discoverable.
+
+### 2026-07-09 — Population output min_area_drop / min_area_fill ignored user value of 0
+
+**Bug:** entering `0` for min_area_drop or min_area_fill in Tab 4 silently used the defaults (10000 / 5000). Same `float(x or default)` pattern fixed in Tab 1 on 2026-06-25 — `0` is falsy in Python, so `0 or 10000` evaluates to `10000`.
+
+**Fix (`main.py`, `generate_pop_outputs`):** replaced `float(min_drop or 10000)` / `float(min_fill or 5000)` with `float(min_drop) if min_drop not in (None, "") else 10000.0` (and same for min_fill). Blank → default; explicit `0` → `0.0`.
+
+### 2026-07-09 — Model processing log no longer shows irrelevant parameters from other model types
+
+**Bug:** running a BBMM model logged dBBMM parameters (`dbbmm_margin`, `dbbmm_window`) and CTMM parameters (`info_criteria`) in the processing log and version manifest, because `get_model_config` (`modeling.py`) returns a single config dict with defaults for every model type, and the logging dumped all keys.
+
+**Fix (`main.py`, `run_modeling`):** added a `_MODEL_KEYS` mapping that defines which config keys are relevant to each model type (shared keys like `cell_size`/`contour` plus model-specific ones). Both the version manifest and the processing log now filter `param_fields` to only the relevant keys.
+
+### 2026-07-09 — Mortality truncation behavior confirmed matching Migration Mapper
+
+Checked `Check4Morts.R` (App 1) and `app3_calcSequences.R` (App 3) in the R Migration Mapper source. **Both apps flag mortality points (set `mortality=1`) without truncating the animal's timeline.** App 3 drops `problem==1` and `mortality==1` points at sequence extraction — same as our `extract_sequences`. No code change needed; removed from the pending list.
+
+### 2026-07-09 — Git repo initialized and pushed to Gitea
+
+Initialized git in `MigrationAnalyzer/`, added `.gitignore` for large data files (`elevation/`, `snodas_colorado.pkl`, `all_roads_merged.gpkg`), and pushed to `https://dnrapp110.naturenet.state.co.us/git/ShinyDev/MigrationAnalyzer.git`. Remote URL includes `ShinyDev@` username to force terminal password prompt (avoids GUI credential helper hanging). Created `deploy.sh` for push convenience.
 
 ### 2026-07-07 — Road-crossing detection under-reported: local roads (S1400) were excluded
 
@@ -425,7 +476,7 @@ Post-demo dependency hardening. Two related decisions:
 
 - **Considered an async (Quart/ASGI) backend; rejected.** There is no separate Quart or FastAPI backend in the repo — the app is Dash on its built-in Flask (WSGI) server (`server = app.server`), and the main app being built is itself Dash-on-Flask, so Flask is already the congruent stack. Async was evaluated for "could help users" but doesn't fit this workload: the slow paths (`modeling.py` Kernel UD/BBMM, `population_outputs.py`, `raster_sampler.py`, `data_ingestion.py` cleaning 100k+ fixes) are **CPU-bound** — async only helps I/O-bound concurrency, and the app is a single-user desktop deploy (`Start App.bat` → `127.0.0.1:8050` → opens browser). Async would add risk across the ~7,500-line `main.py` for no real gain. If UI-freeze-during-modeling becomes the complaint, the right fix is **Dash background callbacks** (DiskcacheManager local / CeleryManager multi-user), not async. If ever hosted multi-user, scale with WSGI workers first — note `_DF_CACHE` is a per-process in-memory dict and would need a shared cache (Redis) before running multiple workers.
 
-- **Pinned `requirements.txt` to the exact demoed versions.** The file previously used loose `>=` lower bounds, so a fresh `Setup.bat` on a new machine would pull whatever is newest that day (e.g. a future Dash 5) and could break an app whose code never changed. The installed/demoed env was already ahead of the old floors (Dash 4.1.0, dash-bootstrap-components 2.0.4, dash-leaflet 1.1.3, plotly 6.7.0, pandas 3.0.3, numpy 2.4.5, etc.), so pinning to `==` those versions freezes the known-good state. `pip install -r requirements.txt --dry-run` resolved with no conflicts; `main.py` parses clean. Old loose bounds preserved as `requirements.prev.txt`. To bump later: change one pin → reinstall → run `Start App.bat` → click through the tabs → keep or revert that single line.
+- **Pinned `requirements.txt` to the exact demoed versions.** The file previously used loose `>=` lower bounds, so a fresh `Setup.bat` on a new machine would pull whatever is newest that day (e.g. a future Dash 5) and could break an app whose code never changed. The installed/demoed env was already ahead of the old floors (Dash 4.1.0, dash-bootstrap-components 2.0.4, dash-leaflet 1.1.3, plotly 6.7.0, pandas 3.0.3, numpy 2.4.5, etc.), so pinning to `==` those versions freezes the known-good state. `pip install -r requirements.txt --dry-run` resolved with no conflicts; `main.py` parses clean. To bump later: change one pin → reinstall → run `Start App.bat` → click through the tabs → keep or revert that single line.
 
 ### 2026-06-16 — Tab 5: stack multiple output rasters + vector overlays on the map
 
@@ -442,7 +493,7 @@ Reworked Tab 5's overlay UI from single-select to multi-overlay (`main.py`).
 
 ### 2026-06-16 — Tab 3 BBMM: conditional BMVar by fix-rate threshold (Chloe-style)
 
-Added a per-sequence conditional FMV/EB switch on Tab 3, adapted from Chloe's CB_MAPP workflow (see `DIFFERENCES.md` §"Variance approach"). Rationale: Chloe forces a fixed motion variance (FMV) for coarse-fix data and estimates it (EB) for fine-fix data; we now expose the same idea in the UI.
+Added a per-sequence conditional FMV/EB switch on Tab 3, adapted from Chloe's CB_MAPP workflow. Rationale: Chloe forces a fixed motion variance (FMV) for coarse-fix data and estimates it (EB) for fine-fix data; we now expose the same idea in the UI.
 
 - **UI** (`main.py`, `render_model_params`, BBMM panel): new checkbox `bbmm_bmvar_conditional` ("Conditional BMVar by fix-rate threshold") + numeric `bbmm_bmvar_threshold` (default 5, units "hrs between points").
 - **Behaviour:** when the box is checked AND a BMVar number is entered, each sequence whose **median** gap between fixes is **> threshold** uses the entered BMVar (FMV); sequences with finer fixes (≤ threshold) estimate variance (EB). Unchecked = unchanged behaviour. No effect if BMVar is left blank.
@@ -451,7 +502,7 @@ Added a per-sequence conditional FMV/EB switch on Tab 3, adapted from Chloe's CB
 
 ### 2026-06-16 — BBMM extras: winter/summer range UDs + per-individual UDs + FMV note + expanded herd metadata (km & annual collars)
 
-Driven by the cross-script comparison in `DIFFERENCES.md` (WMI MAPP vs Jaffe vs Chloe). Five related changes.
+Driven by the cross-script comparison of WMI MAPP vs Jaffe vs Chloe workflows. Five related changes.
 
 - **Verified already present (no change needed):** (1) the **99.99% tail cutoff before normalization** runs in both `calc_bbmm` and `calc_kernel_ud` (`_apply_tail_cutoff(..., 0.9999)`); (2) the **population mean-UD density surface** is written as `_meanUD.tif` by `calc_season_banded_outputs`.
 
@@ -609,7 +660,7 @@ Two related modeling-output features.
 
 Focused pass on getting the **Brownian Bridge (BBMM)** model working, driven by the WMI reference (`MAPP3.x_code_workflow/code2run.R` + `functions/CalcBBMM.R`). Our `calc_bbmm` was already a faithful port (FMV custom bridge + EB Horne-2007 MLE, the >1/3-max-lag bail, <4-point bail, 99.99% tail cut, contour footprint), but two things were broken.
 
-- **(1) Time-lag units bug — the big correctness fix (`app/modules/modeling.py`).** `calc_bbmm` computed step durations with `work[date_col].astype("int64")` assuming **nanoseconds**, but pandas 2.x can store datetimes at **microsecond** resolution, so the lags came out **1000× too small** (a 4-hour gap read as 0.24 min). That collapsed the `lag·α(1-α)·BMvar` term so the bridge was **dominated by location error and effectively ignored BMvar** — symptom: BMvar values of 50, 4000, and 195600 all produced byte-identical, over-tight UDs. This very likely explains the long-standing "BBMM differs from the canonical reference" divergence noted in earlier entries / `MODEL_COMPARISON_NOTES.md`. **Fix:** compute lags resolution-independently via `(work[date_col] - work[date_col].iloc[0]).dt.total_seconds()`. After the fix the EB estimate corrected from a bogus **195600 → 195.6** (exactly the 1000×), and FMV now widens the UD monotonically with BMvar (50→7 km², 2000→44 km², 20000→148 km²) as it should.
+- **(1) Time-lag units bug — the big correctness fix (`app/modules/modeling.py`).** `calc_bbmm` computed step durations with `work[date_col].astype("int64")` assuming **nanoseconds**, but pandas 2.x can store datetimes at **microsecond** resolution, so the lags came out **1000× too small** (a 4-hour gap read as 0.24 min). That collapsed the `lag·α(1-α)·BMvar` term so the bridge was **dominated by location error and effectively ignored BMvar** — symptom: BMvar values of 50, 4000, and 195600 all produced byte-identical, over-tight UDs. This very likely explains the long-standing "BBMM differs from the canonical reference" divergence noted in earlier entries. **Fix:** compute lags resolution-independently via `(work[date_col] - work[date_col].iloc[0]).dt.total_seconds()`. After the fix the EB estimate corrected from a bogus **195600 → 195.6** (exactly the 1000×), and FMV now widens the UD monotonically with BMvar (50→7 km², 2000→44 km², 20000→148 km²) as it should.
 - **(2) Model-panel parameters were collected but never used (`app/main.py`).** `run_modeling` built its config purely from `get_model_config()` defaults — it never read the `bbmm-*` inputs, so changing BMVar / Location Error / Max Lag / Time Step / Contour did nothing. Added **`_apply_model_ui_params(config, model, params)`** which overrides the defaults from the panel values (blank BMVar correctly keeps the auto/estimated value = R's `BMVar=NULL`; only non-blank values override).
 - **(3) Pattern-matching ids for the param panel.** First wiring used plain `State("kernel-bw", …)` etc. — but only the selected model's inputs exist in the layout at any time, and a string `State` on an absent id raises *"A nonexistent object was used in a State"* (suppress_callback_exceptions doesn't cover this). **Fix:** every model-param input now uses a pattern-matching id `{"type": "model-param", "key": "<name>"}`, and `run_modeling` reads them with `State({"type":"model-param","key": ALL}, "value")` + `… "id")`, zipping them into a `{key: value}` dict. `ALL` matches only the inputs currently present, so it never errors regardless of selected model.
 - **(4) Added the missing BBMM `mult4buff` parameter** to the panel (R default 0.3 — the per-sequence subgrid buffer), reordered the BBMM panel to match the R argument order, and clarified the BMVar/FMV help text.
@@ -1208,7 +1259,6 @@ Before resuming the Tab 1 lazy-loading work, scanned for anything that would pre
 - Global identity configured for this machine.
 - `git init` run at `Colorado Migration Mapping/`. Default branch = `main`. `core.autocrlf=true` (Windows convention) so LF↔CRLF conversion happens transparently.
 - **Repo-root scope rationale (user-confirmed).** The repo root is *this* app folder, deliberately **not** the higher-level `MigrationFiles/` / `MigrationAnalyzer/` folders — those hold the ~66 MB merged roads shapefile and the ~3.9 GB SNODAS pickle, which don't belong in plain git. The existing `.gitignore` already covers `session_data/`, `__pycache__/`, `*.pyc`, and `*.zip`, so the initial commit was clean. (Install options considered before settling on Git for Windows: `winget install --id Git.Git -e --source winget`, the git-scm.com installer, or PortableGit.)
-- Added `.claude/settings.local.json` to `.gitignore` (machine-specific Claude Code permission allowlist; standard practice to exclude `*.local.json`).
 - First commit: `848ced2 Initial commit: Colorado Migration Corridor Mapper` — 20 files, 8822 insertions. Working tree clean.
 - No remote configured; local-only by design. Adding a GitHub remote later just needs `git remote add origin <url>` + `git push -u origin main`.
 
@@ -1280,9 +1330,9 @@ Every module is in `app/modules/` and is plain Python (no Cython, no compiled ex
 
 | Function | Plain-English | R-script ancestor |
 |----|----|----|
-| `detect_and_remap_columns()` | If the CSV looks like a CPW Wildlife Tracker export (has `animalIdLocal`, `mtReadable`, etc.), rename its columns to the MigrationMapper names automatically. Matches ≥ 3 known columns to trigger. | `MigrationMapper_FromAppDownload (2).R` `transmute()` block |
-| `quality_filter()` | Drop fixes with DOP \> 10, \< 6 satellites, positive longitude (Germany/test points), or NA coords. Returns a log of what got removed. | Same R script, `filter()` block |
-| `validate_for_migration_mapper()` | After filtering, double-check the data is sane: required columns exist, no NAs, all longitudes negative, lat/lon in reasonable range, timestamp format parseable, ≥ 100 records. Returns True/False + log. | Same R script, validation block |
+| `detect_and_remap_columns()` | If the CSV looks like a CPW Wildlife Tracker export (has `animalIdLocal`, `mtReadable`, etc.), rename its columns to the MigrationMapper names automatically. Matches ≥ 3 known columns to trigger. | Legacy R prep script `transmute()` block |
+| `quality_filter()` | Drop fixes with DOP \> 10, \< 6 satellites, positive longitude (Germany/test points), or NA coords. Returns a log of what got removed. | Legacy R prep script `filter()` block |
+| `validate_for_migration_mapper()` | After filtering, double-check the data is sane: required columns exist, no NAs, all longitudes negative, lat/lon in reasonable range, timestamp format parseable, ≥ 100 records. Returns True/False + log. | Legacy R prep script validation block |
 | `load_data()` | Read CSV/shp into a GeoDataFrame, rename to standard names (`animal_id`, `timestamp`, `lon`, `lat`, `x`, `y`). If UTM columns aren't present, auto-detect the UTM zone from the median longitude and project. | wmiScripts equivalent: `importShapefile()` |
 | `calc_burst()` | Assign integer burst IDs: a new burst begins when the animal changes or `dt > tmax_seconds`. Vectorised with numpy `cumsum` of a boolean. | `wmiScripts/CalcBurst.R` |
 | `calc_movement_params()` | Per-step distance (m), dt (s), speed (m/s), absolute bearing (degrees, N=0 clockwise), relative/turning angle (−180…180), fix rate (hours). NaN at burst boundaries. | `wmiScripts/CalcMovParams.R` |
@@ -1683,7 +1733,6 @@ Every parameter exposed in the UI maps to a key the modules accept. Defaults mat
 - **`scikit-learn` is in requirements.txt but unused.** Reserved for future modeling work. Safe to leave; safe to remove.
 - **Single-process Dash dev server.** `debug=True` is convenient for development but is single-threaded. For more than a couple of users, deploy behind gunicorn or waitress.
 - **`flag` column convention.** `extract_sequences` drops rows where `flag` is `'problem'` or `'mortality'`. But `process_data()` currently writes `problem` and `mortality_flag` as separate integer columns, not a single `flag` string. So in practice the filter is a no-op unless the caller derives a `flag` column first. Worth either (a) constructing `flag` in `process_data` or (b) changing `extract_sequences` to read the booleans directly.
-- **`assets/dashExtensions_default.js.rename_me`** at the project root (NOT under `app/`) is a stub left from `dash_extensions.javascript.assign()`. It's not served, but if anyone ever renames it to `.js` and adds an `app/` symlink, it would clobber the real `map_functions.js` because of its `Object.assign({}, ...)` without an `|| {}` guard. Don't rename it.
 - **`storage_type='local'` notes** live in the browser's localStorage. Switching browsers or clearing site data loses them. The disk-based `animal_notes.json` per project is the authoritative copy.
 
 ------------------------------------------------------------------------

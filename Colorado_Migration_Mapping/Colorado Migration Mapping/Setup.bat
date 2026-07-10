@@ -6,12 +6,13 @@ echo  Colorado Migration Corridor Mapper - Setup
 echo ============================================
 echo.
 
-:: Use specific Python path for machines without admin install
-set PYTHON=C:\Program Files\Python313\python.exe
+:: Use the bundled embeddable Python (ships with the repo)
+set PYTHON=%~dp0python-3.13\python.exe
 
 "%PYTHON%" --version >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: Python not found at %PYTHON%
+    echo ERROR: Bundled Python not found at %PYTHON%
+    echo Make sure the python-3.13 folder exists next to this file.
     pause
     exit /b 1
 )
@@ -20,19 +21,32 @@ echo Python found:
 "%PYTHON%" --version
 echo.
 
-:: Install dependencies
+:: Bootstrap pip if not already installed
+"%PYTHON%" -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo pip not found — installing it now...
+    echo.
+    curl -sL -o "%~dp0python-3.13\get-pip.py" https://bootstrap.pypa.io/get-pip.py
+    if errorlevel 1 (
+        echo ERROR: Could not download get-pip.py. Check your internet connection.
+        pause
+        exit /b 1
+    )
+    "%PYTHON%" "%~dp0python-3.13\get-pip.py" --no-warn-script-location
+    del "%~dp0python-3.13\get-pip.py"
+    echo.
+)
+
+:: Install dependencies into the bundled Python's own site-packages
 echo Installing required packages...
 echo.
-"%PYTHON%" -m pip install -r requirements.txt
+"%PYTHON%" -m pip install --target "%~dp0python-3.13\Lib\site-packages" -r requirements.txt --no-warn-script-location
 echo.
 
 if errorlevel 1 (
     echo.
     echo WARNING: Some packages may have failed to install.
-    echo If you see errors above for rasterio, geopandas, or fiona,
-    echo try installing them from conda-forge instead:
-    echo.
-    echo   conda install -c conda-forge rasterio geopandas fiona
+    echo Check the output above for errors.
     echo.
 ) else (
     echo.
@@ -41,7 +55,6 @@ if errorlevel 1 (
     echo ============================================
     echo.
     echo To start the app, double-click "Start App.bat"
-    echo or run: python app\main.py
     echo.
 )
 
