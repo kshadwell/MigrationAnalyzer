@@ -65,9 +65,7 @@ The whole thing runs in a browser tab on your own machine. No cloud, no upload, 
 
 ## 3. Quick start — install & run
 
-### Windows (specific to K's computer)
-
-Double-click **`Setup.bat`** the first time (installs pip dependencies into the Python 3.13 at `C:\Program Files\Python313\`). Then double-click **`Start App.bat`** — it launches the app and opens `http://127.0.0.1:8050/` in your browser.
+Once you have cloned the repository and run Setup.bat, you just double-click Start App.bat whenever you want to open the app. More info about accessing Migration Analyzer from Bryan & K. 
 
 ### From a terminal (any OS)
 
@@ -143,7 +141,7 @@ MigrationFiles/MigrationAnalyzer/
 └── all_roads_merged.{shp,dbf,shx,prj,cpg}  <- TIGER Census roads for CO (~136 MB)
 ```
 
-The Python modules expect to find these under a folder called `environment_data/` *next to* `app/` (so: `Colorado Migration Mapping/environment_data/elevation/…`). On this machine, that folder doesn't exist yet — see Pending Items.
+The Python modules expect to find these under a folder called `environment_data/` *next to* `app/` (so: `Colorado Migration Mapping/environment_data/elevation/…`). 
 
 ------------------------------------------------------------------------
 
@@ -1741,14 +1739,14 @@ Every parameter exposed in the UI maps to a key the modules accept. Defaults mat
 
 Roughly in order of effort vs. payoff for a "more capable" version of Migration Mapper:
 
-1.  ~~**Wire `.wld` ingest into the UI.**~~ ✅ Done 2026-05-16. Tab 1 now has the optional uploader and Tab 2's popups surface merged variables. Next-level work in this direction: per-animal time-series of selected WLD signals (impedance, migration_charge) plotted next to NSD, so reviewers can confirm migrations from multiple corroborating signals.
-2.  **R backend integration for BBMM/CTMM/dBBMM.** Either `rpy2` (in-process) or `subprocess` Rscript. The stub interface preserves all config keys; the change is local to those three functions.
-3.  **Multi-user / server deployment.** Replace `_DF_CACHE` with Redis, replace per-process map cache with per-session, add a thin auth layer (Flask-Login or OIDC), and put it behind nginx/gunicorn. The architecture supports this — only the cache and the project dir lookup need to become session-scoped.
-4.  **CLI / batch mode.** A `python -m app.batch <input.csv> <output_dir>` that runs the full pipeline without the UI — useful for nightly automated runs across many herds, or for piping into a larger data system.
-5.  **Database backend.** Replace `processed_data.parquet` with SQLite/PostGIS so multiple animals can be loaded incrementally and querying by time/geom is fast.
-6.  **Auto-detection improvements.** The current detector is amplitude+consistency scored. Adding (a) classification of resident vs. migratory animals before searching, (b) per-population priors on expected migration windows (e.g., "Colorado pronghorn typically migrate Apr 15–Jun 1"), and (c) handling of multi-stop migrations (stopover sites) would close most of the remaining manual-review gap.
-7.  **Corridor analytics.** "Pinch point" detection (narrow places in the population use surface that ≥ X % of the herd traverses), road-crossing hotspot detection (Tab 2 already flags per-animal crossings; aggregate up), and bottleneck width analysis.
-8.  **Spatial validation outputs.** Permutation-based "is this corridor real?" tests, jackknife stability per animal, sensitivity reports for bandwidth / contour level choices.
-9.  **Integration with Wildlife Crossings planning data.** Overlay CDOT planned crossing structures, animal-vehicle collision hotspots from CDOT's CARS database, etc.
-10. **Reverse path: export to the R Migration Mapper format.** So results from this app can be opened in the canonical R tool for cross-validation by collaborators who run that workflow.
-11. **Language portability of the processing core.** The deliberate separation of data-processing modules from the Dash UI means the `modules/` layer could be re-ported to R, Julia, or JavaScript while keeping the same UI (or vice-versa) — useful if a future deployment target dictates a different processing runtime.
+1.  **Explore R backend integration for CTMM/dBBMM** CTMM and dBBMM are very slow right now because they rely on R and WMI's methods for these models. We could update this by relying on python calculations instead. I just don't have the time right now and these models aren't used as much as BBMM for now.
+2.  **Multi-user / server deployment.** Replace `_DF_CACHE` with Redis, replace per-process map cache with per-session, add a thin auth layer (Flask-Login or OIDC), and put it behind nginx/gunicorn. The architecture supports this — only the cache and the project dir lookup need to become session-scoped.
+3.  **CLI / batch mode.** A `python -m app.batch <input.csv> <output_dir>` that runs the full pipeline without the UI — useful for nightly automated runs across many herds, or for piping into a larger data system.
+4.  **Database backend.** Replace `processed_data.parquet` with SQLite/PostGIS so multiple animals can be loaded incrementally and querying by time/geom is fast.
+5.  **Auto-detection improvements.** The current detector is amplitude+consistency scored. Adding (a) classification of resident vs. migratory animals before searching, (b) per-population priors on expected migration windows (e.g., "Colorado pronghorn typically migrate Apr 15–Jun 1"), and (c) handling of multi-stop migrations (stopover sites) would close most of the remaining manual-review gap.
+6.  **Corridor analytics.** "Pinch point" detection (narrow places in the population use surface that ≥ X % of the herd traverses), road-crossing hotspot detection (Tab 2 already flags per-animal crossings; aggregate up), and bottleneck width analysis.
+7.  **Spatial validation outputs.** Permutation-based "is this corridor real?" tests, jackknife stability per animal, sensitivity reports for bandwidth / contour level choices.
+8.  **Integration with Wildlife Crossings planning data.** Overlay CDOT planned crossing structures, animal-vehicle collision hotspots from CDOT's CARS database, etc.
+9. **Reverse path: export to the R Migration Mapper format.** So results from this app can be opened in the canonical R tool for cross-validation by collaborators who run that workflow.
+10. **Language portability of the processing core.** The deliberate separation of data-processing modules from the Dash UI means the `modules/` layer could be re-ported to R, Julia, or JavaScript while keeping the same UI (or vice-versa) — useful if a future deployment target dictates a different processing runtime.
+11. **INTEGRATION WITH TRACKER!!** This development is last in this list but first in importance. The end goal is to have a pipeline of Tracker data ==> Migration Analyzer ==> an auto-updating table of DAU's/collared herds modeled vs. not yet modeled along with model type that can be stored somewhere in Tracker or Tracker Tracker... TBD.
