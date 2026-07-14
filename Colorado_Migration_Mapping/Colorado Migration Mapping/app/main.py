@@ -16,7 +16,9 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import traceback
+import webbrowser
 from pathlib import Path
 from typing import Any
 
@@ -543,11 +545,11 @@ def _write_version_manifest(version: int, model: str, model_params: dict,
     for rel in ("processed_data.parquet", "road_crossings.json"):
         if (mo / rel).exists():
             shared_inputs[rel] = f"../{rel}"
-    mig_dir = mo / "Migtime Exports"
+    mig_dir = mo / "Migtime_Exports"
     if mig_dir.is_dir():
         migs = sorted(mig_dir.glob("migtime_*.csv"))
         if migs:
-            shared_inputs["migtime"] = f"../Migtime Exports/{migs[-1].name}"
+            shared_inputs["migtime"] = f"../Migtime_Exports/{migs[-1].name}"
 
     manifest = {
         "version": version,
@@ -615,11 +617,11 @@ def _write_pop_version_manifest(version: int, parent: int | None,
     for rel in ("processed_data.parquet", "road_crossings.json"):
         if (mo / rel).exists():
             shared_inputs[rel] = f"../{rel}"
-    mig_dir = mo / "Migtime Exports"
+    mig_dir = mo / "Migtime_Exports"
     if mig_dir.is_dir():
         migs = sorted(mig_dir.glob("migtime_*.csv"))
         if migs:
-            shared_inputs["migtime"] = f"../Migtime Exports/{migs[-1].name}"
+            shared_inputs["migtime"] = f"../Migtime_Exports/{migs[-1].name}"
 
     manifest = {
         "version": version,
@@ -786,18 +788,34 @@ def _remember_workdir(path: Path) -> None:
         pass
 
 
+def _find_system_python() -> str | None:
+    """Find a system Python that has tkinter (the bundled embed lacks it)."""
+    import shutil, subprocess as _sp
+    candidates = [
+        r"C:\Program Files\Python313\python.exe",
+        r"C:\Program Files\Python312\python.exe",
+        r"C:\Program Files\Python311\python.exe",
+        r"C:\Program Files (x86)\Python313\python.exe",
+        shutil.which("python") or "",
+        shutil.which("python3") or "",
+    ]
+    for p in candidates:
+        if not (p and os.path.isfile(p) and os.path.normcase(p) != os.path.normcase(sys.executable)):
+            continue
+        try:
+            r = _sp.run([p, "-c", "import tkinter"], capture_output=True, timeout=10)
+            if r.returncode == 0:
+                return p
+        except Exception:
+            continue
+    return None
+
+
 def _pick_directory_native() -> str | None:
     """Open a native folder-picker dialog. Returns the chosen path or None.
 
-    Runs in a separate Python subprocess so the tkinter mainloop doesn't
-    interfere with Dash's threading. The subprocess prints the result.
-
-    Subprocess is mandatory here, not paranoia: tkinter's mainloop is not
-    reentrant and not thread-safe. Running it in-process from a Dash callback
-    (which runs on a Flask worker thread) hangs or crashes on Windows. The
-    subprocess starts a fresh interpreter, runs a self-contained tk dialog,
-    prints the chosen path to stdout, then dies. 300 s timeout = give the
-    user 5 minutes to navigate to the folder.
+    Uses the system Python (with tkinter) in a subprocess — the bundled
+    embeddable Python does not include tkinter.
     """
     import subprocess
     code = (
@@ -810,9 +828,33 @@ def _pick_directory_native() -> str | None:
         "root.destroy()\n"
         "sys.stdout.write(path or '')\n"
     )
+    sys_py = _find_system_python()
+    if sys_py:
+        try:
+            result = subprocess.run(
+                [sys_py, "-c", code],
+                capture_output=True, text=True, timeout=300,
+            )
+            chosen = result.stdout.strip()
+            if chosen:
+                return chosen
+        except Exception:
+            pass
+
+    # Fallback: PowerShell folder picker (less convenient tree-style dialog)
+    print(
+        "NOTE: For a better folder picker, install Python 3.11+ from "
+        "python.org (full installer, not embeddable). The app will "
+        "automatically detect it and use the File Explorer dialog."
+    )
+    ps_code = (
+        "$shell = New-Object -ComObject Shell.Application; "
+        "$folder = $shell.BrowseForFolder(0, 'Choose project working directory', 0x40, 0); "
+        "if ($folder) { Write-Host $folder.Self.Path -NoNewline }"
+    )
     try:
         result = subprocess.run(
-            [sys.executable, "-c", code],
+            ["powershell", "-NoProfile", "-Command", ps_code],
             capture_output=True, text=True, timeout=300,
         )
         chosen = result.stdout.strip()
@@ -1685,7 +1727,7 @@ tab1_layout = dbc.Container(
 #         Clear Sequences blanks the current animal's row. Per-animal slider
 #         edits also write into the migtime store via slider_to_migtime. The
 #         renderer (render_seq_panels) paints bands/cards from that store.
-#       - Migtime card writes/loads <workdir>/ModelOutputs/Migtime Exports/.
+#       - Migtime card writes/loads <workdir>/ModelOutputs/Migtime_Exports/.
 #
 #   MIDDLE (width=5, stacked):
 #       1. Sequence Date Ranges card — vertically resizable. Contains the
@@ -1775,7 +1817,7 @@ tab2_layout = dbc.Container(
                             className="mb-2",
                         ),
                         # Migtime table management — save/load/overwrite the
-                        # current migtime to <workdir>/ModelOutputs/Migtime Exports/.
+                        # current migtime to <workdir>/ModelOutputs/Migtime_Exports/.
                         dbc.Card(
                             [
                                 dbc.CardHeader("Migtime Table"),
@@ -3092,6 +3134,45 @@ def load_project(n_clicks, project_name):
 # Callbacks — Tab 1: Data Import & Cleaning
 # ===========================================================================
 
+def _create_companion_file(file_path: Path) -> None:
+    """If file_path is a CSV, create a companion .shp in the same folder.
+    If it's a .shp, create a companion .csv. Silently skips if the companion
+    already exists or if the conversion fails."""
+    import geopandas as gpd
+    suffix = file_path.suffix.lower()
+    try:
+        if suffix == ".csv":
+            companion = file_path.with_suffix(".shp")
+            if companion.exists():
+                return
+            df = pd.read_csv(str(file_path), low_memory=False)
+            lon_col = lat_col = None
+            for c in df.columns:
+                cl = c.lower()
+                if cl in ("long", "lon", "longitude", "x"):
+                    lon_col = c
+                elif cl in ("lat", "latitude", "y"):
+                    lat_col = c
+            if lon_col and lat_col:
+                gdf = gpd.GeoDataFrame(
+                    df, geometry=gpd.points_from_xy(df[lon_col], df[lat_col]),
+                    crs="EPSG:4326",
+                )
+                gdf.to_file(companion)
+        elif suffix == ".shp":
+            companion = file_path.with_suffix(".csv")
+            if companion.exists():
+                return
+            gdf = gpd.read_file(str(file_path))
+            df = pd.DataFrame(gdf.drop(columns=["geometry"], errors="ignore"))
+            if "geometry" in gdf.columns and not gdf.geometry.is_empty.all():
+                df["lon"] = gdf.geometry.x
+                df["lat"] = gdf.geometry.y
+            df.to_csv(companion, index=False)
+    except Exception:
+        pass
+
+
 def _preview_input_file(file_path: str | Path, display_name: str | None = None) -> tuple:
     """Read the first 200 rows of *file_path*, auto-detect common column names,
     and return the tuple of outputs the upload / auto-load callbacks expect.
@@ -3220,6 +3301,7 @@ def handle_upload(contents, filename, workdir_path):
             dest.write_bytes(decoded)
             _log_action("UPLOAD_CSV", filename=Path(filename).name, bytes=len(decoded))
             saved_path = dest
+            _create_companion_file(dest)
         else:
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
             tmp.write(decoded)
@@ -3330,6 +3412,7 @@ def select_modelinputs_file(selected_path):
         )
     try:
         _log_action("SELECT_INPUT", file=p.name)
+        _create_companion_file(p)
         return _preview_input_file(p, display_name=p.name)
     except Exception as exc:
         return (
@@ -4599,7 +4682,7 @@ def _parse_external_migtime(
 
 # ---------------------------------------------------------------------------
 # Migtime table: export / load-previous / overwrite. Files live in
-# <workdir>/ModelOutputs/Migtime Exports/migtime_<YYYYMMDD_HHMMSS>.csv.
+# <workdir>/ModelOutputs/Migtime_Exports/migtime_<YYYYMMDD_HHMMSS>.csv.
 # ---------------------------------------------------------------------------
 
 def _friendly_migtime_for_export(migtime: "pd.DataFrame", seq_names) -> "pd.DataFrame":
@@ -4638,7 +4721,7 @@ def _migtime_exports_dir(workdir_path: str | None) -> Path | None:
     p = Path(workdir_path)
     if not p.is_dir():
         return None
-    out = _workdir_outputs(p) / "Migtime Exports"
+    out = _workdir_outputs(p) / "Migtime_Exports"
     return out
 
 
@@ -4826,7 +4909,7 @@ def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store
     _log_action("MIGTIME_EXPORT", path=str(out_path), rows=len(migtime))
     _append_processing_log(
         [
-            f"File: Migtime Exports/{out_path.name}",
+            f"File: Migtime_Exports/{out_path.name}",
             f"Rows (animal-years): {len(migtime)}",
         ],
         header="MIGTIME TABLE EXPORTED",
@@ -4913,7 +4996,7 @@ def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store
             print(f"WARNING: failed to persist flagged data: {exc}")
 
     return _ok_alert(
-        f"Saved to Migtime Exports/{out_path.name} ({len(migtime)} rows).{rn_msg}{flag_persist_msg}"
+        f"Saved to Migtime_Exports/{out_path.name} ({len(migtime)} rows).{rn_msg}{flag_persist_msg}"
     )
 
 
@@ -6598,6 +6681,12 @@ def run_modeling(
         _MODEL_CACHE["results"] = results
         _MODEL_CACHE["method"] = model
         _MODEL_CACHE["utm_crs"] = str(utm_crs)
+        _MODEL_CACHE["seq_animal"] = seq_animal
+        _MODEL_CACHE["seq_label"] = seq_label
+        if "timestamp" in df.columns:
+            ts = pd.to_datetime(df["timestamp"], errors="coerce").dropna()
+            if len(ts):
+                _MODEL_CACHE["input_date_range"] = (ts.min().strftime("%m/%d/%Y"), ts.max().strftime("%m/%d/%Y"))
 
         # ---- Extra BBMM outputs: per-individual UDs + winter/summer ranges ----
         # Only for BBMM, only when the user ticked the boxes, only with a workdir.
@@ -6788,7 +6877,9 @@ def run_modeling(
         # ---- processing_log.txt: model section ----
         _runtime = (_dt_mdl.datetime.now() - _model_start).total_seconds()
         err_rows = results_df[results_df["status"] == "Error"] if not results_df.empty else results_df.iloc[0:0]
+        _input_dr = _MODEL_CACHE.get("input_date_range")
         log_lines = [
+            f"Input data date range: {_input_dr[0]} — {_input_dr[1]}" if _input_dr else "Input data date range: unknown",
             f"Model: {model.upper()}",
             f"Grid cell size: {cell_size_m:g} m",
             f"Cores: {int(n_cores or 1)}",
@@ -7121,16 +7212,19 @@ def generate_pop_outputs(
         results = _MODEL_CACHE["results"]
         pop_grid = _MODEL_CACHE["pop_grid"]
 
-        # Sequence keys look like "<animal>_<bio_year>_<label>" (e.g. "PH_01_2020_Spring").
-        # Keep them intact in the dict so Spring and Fall versions of the same
-        # animal-year both contribute (stripping the label was collapsing pairs
-        # via dict overwrite, throwing away half the data). The downstream
-        # population_outputs parser falls back to (key, "all") year for any
-        # key that doesn't end in digits — fine for our purposes; each sequence
-        # ends up treated as its own individual-year combo.
-        ud_dict: dict[str, np.ndarray] = {}
+        # Collect per-sequence UDs, then stack by individual animal so each
+        # animal contributes one UD surface (mean of its sequences). This way
+        # population counts reflect the number of *animals* using each cell,
+        # not the number of sequences (which inflates counts for animals
+        # tracked across multiple bio-years).
+        seq_animal_map = _MODEL_CACHE.get("seq_animal", {})
+        seq_ud_by_season: dict[str, dict[str, list[np.ndarray]]] = {}
+        # Also track per-sequence bio_year for year summaries.
+        # Structure: {bio_year: {season: {animal_id: [ud_arrays]}}}
+        seq_ud_by_year: dict[str, dict[str, dict[str, list[np.ndarray]]]] = {}
         footprint_dict: dict[str, Any] = {}
         n_skipped = 0
+        n_sequences = 0
         for mig_key, res in results.items():
             ud = res.get("ud_raster")
             fp = res.get("footprint_polygon")
@@ -7146,11 +7240,23 @@ def generate_pop_outputs(
             if seasons and label not in seasons:
                 continue
 
-            ud_dict[str(mig_key)] = ud
+            n_sequences += 1
+            animal_id = seq_animal_map.get(str(mig_key), str(mig_key))
+            seq_ud_by_season.setdefault(label, {}).setdefault(animal_id, []).append(ud)
             if fp is not None:
                 footprint_dict[str(mig_key)] = fp
 
-        if not ud_dict:
+            # Extract bio_year from mig_key: "<animal>_<bioYear>_<season>"
+            # After rsplit("_", 1) stripped the season, remainder is "<animal>_<bioYear>".
+            # Strip the known animal_id prefix to get the bio_year.
+            remainder = parts[0] if len(parts) == 2 else str(mig_key)
+            if remainder.startswith(animal_id + "_"):
+                bio_year = remainder[len(animal_id) + 1:]
+            else:
+                bio_year = "all"
+            seq_ud_by_year.setdefault(bio_year, {}).setdefault(label, {}).setdefault(animal_id, []).append(ud)
+
+        if not seq_ud_by_season:
             return (
                 _err_alert(
                     "No model results matched the selected seasons. "
@@ -7160,12 +7266,22 @@ def generate_pop_outputs(
                 None,
             )
 
-        # Prepend the "≥1 animal" and "≥2 animals" presence bands ahead of the
-        # user's percent contour levels (matches Migration Mapper, which always
-        # produces the min1/min2 individual-overlap bands). In Area mode a
-        # contour level X% means "cells where ≥X% of individuals overlap", so
-        # ≥1 animal = 100/N % and ≥2 animals = 200/N % where N = #sequences.
-        n_individuals = len(ud_dict)
+        # Stack per individual: average each animal's sequences into one UD,
+        # keyed by animal_id. ud_dict is animal-level, one entry per animal.
+        ud_dict: dict[str, np.ndarray] = {}
+        for season_label_tmp, animals in seq_ud_by_season.items():
+            for animal_id, ud_list in animals.items():
+                key = f"{animal_id}_{season_label_tmp}" if len(seq_ud_by_season) > 1 else animal_id
+                if len(ud_list) == 1:
+                    ud_dict[key] = ud_list[0]
+                else:
+                    ud_dict[key] = np.mean(np.stack(ud_list, axis=0), axis=0)
+
+        # n_individuals = unique animals, not sequences.
+        all_animals = set()
+        for animals in seq_ud_by_season.values():
+            all_animals.update(animals.keys())
+        n_individuals = len(all_animals)
         user_levels = list(contour_levels)
         if n_individuals > 0:
             lvl_1animal = round(100.0 / n_individuals, 4)
@@ -7261,12 +7377,16 @@ def generate_pop_outputs(
         import datetime as _dt
         date_stamp = _dt.datetime.now().strftime("%m%Y")
 
-        # Group ud_dict by season label (last token of mig_key).
+        # Build per-season animal-level UD dicts from the already-stacked data.
         ud_by_season: dict[str, dict[str, np.ndarray]] = {}
-        for mig_key, ud in ud_dict.items():
-            parts = str(mig_key).rsplit("_", 1)
-            label = parts[1] if len(parts) == 2 else "All"
-            ud_by_season.setdefault(label, {})[mig_key] = ud
+        for season_lbl, animals in seq_ud_by_season.items():
+            season_key = season_lbl or "All"
+            for animal_id, ud_list in animals.items():
+                if len(ud_list) == 1:
+                    stacked = ud_list[0]
+                else:
+                    stacked = np.mean(np.stack(ud_list, axis=0), axis=0)
+                ud_by_season.setdefault(season_key, {})[animal_id] = stacked
 
         # cache_products: full descriptors WITH in-memory payloads (array/gdf).
         cache_products: list[dict] = []
@@ -7316,13 +7436,117 @@ def generate_pop_outputs(
                     "array": p.get("array"), "gdf": p.get("gdf"),
                 })
             banded_summary.append(
-                f"{season_label}: {len(prods)} products ({len(season_ud)} sequences)"
+                f"{season_label}: {len(prods)} products ({len(season_ud)} individuals)"
             )
 
         for season_label, season_ud_dict in ud_by_season.items():
             _collect_banded(season_label, season_ud_dict)
         if len(ud_by_season) > 1:
             _collect_banded("All", ud_dict)
+
+        # ---- Year summaries (by bio-year) ----
+        # For each bio-year, produce:
+        #   1. Per-season stacked count surface (Spring 2020, Fall 2020, etc.)
+        #   2. All-season population summary for that year
+        #   3. Per-individual combined UD for that year
+        # Output folder: YearSummaries/<bio_year>/
+        bio_years_sorted = sorted(
+            [y for y in seq_ud_by_year if y != "all"],
+            key=lambda v: (int(v) if v.isdigit() else 0, v),
+        )
+        year_summary_lines: list[str] = []
+        for by in bio_years_sorted:
+            yr_seasons = seq_ud_by_year[by]  # {season: {animal_id: [ud_arrays]}}
+            yr_prefix = f"BioYear_{by}"
+
+            # 1. Per-season stacked count for this year
+            for slbl, animals_in_season in yr_seasons.items():
+                season_yr_ud: dict[str, np.ndarray] = {}
+                for aid, ud_list in animals_in_season.items():
+                    season_yr_ud[aid] = np.mean(np.stack(ud_list, axis=0), axis=0) if len(ud_list) > 1 else ud_list[0]
+                if season_yr_ud:
+                    try:
+                        prods = compute_season_banded_products(
+                            ud_dict=season_yr_ud, grid_meta=pop_grid,
+                            herd_id=herd_id, season_label=f"{slbl}_{by}",
+                            date_stamp=date_stamp,
+                            stopover_pct=pop_config["stopover_pct"],
+                            min_area_drop=pop_config["min_area_drop"],
+                            min_area_fill=pop_config["min_area_fill"],
+                            simplify=pop_config["smooth"],
+                            smooth_bandwidth=pop_config["smooth_bandwidth"],
+                        )
+                        for p in prods:
+                            cache_products.append({
+                                "id": f"yearsummary::{by}::{slbl}::{p['key']}",
+                                "label": f"{yr_prefix} {slbl}: {p['label']}",
+                                "category": f"Year summary — {by}",
+                                "rel_dir": f"YearSummaries/{by}",
+                                "filename": p["filename"], "kind": p["kind"],
+                                "array": p.get("array"), "gdf": p.get("gdf"),
+                            })
+                    except Exception:
+                        pass
+
+            # 2. All-season population summary for this year
+            all_season_yr_ud: dict[str, np.ndarray] = {}
+            for slbl, animals_in_season in yr_seasons.items():
+                for aid, ud_list in animals_in_season.items():
+                    mean_ud = np.mean(np.stack(ud_list, axis=0), axis=0) if len(ud_list) > 1 else ud_list[0]
+                    if aid in all_season_yr_ud:
+                        all_season_yr_ud[aid] = np.mean(
+                            np.stack([all_season_yr_ud[aid], mean_ud], axis=0), axis=0
+                        )
+                    else:
+                        all_season_yr_ud[aid] = mean_ud
+            if all_season_yr_ud:
+                try:
+                    prods = compute_season_banded_products(
+                        ud_dict=all_season_yr_ud, grid_meta=pop_grid,
+                        herd_id=herd_id, season_label=f"All_{by}",
+                        date_stamp=date_stamp,
+                        stopover_pct=pop_config["stopover_pct"],
+                        min_area_drop=pop_config["min_area_drop"],
+                        min_area_fill=pop_config["min_area_fill"],
+                        simplify=pop_config["smooth"],
+                        smooth_bandwidth=pop_config["smooth_bandwidth"],
+                    )
+                    for p in prods:
+                        cache_products.append({
+                            "id": f"yearsummary::{by}::All::{p['key']}",
+                            "label": f"{yr_prefix} All seasons: {p['label']}",
+                            "category": f"Year summary — {by}",
+                            "rel_dir": f"YearSummaries/{by}",
+                            "filename": p["filename"], "kind": p["kind"],
+                            "array": p.get("array"), "gdf": p.get("gdf"),
+                        })
+                except Exception:
+                    pass
+
+            # 3. Per-individual combined UD for this year (one tif per animal)
+            for aid, yr_ud in all_season_yr_ud.items():
+                total = yr_ud.sum()
+                if total > 0:
+                    normed = (yr_ud / total).astype(np.float32)
+                else:
+                    normed = yr_ud.astype(np.float32)
+                fname = f"{herd_id}_{aid}_{by}_combinedUD.tif"
+                cache_products.append({
+                    "id": f"yearsummary::{by}::ind::{aid}",
+                    "label": f"{yr_prefix} {aid} combined UD",
+                    "category": f"Year summary — {by}",
+                    "rel_dir": f"YearSummaries/{by}/IndividualUDs",
+                    "filename": fname, "kind": "float32",
+                    "array": normed,
+                })
+
+            n_animals_yr = len(all_season_yr_ud)
+            n_seasons_yr = len(yr_seasons)
+            year_summary_lines.append(
+                f"Bio-year {by}: {n_seasons_yr} season(s), {n_animals_yr} individual(s)"
+            )
+        if year_summary_lines:
+            banded_summary.append("Year summaries: " + "; ".join(year_summary_lines))
 
         # Stash payloads in the process-local cache; build a JSON-safe manifest
         # (no arrays/gdfs) for the Tab 5 store so it can render the checkboxes.
@@ -7397,7 +7621,7 @@ def generate_pop_outputs(
                 html.Ul([html.Li(line) for line in banded_summary]),
                 html.Small(
                     "For each season: mean UD .tif, _all isopleths .shp, "
-                    "_min1/_min2/_min3 (overlap thresholds), _top10/_top20 (UD volume), "
+                    "_minimum1/_minimum2/_minimum3 (overlap thresholds), _top10/_top20 (UD volume), "
                     f"_stopover (top {pop_config['stopover_pct']:g}% of mean-UD volume, "
                     "Migration Mapper-style). Select and save these in Tab 5.",
                     className="text-muted",
@@ -7433,7 +7657,9 @@ def generate_pop_outputs(
             for lvl in sorted(set(contour_levels)):
                 tag = animal_band_levels.get(round(lvl, 4))
                 lvl_strs.append(f"{lvl:g}%" + (f" (>={tag} animal{'s' if tag and tag > 1 else ''})" if tag else ""))
+            date_range = _MODEL_CACHE.get("input_date_range")
             lines = [
+                f"Input data date range: {date_range[0]} — {date_range[1]}" if date_range else "Input data date range: unknown",
                 f"Seasons merged: {', '.join(seasons) if seasons else 'all'}",
                 f"Merge order: {pop_config['merge_order']}",
                 f"Contour type: {pop_config['contour_type']}",
@@ -7442,7 +7668,7 @@ def generate_pop_outputs(
                 f"Smoothing (ksmooth): {'on' if pop_config['smooth'] else 'off'}"
                 + (f", smoothness={pop_config['smooth_bandwidth']:g}" if pop_config['smooth'] else ""),
                 f"Stopover density: top {pop_config['stopover_pct']:g}% of mean UD",
-                f"Sequences used: {len(ud_dict)}" + (f" ({n_skipped} skipped for errors)" if n_skipped else ""),
+                f"Individuals: {n_individuals} (from {n_sequences} sequences)" + (f" ({n_skipped} skipped for errors)" if n_skipped else ""),
                 f"Result: {result_str}",
                 f"Run time: {(_dt_pop.datetime.now() - _pop_start).total_seconds():.1f} s",
             ]
@@ -7653,6 +7879,7 @@ _RASTER_CATEGORIES = [
     ("BBMM_Output", "Population (banded)"),
     ("IndividualUDs", "Individual UD"),
     ("RangeUDs", "Range UD"),
+    ("YearSummaries", "Year summary"),
 ]
 
 
@@ -7679,8 +7906,19 @@ def populate_raster_categories(active_tab, _model, _pop):
         vdir = mo / f"V{v}"
         for sub, label in _RASTER_CATEGORIES:
             d = vdir / sub
-            if d.is_dir() and any(d.glob("*.tif")):
+            if not d.is_dir():
+                continue
+            if any(d.rglob("*.tif")):
                 opts.append({"label": f"V{v} · {label}", "value": f"V{v}/{sub}"})
+    # Add in-memory population products (not yet exported to disk).
+    if _POP_OUTPUT_CACHE.get("products"):
+        mem_cats = {}
+        for p in _POP_OUTPUT_CACHE["products"]:
+            if p.get("kind") in ("count", "float32", "uint8") and p.get("array") is not None:
+                cat = p.get("category", "Population")
+                mem_cats[cat] = True
+        for cat in mem_cats:
+            opts.append({"label": f"(in memory) {cat}", "value": f"__mem__::{cat}"})
     return opts
 
 
@@ -7695,23 +7933,32 @@ def populate_raster_categories(active_tab, _model, _pop):
     prevent_initial_call=True,
 )
 def populate_raster_overlay_files(category, active_tab, _model_results, _select_all, current_files):
-    """List the .tif files in the chosen version+subfolder ("V{n}/<sub>").
+    """List the .tif files in the chosen version+subfolder ("V{n}/<sub>")
+    or in-memory products ("__mem__::<category>").
     Refreshes when the category changes, when Tab 5 is opened, or after a model
     run / load. The picker is multi-select; "Select all in category" fills it
     with every file. Selections that survive a refresh are kept."""
     if not category or _ACTIVE_WORKDIR is None:
         return [], []
-    try:
-        # category is version-qualified ("V{n}/<sub>"), resolved under the
-        # shared ModelOutputs root.
-        folder = _workdir_outputs() / category
-    except Exception:
-        return [], []
-    if not folder.is_dir():
-        return [], []
-    tifs = sorted(folder.glob("*.tif"), key=lambda p: p.name.lower())
-    options = [{"label": p.name, "value": str(p)} for p in tifs]
-    valid_values = [o["value"] for o in options]
+
+    # In-memory products (not yet exported to disk).
+    if category.startswith("__mem__::"):
+        mem_cat = category[len("__mem__::"):]
+        options = []
+        for p in (_POP_OUTPUT_CACHE.get("products") or []):
+            if p.get("category") == mem_cat and p.get("kind") in ("count", "float32", "uint8") and p.get("array") is not None:
+                options.append({"label": p["filename"], "value": f"__mem__::{p['id']}"})
+        valid_values = [o["value"] for o in options]
+    else:
+        try:
+            folder = _workdir_outputs() / category
+        except Exception:
+            return [], []
+        if not folder.is_dir():
+            return [], []
+        tifs = sorted(folder.rglob("*.tif"), key=lambda p: p.name.lower())
+        options = [{"label": p.relative_to(folder).as_posix(), "value": str(p)} for p in tifs]
+        valid_values = [o["value"] for o in options]
 
     if ctx.triggered_id == "btn-select-all-rasters":
         return options, valid_values
@@ -7719,6 +7966,62 @@ def populate_raster_overlay_files(category, active_tab, _model_results, _select_
         return options, []                       # switching category clears the stack
     kept = [v for v in (current_files or []) if v in set(valid_values)]
     return options, kept
+
+
+def _render_mem_product(product_id: str, cmap: str = "viridis"):
+    """Render an in-memory population product as a map overlay, returning
+    the same (data_uri, bounds, info) tuple as _raster_to_overlay."""
+    import rasterio
+    from rasterio.warp import calculate_default_transform, reproject, Resampling
+    from rasterio.transform import array_bounds
+
+    products = _POP_OUTPUT_CACHE.get("products", [])
+    grid_meta = _POP_OUTPUT_CACHE.get("grid_meta")
+    if not grid_meta:
+        return None
+    prod = next((p for p in products if p.get("id") == product_id), None)
+    if prod is None or prod.get("array") is None:
+        return None
+
+    from rasterio.crs import CRS
+    src_crs = CRS.from_user_input(grid_meta["crs"])
+    transform = grid_meta["transform"]
+    shape_rc = grid_meta["shape"]
+    src_arr = prod["array"].astype(np.float64)
+
+    dst_crs = "EPSG:4326"
+    dt, dw, dh = calculate_default_transform(
+        src_crs, dst_crs, shape_rc[1], shape_rc[0],
+        *array_bounds(shape_rc[0], shape_rc[1], transform),
+    )
+    if not dw or not dh:
+        return None
+    dst = np.zeros((dh, dw), dtype=np.float64)
+    reproject(
+        source=src_arr, destination=dst,
+        src_transform=transform, src_crs=src_crs,
+        dst_transform=dt, dst_crs=dst_crs, resampling=Resampling.nearest,
+    )
+    bounds_lrbt = array_bounds(dh, dw, dt)
+    overlay_bounds = [[bounds_lrbt[1], bounds_lrbt[0]], [bounds_lrbt[3], bounds_lrbt[2]]]
+
+    valid = np.isfinite(dst) & (dst != 0)
+    if not valid.any():
+        return None
+    vmin, vmax = dst[valid].min(), dst[valid].max()
+    if vmax <= vmin:
+        vmax = vmin + 1.0
+
+    from matplotlib import colormaps
+    cm = colormaps.get_cmap(cmap)
+    normed = np.clip((dst - vmin) / (vmax - vmin), 0, 1)
+    rgba = (cm(normed) * 255).astype(np.uint8)
+    rgba[~valid] = 0
+
+    png_bytes = _rgba_to_png(rgba)
+    data_uri = "data:image/png;base64," + base64.b64encode(png_bytes).decode()
+    info = f"{prod['filename']} — range {vmin:.4g}–{vmax:.4g}"
+    return data_uri, overlay_bounds, info
 
 
 @app.callback(
@@ -7743,16 +8046,19 @@ def render_raster_overlays(tif_paths, opacity, cmap, _clear_clicks):
     cmap = cmap or "viridis"
     children, infos, skipped = [], [], 0
     for p in paths:
-        try:
-            result = _raster_to_overlay_cached(Path(p), cmap)
-        except Exception:
-            result = None
+        if str(p).startswith("__mem__::"):
+            result = _render_mem_product(str(p)[len("__mem__::"):], cmap)
+        else:
+            try:
+                result = _raster_to_overlay_cached(Path(p), cmap)
+            except Exception:
+                result = None
         if result is None:
             skipped += 1
             continue
         data_uri, bounds, info = result
         children.append(dl.ImageOverlay(url=data_uri, bounds=bounds, opacity=op))
-        infos.append(f"• {Path(p).name} — {info}")
+        infos.append(f"• {info}")
     if not children:
         return [], html.Span("Selected raster(s) have no displayable data.", className="text-muted")
     note = f"{len(children)} raster(s) shown" + (f", {skipped} skipped (no data)" if skipped else "")
@@ -8281,4 +8587,6 @@ def handle_export(selected_clicks, all_clicks, checked_ids, out_dir, processed_j
 # Entry point
 # ===========================================================================
 if __name__ == "__main__":
+    if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
+        threading.Timer(1.5, webbrowser.open, args=("http://127.0.0.1:8050",)).start()
     app.run(debug=True, host="127.0.0.1", port=8050)

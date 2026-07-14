@@ -242,8 +242,35 @@ These are the in-flight tasks mirrored from the session task list.
   - **`apply_tail_cutoff` placement**: we cut the 99.99% tail on each individual UD *before* averaging. R may apply the cutoff after the population merge.
   - **Population merging step**: our `calc_season_banded_outputs` normalises each individual to sum=1 then averages. R's `CalcPopUse` may do a weighted sum or volume-rank-based aggregation.
   - **Cell-size and CRS**: confirm both pipelines use the same projected CRS and 500 m cell size end-to-end (no implicit reprojection differences).
-- **Test CTMM and dBBMM end-to-end.** Implementation done (2026-07-09) but not yet verified with real data — need to confirm R is found, packages load, and output matches expectations.
+- **Test CTMM and dBBMM end-to-end.** (Backburner) Implementation done (2026-07-09) via R subprocess but not yet verified. Plan is to translate the R scripts to native Python, so deferring testing of the R bridge.
+- **Sort minimum outputs by number of species.** Currently just 0/1; should sort by count. Minimum 1 is low-value but keep for now.
+- **Investigate pop_use_contours.shp.** Not showing any data — determine what this file is and fix.
+- **CTMM season outputs.** Generate spring migration, fall migration, summer, and winter points and lines from CTMM.
+- **Investigate projection handling.** Test data showed all points offset ~50 m from original CTMM points. **Audit (2026-07-14):** The current CRS pipeline is clean and consistent: input GPS data hardcoded as EPSG:4326 (WGS84) → auto-detect UTM zone via `estimate_utm_crs()` from data centroid → all modeling/grid math in UTM meters (250m cells) → exported TIFs/shapefiles in UTM → Tab 5 map display reprojected back to EPSG:4326 for Leaflet. The ~50m offset is almost certainly **grid cell snapping**, not a projection bug: the population grid uses `np.ceil` rounding on 250m cells, so a point near a cell boundary can shift up to ~125m in the gridded output. One assumption worth noting: input data is hardcoded as WGS84 — if someone provides NAD83 data (common for state agencies), it's silently treated as WGS84, but that datum difference is only ~1-2m in Colorado, not 50m. **Next step:** user wants to change how projections are handled (details TBD).
+- **Polygon shapefiles + smoothing.** Implement Flenner's smoothing method for polygon shapefiles.
+- **Subherd selection and re-analysis.** Add a step (possibly before Migtime) to view data and identify subherds, then divide individuals into subherds and rerun analysis. Example: D4 would split into 3 groups (west of Hwy 287, towards Hwy 230, west towards the divide). Add stacked buffered line layers (400 m buffer, per Jerod Merkle). **Research (2026-07-14):** Migration Mapper has no built-in subherd partitioning — `herd_id` is just a filename prefix (DAU code), and there's no grouping/clustering mechanism. No precedent to follow. Approaches under consideration: (1) **In-app visual selection** — show tracklines on the Tab 1 map, let users draw polygons or lasso-select animals into named groups, then run the analysis per group. Most polished but significant to build. (2) **Animal tag UI** — lighter middle ground: a multi-select/tag panel in Tab 1 or Tab 2 where users assign animals to named groups after viewing the data, then run per group. (3) **External pre-processing** — users split their input CSV into separate files by subherd before loading. No app changes, but puts the burden on the user.
+- **Statewide grid + polygon shapefile for migration output.** Lower priority — Flenner? Add a statewide grid and polygon shapefile to export migration outputs into.
 
+
+### 2026-07-14 — Misc fixes: auto-open browser, folder picker, output naming
+
+**Auto-open browser on startup.** Added `webbrowser.open` call on app start, gated by `WERKZEUG_RUN_MAIN` to prevent the Dash debug reloader from opening two tabs.
+
+**Folder picker fix.** The bundled embeddable Python 3.13 does not include tkinter, so the Browse button for working directory selection silently did nothing. Fixed by detecting and using the system-installed Python (which has tkinter) for the folder-picker subprocess. Falls back to a PowerShell `Shell.Application.BrowseForFolder` dialog with a console note telling users to install Python from python.org for the better File Explorer picker.
+
+**Note — system Python detection needs hardening.** `_find_system_python()` currently checks a short list of common install paths (`C:\Program Files\Python31x\python.exe`, `shutil.which`). Not all users install Python to the same location — some use `AppData\Local\Programs\`, custom paths, or pyenv. Consider checking the Windows registry (`HKLM\SOFTWARE\Python\PythonCore\`) or `py.exe` launcher (`py -3 -c "import tkinter"`) for more robust detection.
+
+**Output folder naming.** Renamed `Migtime Exports` → `Migtime_Exports` (no spaces in output folder/file names).
+
+**Population outputs: count individuals, not sequences.** Previously, each sequence (e.g., `PH01_2022_Spring` and `PH01_2023_Spring`) was treated as a separate layer in the population stack — so 35 animals with ~2 sequences each produced counts up to 70. Now sequences are grouped by animal ID and averaged into one UD surface per individual before the population merge. The count grid now ranges from 1–N where N = number of unique animals. `seq_animal` and `seq_label` are cached in `_MODEL_CACHE` so the population callback can map sequences back to animals.
+
+**Renamed min1/min2/min3 → minimum1/minimum2/minimum3.** Output filenames and keys changed from `_min1`/`_min2`/`_min3` to `_minimum1`/`_minimum2`/`_minimum3` to avoid confusion with "minus".
+
+**Input data date range in processing log.** Both the MODEL RUN and POPULATION OUTPUTS sections of `processing_log.txt` now include the full date range of the input collar data (e.g., `Input data date range: 09/01/2013 — 07/01/2022`).
+
+**Year summaries by bio-year.** Population outputs now include per-bio-year summaries under `YearSummaries/<bio_year>/`. For each bio-year, the system generates: (1) per-season stacked count surfaces (e.g., Spring_2020, Fall_2020) with the full banded product set (count, meanUD, minimum, top, stopover, isopleths); (2) all-season population summary combining all seasons for that year; (3) per-individual combined UD TIFs under `YearSummaries/<bio_year>/IndividualUDs/`. Bio-year is extracted from the mig_key (`<animal>_<bioYear>_<season>`) using the `seq_animal` mapping to correctly handle animal IDs containing underscores. Year summaries appear in the Tab 5 export checklist under "Year summary — <year>" categories and in the Tab 5 raster overlay picker.
+
+**Files touched.** `app/main.py` (`_find_system_python`, `_pick_directory_native`, entry point browser open, `Migtime_Exports` rename, individual-level UD stacking in `generate_pop_outputs`, `input_date_range` caching, processing log additions, year summary generation, `_RASTER_CATEGORIES`), `app/modules/population_outputs.py` (`minimum` rename in `compute_season_banded_products`, `_mask_to_gdf`).
 
 ### 2026-07-09 — Real CTMM implementation via R subprocess
 

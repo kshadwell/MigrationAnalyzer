@@ -817,8 +817,8 @@ def calc_season_banded_outputs(
 
         <herd>_BBMM_<Season>_<date>.tif                       mean UD (float32)
         <herd>_BBMM_<Season>_<date>_all.shp                   isopleth polygons
-        <herd>_BBMM_<Season>_<date>_minN.tif                  ≥N individuals (uint8)
-        <herd>_BBMM_<Season>_<date>_minN.shp                  polygon version
+        <herd>_BBMM_<Season>_<date>_minimumN.tif               ≥N individuals (uint8)
+        <herd>_BBMM_<Season>_<date>_minimumN.shp               polygon version
         <herd>_BBMM_<Season>_<date>_topP.tif                  top P% UD volume (uint8)
         <herd>_BBMM_<Season>_<date>_topP.shp                  polygon version
         <herd>_BBMM_<Season>_<date>_stopover.tif              top stopover_pct% of mean-UD volume (uint8)
@@ -853,7 +853,7 @@ def calc_season_banded_outputs(
 
     Returns
     -------
-    ``dict`` mapping a human-readable key (``"ud"``, ``"all"``, ``"min1"``,
+    ``dict`` mapping a human-readable key (``"ud"``, ``"all"``, ``"minimum1"``,
     ``"top10"`` etc.) to the written :class:`Path`. Missing entries are
     skipped (e.g. if a band produced no polygons).
     """
@@ -901,7 +901,7 @@ def _mask_to_gdf(
         return None
     merged = _fill_holes(merged, min_area_fill)
     if value is None:
-        value = (int(name[3:]) if name.startswith("min") and name[3:].isdigit()
+        value = (int(name[7:]) if name.startswith("minimum") and name[7:].isdigit()
                  else (int(name[3:]) if name.startswith("top") and name[3:].isdigit() else 0))
     return gpd.GeoDataFrame(
         [{"value": value, "band": name}], geometry=[merged], crs=src_crs,
@@ -930,7 +930,7 @@ def compute_season_banded_products(
     Each descriptor is a dict::
 
         {
-          "key":      "count" | "meanUD" | "min1" | "top10" | "stopover" | "all" ...,
+          "key":      "count" | "meanUD" | "minimum1" | "top10" | "stopover" | "all" ...,
           "kind":     "count" | "float32" | "uint8" | "vector",
           "filename": "<prefix>_<band>.tif" | ".shp"   (basename, no directory),
           "label":    human-readable description for a UI checkbox,
@@ -1016,7 +1016,7 @@ def compute_season_banded_products(
         mask = (count_grid >= n).astype(np.uint8)
         if mask.sum() == 0:
             continue
-        _add_mask_pair(mask, f"min{n}", f"{season} ≥{n} individual{'s' if n != 1 else ''}")
+        _add_mask_pair(mask, f"minimum{n}", f"{season} ≥{n} individual{'s' if n != 1 else ''}")
 
     # ---- 3. topP%: top X% by volume of the broad USE (count) surface, not the
     # concentrated mean-UD density (which gave tiny specks). Rank cells by
