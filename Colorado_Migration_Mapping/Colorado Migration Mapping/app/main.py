@@ -567,6 +567,54 @@ def _write_version_manifest(version: int, model: str, model_params: dict,
     except Exception:
         pass
 
+    _write_version_log(vdir, version, parent, model=model,
+                       params=model_params, changed=changed, vtype="model")
+
+
+def _write_version_log(vdir: Path, version: int, parent: int | None,
+                       model: str | None = None, params: dict | None = None,
+                       changed: dict | None = None, vtype: str = "model",
+                       pop_config: dict | None = None,
+                       model_source: int | None = None) -> None:
+    """Write a human-readable processing_log.txt inside V{n}/ summarising
+    what this version is and what changed from its parent."""
+    import datetime as _dt
+    lines = [
+        f"{'=' * 60}",
+        f"Version V{version}  —  {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"{'=' * 60}",
+        "",
+    ]
+    if vtype == "model":
+        lines.append(f"Type: Model run ({model})")
+        if params:
+            lines.append("")
+            lines.append("Parameters:")
+            for k, v in sorted(params.items()):
+                lines.append(f"  {k}: {v}")
+    elif vtype == "population":
+        lines.append(f"Type: Population outputs (model data from V{model_source})")
+        if pop_config:
+            lines.append("")
+            lines.append("Population config:")
+            for k, v in sorted(pop_config.items()):
+                lines.append(f"  {k}: {v}")
+
+    if parent is not None:
+        lines.append("")
+        if changed:
+            lines.append(f"Changes from V{parent}:")
+            for k, diff in sorted(changed.items()):
+                lines.append(f"  {k}: {diff.get('from')} -> {diff.get('to')}")
+        else:
+            lines.append(f"No parameter changes from V{parent}.")
+
+    lines.append("")
+    try:
+        (vdir / "processing_log.txt").write_text("\n".join(lines), encoding="utf-8")
+    except Exception:
+        pass
+
 
 def _set_model_source(version: int) -> None:
     """Record which version holds the model UDs the in-memory results came from."""
@@ -623,12 +671,26 @@ def _write_pop_version_manifest(version: int, parent: int | None,
         if migs:
             shared_inputs["migtime"] = f"../Migtime_Exports/{migs[-1].name}"
 
+    changed: dict[str, dict] = {}
+    if parent is not None:
+        try:
+            prev = json.loads((mo / f"V{parent}" / "version_manifest.json").read_text(encoding="utf-8"))
+            prev_pop = prev.get("pop_config") or prev.get("model_params") or {}
+            cur_pop = pop_config or {}
+            for k in sorted(set(prev_pop) | set(cur_pop)):
+                a, b = prev_pop.get(k), cur_pop.get(k)
+                if a != b:
+                    changed[k] = {"from": a, "to": b}
+        except Exception:
+            pass
+
     manifest = {
         "version": version,
         "created": _dt.datetime.now().isoformat(timespec="seconds"),
         "type": "population",
         "parent_version": parent,
         "model_source_version": model_source,
+        "changed_from_parent": changed,
         "reused_from": reused,
         "pop_config": pop_config,
         "shared_inputs": shared_inputs,
@@ -639,6 +701,10 @@ def _write_pop_version_manifest(version: int, parent: int | None,
         )
     except Exception:
         pass
+
+    _write_version_log(vdir, version, parent, vtype="population",
+                       pop_config=pop_config, changed=changed,
+                       model_source=model_source)
 
 
 def _record_pop_export(version: int, pop_config, workdir: Path | None = None) -> None:
@@ -1416,6 +1482,11 @@ tab1_layout = dbc.Container(
                                                                 ),
                                                             ]
                                                         ),
+                                                        html.Small(
+                                                            "Recommended: Mule Deer Feb. 1; Elk Feb. 15",
+                                                            className="text-muted d-block mt-1",
+                                                            style={"fontSize": "0.7rem"},
+                                                        ),
                                                     ],
                                                     width=6,
                                                 ),
@@ -1508,7 +1579,7 @@ tab1_layout = dbc.Container(
                                         html.Hr(className="my-2"),
                                         dbc.Checkbox(
                                             id="detect-road-crossings",
-                                            value=False,
+                                            value=True,
                                             label="Detect road crossings (TIGER) per animal-year",
                                             style={"fontSize": "0.82rem"},
                                         ),
@@ -1709,7 +1780,8 @@ tab1_layout = dbc.Container(
                                         ),
                                         html.Small(
                                             "Must match the bio-year start used for your GPS data so "
-                                            "the animal-year keys align (auto-filled from the file when present).",
+                                            "the animal-year keys align (auto-filled from the file when present). "
+                                            "Recommended: Mule Deer Feb. 1; Elk Feb. 15",
                                             className="text-muted d-block mb-2",
                                             style={"fontSize": "0.7rem"},
                                         ),
@@ -1824,7 +1896,11 @@ tab2_layout = dbc.Container(
                                             ],
                                             className="mb-1",
                                         ),
-                                        html.Small("Each animal-year starts on this date", className="text-muted d-block mb-2"),
+                                        html.Small(
+                                            "Each animal-year starts on this date. "
+                                            "Recommended: Mule Deer Feb. 1; Elk Feb. 15",
+                                            className="text-muted d-block mb-2",
+                                        ),
                                         dbc.Label("Max Sequences", style={"fontSize": "0.85rem"}),
                                         dbc.Input(id="seq-num-sequences", type="number", value=4, min=1, max=8, size="sm", className="mb-1"),
                                         dbc.Label("Sequence Names", style={"fontSize": "0.85rem"}),
@@ -2439,7 +2515,7 @@ tab4_layout = dbc.Container(
                                                 {"label": " Area", "value": "area"},
                                                 {"label": " Volume", "value": "volume"},
                                             ],
-                                            value="area",
+                                            value="volume",
                                             className="mb-2",
                                             inline=True,
                                             labelStyle={"color": "white"},
@@ -5092,88 +5168,85 @@ def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store
         header="MIGTIME TABLE EXPORTED",
     )
 
-    # Flush processed-data flag edits to disk.
-    flag_persist_msg = ""
+    # Flush processed-data flag edits to disk in a background thread so the
+    # user can move on to Tab 3 immediately — the migtime CSV (the important
+    # part) is already written above.
     rn_msg = ""
     if processed_json:
-        try:
-            df = _json_to_df(processed_json, "processed")
+        def _bg_persist():
+            try:
+                df = _json_to_df(processed_json, "processed")
 
-            # Flag (do NOT delete) the resident/nomadic animal-years. Their rows
-            # stay in the processed data tagged with a `classification` column;
-            # they're kept out of the analysis because their migtime rows were
-            # dropped above (no migration sequences are built for them).
-            removed_df = pd.DataFrame()
-            if removed_keys and "id_bio_year" in df.columns:
-                key_str = df["id_bio_year"].astype(str)
-                mask = key_str.isin(removed_keys)
-                if "classification" not in df.columns:
-                    df["classification"] = ""
-                df.loc[mask, "classification"] = key_str[mask].map(class_store)
-                removed_df = df[mask].copy()
+                removed_df = pd.DataFrame()
+                if removed_keys and "id_bio_year" in df.columns:
+                    key_str = df["id_bio_year"].astype(str)
+                    mask = key_str.isin(removed_keys)
+                    if "classification" not in df.columns:
+                        df["classification"] = ""
+                    df.loc[mask, "classification"] = key_str[mask].map(class_store)
+                    removed_df = df[mask].copy()
 
-            _save_processed_to_disk(df.copy())
-            if _ACTIVE_WORKDIR is not None:
-                outputs = _workdir_outputs()
-                # Archive removed animal-years next to FlagsRemoved.gpkg.
-                if not removed_df.empty:
-                    removed_df["classification"] = (
-                        removed_df["id_bio_year"].astype(str).map(class_store)
-                    )
-                    removed_df.to_csv(outputs / "ResidentsNomadsRemoved.csv", index=False)
-                    try:
-                        import geopandas as gpd
-                        if {"lon", "lat"}.issubset(removed_df.columns):
-                            grn = gpd.GeoDataFrame(
-                                removed_df,
-                                geometry=gpd.points_from_xy(removed_df["lon"], removed_df["lat"]),
-                                crs="EPSG:4326",
-                            )
-                            grn.to_file(outputs / "ResidentsNomadsRemoved.shp")
-                    except Exception as shp_exc:
-                        print(f"WARNING: ResidentsNomadsRemoved.shp write failed: {shp_exc}")
-                    rn_msg = (
-                        f" Flagged {n_removed_years} resident/nomadic animal-year(s) "
-                        f"({len(removed_df):,} fixes), excluded from analysis → "
-                        f"ResidentsNomadsRemoved.csv."
-                    )
-                    _log_action(
-                        "RESIDENTS_NOMADS_REMOVED",
-                        animal_years=n_removed_years,
-                        fixes=len(removed_df),
-                    )
-                df.to_parquet(str(outputs / "processed_data.parquet"), index=False)
-                # FlagsRemoved.gpkg — refresh so it reflects the current flags.
-                herd_id = "Herd"
-                project_name_token = "Project"
-                if config_json:
-                    cfg_obj = json.loads(config_json) if isinstance(config_json, str) else config_json
-                    if isinstance(cfg_obj, dict):
-                        herd_id = str(cfg_obj.get("herd_id", "Herd"))
-                        project_name_token = str(cfg_obj.get("project_name", "Project"))
-                try:
-                    fr_path = write_flags_removed_shapefile(
-                        processed_df=df,
-                        out_dir=outputs,
-                        herd_id=herd_id,
-                        project_name=project_name_token,
-                    )
-                    if fr_path is not None:
-                        _log_action(
-                            "FLAGS_REMOVED_EXPORT",
-                            trigger="export_button",
-                            path=str(fr_path.name),
+                _save_processed_to_disk(df.copy())
+                if _ACTIVE_WORKDIR is not None:
+                    outputs = _workdir_outputs()
+                    if not removed_df.empty:
+                        removed_df["classification"] = (
+                            removed_df["id_bio_year"].astype(str).map(class_store)
                         )
-                        flag_persist_msg = f" Flags persisted to {fr_path.name}."
-                except Exception as fr_exc:
-                    flag_persist_msg = f" (FlagsRemoved refresh failed: {fr_exc})"
-                    print(f"WARNING: FlagsRemoved refresh failed: {fr_exc}")
-        except Exception as exc:
-            flag_persist_msg = f" (Processed-data save failed: {exc})"
-            print(f"WARNING: failed to persist flagged data: {exc}")
+                        removed_df.to_csv(outputs / "ResidentsNomadsRemoved.csv", index=False)
+                        try:
+                            import geopandas as gpd
+                            if {"lon", "lat"}.issubset(removed_df.columns):
+                                grn = gpd.GeoDataFrame(
+                                    removed_df,
+                                    geometry=gpd.points_from_xy(removed_df["lon"], removed_df["lat"]),
+                                    crs="EPSG:4326",
+                                )
+                                grn.to_file(outputs / "ResidentsNomadsRemoved.shp")
+                        except Exception as shp_exc:
+                            print(f"WARNING: ResidentsNomadsRemoved.shp write failed: {shp_exc}")
+                        _log_action(
+                            "RESIDENTS_NOMADS_REMOVED",
+                            animal_years=n_removed_years,
+                            fixes=len(removed_df),
+                        )
+                    df.to_parquet(str(outputs / "processed_data.parquet"), index=False)
+                    herd_id = "Herd"
+                    project_name_token = "Project"
+                    if config_json:
+                        cfg_obj = json.loads(config_json) if isinstance(config_json, str) else config_json
+                        if isinstance(cfg_obj, dict):
+                            herd_id = str(cfg_obj.get("herd_id", "Herd"))
+                            project_name_token = str(cfg_obj.get("project_name", "Project"))
+                    try:
+                        fr_path = write_flags_removed_shapefile(
+                            processed_df=df,
+                            out_dir=outputs,
+                            herd_id=herd_id,
+                            project_name=project_name_token,
+                        )
+                        if fr_path is not None:
+                            _log_action(
+                                "FLAGS_REMOVED_EXPORT",
+                                trigger="export_button",
+                                path=str(fr_path.name),
+                            )
+                    except Exception as fr_exc:
+                        print(f"WARNING: FlagsRemoved refresh failed: {fr_exc}")
+            except Exception as exc:
+                print(f"WARNING: background flag persist failed: {exc}")
+            print("Background flag persistence complete.")
+
+        threading.Thread(target=_bg_persist, daemon=True, name="migtime-flag-persist").start()
+        if n_removed_years:
+            rn_msg = (
+                f" Flagged {n_removed_years} resident/nomadic animal-year(s), "
+                f"excluded from analysis."
+            )
 
     return _ok_alert(
-        f"Saved to Migtime_Exports/{out_path.name} ({len(migtime)} rows).{rn_msg}{flag_persist_msg}"
+        f"Saved to Migtime_Exports/{out_path.name} ({len(migtime)} rows).{rn_msg}"
+        f" Flags saving in background."
     )
 
 
@@ -6392,16 +6465,16 @@ def render_model_params(model, processed_json):
             dbc.Label("Location Error (m)", style={"fontSize": "0.85rem"}),
             dbc.Input(id={"type": "model-param", "key": "bbmm_loc_error"}, type="number", value=20, min=0, className="mb-2"),
             dbc.Label("Max Lag (hours)", style={"fontSize": "0.85rem"}),
-            dbc.Input(id={"type": "model-param", "key": "bbmm_max_lag"}, type="number", value=8, min=0, className="mb-2"),
+            dbc.Input(id={"type": "model-param", "key": "bbmm_max_lag"}, type="number", value=27, min=0, className="mb-2"),
             dbc.Label("Time Step (min)", style={"fontSize": "0.85rem"}),
             dbc.Input(id={"type": "model-param", "key": "bbmm_timestep"}, type="number", value=5, min=1, className="mb-2"),
             dbc.Label("Contour (%)", style={"fontSize": "0.85rem"}),
             dbc.Input(id={"type": "model-param", "key": "bbmm_contour"}, type="number", value=99, min=50, max=100, step=0.001, className="mb-2"),
             dbc.Label("Grid buffer (mult4buff)", style={"fontSize": "0.85rem"}),
-            dbc.Input(id={"type": "model-param", "key": "bbmm_mult4buff"}, type="number", value=0.3, min=0, max=2, step=0.05, className="mb-1"),
+            dbc.Input(id={"type": "model-param", "key": "bbmm_mult4buff"}, type="number", value=0.2, min=0, max=2, step=0.05, className="mb-1"),
             html.Small(
                 "Fraction of the sequence's extent added as a margin when carving the analysis "
-                "subgrid. R default 0.3.",
+                "subgrid.",
                 className="text-muted d-block mb-2", style={"fontSize": "0.7rem"},
             ),
             html.Hr(className="my-2"),
@@ -6409,13 +6482,13 @@ def render_model_params(model, processed_json):
             dbc.Checkbox(
                 id={"type": "model-param", "key": "bbmm_individual"},
                 label="Per-individual UDs (per season + combined)",
-                value=False,
+                value=True,
                 style={"fontSize": "0.8rem"},
             ),
             dbc.Checkbox(
                 id={"type": "model-param", "key": "bbmm_ranges"},
-                label="Winter & summer range UDs (mean-UD density)",
-                value=False,
+                label="Intermediate range UDs (mean-UD density, e.g., Summer and Winter range UDs)",
+                value=True,
                 style={"fontSize": "0.8rem"},
             ),
             dbc.Label("Range min. days of data", style={"fontSize": "0.8rem", "marginTop": "4px"}),
@@ -6428,6 +6501,23 @@ def render_model_params(model, processed_json):
                 "An animal-year's range is skipped if it has fewer than this many distinct days of fixes "
                 "(or is missing a bounding migration date); skips are noted in processing_log.txt.",
                 className="text-muted d-block mb-2", style={"fontSize": "0.68rem"},
+            ),
+            dbc.Checkbox(
+                id={"type": "model-param", "key": "bbmm_linebuffer"},
+                label="Line buffer (buffered migration lines stacked per animal)",
+                value=False,
+                style={"fontSize": "0.8rem"},
+            ),
+            html.Div(
+                id="bbmm-linebuffer-distance-wrapper",
+                children=[
+                    dbc.Label("Buffer distance (m, total width — applied as half on each side)", style={"fontSize": "0.8rem", "marginTop": "4px"}),
+                    dbc.Input(
+                        id={"type": "model-param", "key": "bbmm_linebuffer_distance"},
+                        type="number", value=400, min=1, step=1, size="sm",
+                    ),
+                ],
+                style={"display": "none"},
             ),
         ]
     elif model == "DBBMM":
@@ -6548,6 +6638,70 @@ def render_model_params(model, processed_json):
         panel = [html.Span("Select a model to see parameters.", className="text-muted small")]
 
     return panel, auto_logic
+
+
+@app.callback(
+    Output("bbmm-linebuffer-distance-wrapper", "style"),
+    Input({"type": "model-param", "key": "bbmm_linebuffer"}, "value"),
+    prevent_initial_call=True,
+)
+def toggle_linebuffer_distance(checked):
+    return {"display": "block"} if checked else {"display": "none"}
+
+
+def _build_linebuffer_output(
+    sequences_dict: dict,
+    seq_animal: dict,
+    buffer_distance: float,
+    outputs: Path,
+    utm_crs,
+) -> None:
+    """Buffer each sequence's migration line, union per animal, and write a
+    stacked shapefile.  ``buffer_distance`` is the TOTAL width (applied as
+    half on each side, cap_style=round)."""
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+
+    half = buffer_distance / 2.0
+    animal_buffers: dict[str, list] = {}
+
+    for mig_key, sub in sequences_dict.items():
+        if sub is None or len(sub) < 2:
+            continue
+        work = sub.copy().sort_values("date")
+        if utm_crs is not None and getattr(work, "crs", None) is not None and work.crs != utm_crs:
+            work = work.to_crs(utm_crs)
+        xs = work.geometry.x.to_numpy(dtype=float)
+        ys = work.geometry.y.to_numpy(dtype=float)
+        line = LineString(list(zip(xs, ys)))
+        buffered = line.buffer(half, cap_style="round")
+        animal_id = seq_animal.get(mig_key, str(mig_key).rsplit("_", 2)[0])
+        animal_buffers.setdefault(animal_id, []).append(buffered)
+
+    if not animal_buffers:
+        _append_processing_log(
+            ["No sequences with ≥2 points — nothing to buffer."], header="LINE BUFFER",
+        )
+        return
+
+    rows = []
+    for animal_id, polys in sorted(animal_buffers.items()):
+        merged = unary_union(polys)
+        rows.append({"animal_id": animal_id, "n_seqs": len(polys), "buff_m": buffer_distance, "geometry": merged})
+
+    gdf = gpd.GeoDataFrame(rows, crs=utm_crs)
+    lb_dir = outputs / "LineBuffer"
+    lb_dir.mkdir(parents=True, exist_ok=True)
+    out_path = lb_dir / "LineBuffer_perAnimal.shp"
+    gdf.to_file(out_path)
+
+    _append_processing_log(
+        [f"Buffer distance: {buffer_distance} m ({half} m each side, round caps)",
+         f"Animals: {len(animal_buffers)}, sequences buffered: {sum(len(v) for v in animal_buffers.values())}",
+         f"Output: {out_path.relative_to(outputs)}"],
+        header="LINE BUFFER",
+    )
+    _log_action("LINE_BUFFER", animals=len(animal_buffers), buffer_m=buffer_distance)
 
 
 def _num_or_none(v):
@@ -6766,6 +6920,11 @@ def run_modeling(
         # None → off). Not model params, so _apply_model_ui_params ignores them.
         want_individual = bool(ui_params.get("bbmm_individual"))
         want_ranges = bool(ui_params.get("bbmm_ranges"))
+        want_linebuffer = bool(ui_params.get("bbmm_linebuffer"))
+        try:
+            linebuffer_distance = float(ui_params.get("bbmm_linebuffer_distance") or 400)
+        except (TypeError, ValueError):
+            linebuffer_distance = 400.0
         try:
             range_mindays = int(ui_params.get("bbmm_range_mindays") or 30)
         except (TypeError, ValueError):
@@ -6930,6 +7089,16 @@ def run_modeling(
                 except Exception as exc:
                     _append_processing_log(
                         [f"Range UD output FAILED: {exc}"], header="WINTER / SUMMER RANGE UDs",
+                    )
+
+            if want_linebuffer:
+                try:
+                    _build_linebuffer_output(
+                        sequences_dict, seq_animal, linebuffer_distance, outputs, utm_crs,
+                    )
+                except Exception as exc:
+                    _append_processing_log(
+                        [f"Line buffer output FAILED: {exc}"], header="LINE BUFFER",
                     )
 
         # MigLines / MigPoints / MigLines_Dist shapefiles — written next to
@@ -8189,13 +8358,12 @@ def _render_mem_product(product_id: str, cmap: str = "viridis"):
     if vmax <= vmin:
         vmax = vmin + 1.0
 
-    from matplotlib import colormaps
-    cm = colormaps.get_cmap(cmap)
     normed = np.clip((dst - vmin) / (vmax - vmin), 0, 1)
-    rgba = (cm(normed) * 255).astype(np.uint8)
-    rgba[~valid] = 0
+    rgb = _ramp_rgb(normed, cmap)
+    alpha = np.where(valid, 255, 0).astype(np.uint8)
+    rgba = np.dstack([rgb, alpha])
 
-    png_bytes = _rgba_to_png(rgba)
+    png_bytes = _png_encode_rgba(rgba)
     data_uri = "data:image/png;base64," + base64.b64encode(png_bytes).decode()
     info = f"{prod['filename']} — range {vmin:.4g}–{vmax:.4g}"
     return data_uri, overlay_bounds, info

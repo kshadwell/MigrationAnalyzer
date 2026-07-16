@@ -324,7 +324,7 @@ def calc_population_use(
             ind_id, year = parts[0], parts[1]
         else:
             ind_id, year = key, "all"
-        parsed[(ind_id, year)] = arr.astype(np.float64)
+        parsed[(ind_id, year)] = arr.astype(np.float32)
 
     # ------------------------------------------------------------------
     # Merge according to merge_order
@@ -365,13 +365,15 @@ def calc_population_use(
         presence = (stack > 0).sum(axis=0) / n_layers * 100.0
         prop_grid = presence
     elif contour_type == "Volume":
-        # Normalise each layer to sum-to-1, sum across layers, rescale to %
-        normed = np.zeros_like(stack)
+        # Normalise each layer to sum-to-1 in-place, then accumulate into a
+        # 2-D sum to avoid allocating a second full 3-D array.
+        stack = stack.astype(np.float32, copy=False)
+        summed = np.zeros(stack.shape[1:], dtype=np.float64)
         for i in range(n_layers):
             total = stack[i].sum()
             if total > 0:
-                normed[i] = stack[i] / total
-        summed = normed.sum(axis=0)
+                stack[i] /= total
+            summed += stack[i]
         # cumulative volume from highest to lowest
         flat = summed.ravel()
         order = np.argsort(flat)[::-1]
@@ -801,7 +803,7 @@ def calc_season_banded_outputs(
     herd_id: str = "Herd",
     season_label: str = "All",
     date_stamp: str | None = None,
-    min_individuals: tuple[int, ...] = (1, 2, 3),
+    min_individuals: tuple[int, ...] = (2, 3),
     top_pct: tuple[float, ...] = (10, 20),
     stopover_pct: float = 10.0,
     all_isopleths: tuple[float, ...] = (5, 10, 15, 20, 30, 50, 75, 95),
@@ -914,7 +916,7 @@ def compute_season_banded_products(
     herd_id: str = "Herd",
     season_label: str = "All",
     date_stamp: str | None = None,
-    min_individuals: tuple[int, ...] = (1, 2, 3),
+    min_individuals: tuple[int, ...] = (2, 3),
     top_pct: tuple[float, ...] = (10, 20),
     stopover_pct: float = 10.0,
     all_isopleths: tuple[float, ...] = (5, 10, 15, 20, 30, 50, 75, 95),
@@ -958,7 +960,7 @@ def compute_season_banded_products(
     src_crs = CRS.from_user_input(grid_meta["crs"])
 
     # Stack into (n_layers, H, W).
-    arrays = [arr.astype(np.float64) for arr in ud_dict.values()]
+    arrays = [arr.astype(np.float32) for arr in ud_dict.values()]
     stack = np.stack(arrays, axis=0)
     n_layers = stack.shape[0]
 
@@ -967,12 +969,14 @@ def compute_season_banded_products(
 
     # Mean UD (probability surface) — each individual normalised to sum=1
     # before averaging so big-range animals don't drown out small-range ones.
-    normed = np.zeros_like(stack)
+    # Normalise in-place and accumulate into a 2-D sum to avoid a second 3-D array.
+    mean_ud = np.zeros(stack.shape[1:], dtype=np.float64)
     for i in range(n_layers):
         total = stack[i].sum()
         if total > 0:
-            normed[i] = stack[i] / total
-    mean_ud = normed.mean(axis=0)
+            stack[i] /= total
+        mean_ud += stack[i]
+    mean_ud /= n_layers
     s = mean_ud.sum()
     if s > 0:
         mean_ud /= s
@@ -1012,11 +1016,22 @@ def compute_season_banded_products(
     })
 
     # ---- 2. minN: cells used by ≥N individuals ----
+    # minimum1 is redundant with the "all" isopleth output, so skip it.
+    # minimum2+ are rasters carrying the actual count values (not binary masks)
+    # clipped to cells where count >= N, so the user sees overlap intensity.
     for n in min_individuals:
-        mask = (count_grid >= n).astype(np.uint8)
+        if n < 2:
+            continue
+        mask = (count_grid >= n)
         if mask.sum() == 0:
             continue
-        _add_mask_pair(mask, f"minimum{n}", f"{season} ≥{n} individual{'s' if n != 1 else ''}")
+        clipped = np.where(mask, count_grid, 0).astype(np.float32)
+        products.append({
+            "key": f"minimum{n}_tif", "kind": "float32",
+            "filename": f"{prefix}_minimum{n}.tif",
+            "label": f"{season} ≥{n} individuals count raster",
+            "array": clipped,
+        })
 
     # ---- 3. topP%: top X% by volume of the broad USE (count) surface, not the
     # concentrated mean-UD density (which gave tiny specks). Rank cells by

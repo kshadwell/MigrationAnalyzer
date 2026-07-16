@@ -243,14 +243,44 @@ These are the in-flight tasks mirrored from the session task list.
   - **Population merging step**: our `calc_season_banded_outputs` normalises each individual to sum=1 then averages. R's `CalcPopUse` may do a weighted sum or volume-rank-based aggregation.
   - **Cell-size and CRS**: confirm both pipelines use the same projected CRS and 500 m cell size end-to-end (no implicit reprojection differences).
 - **Test CTMM and dBBMM end-to-end.** (Backburner) Implementation done (2026-07-09) via R subprocess but not yet verified. Plan is to translate the R scripts to native Python, so deferring testing of the R bridge.
-- **Sort minimum outputs by number of species.** Currently just 0/1; should sort by count. Minimum 1 is low-value but keep for now.
 - **Investigate pop_use_contours.shp.** Not showing any data — determine what this file is and fix.
 - **CTMM season outputs.** Generate spring migration, fall migration, summer, and winter points and lines from CTMM.
 - **~50m offset in CTMM points.** Test data showed all points offset ~50 m from original CTMM points. **Audit (2026-07-14):** almost certainly **grid cell snapping** (`np.ceil` on 250m cells → up to ~125m shift), not a projection bug.
 - **Polygon shapefiles + smoothing.** Implement Flenner's smoothing method for polygon shapefiles.
 - **Subherd selection and re-analysis.** Add a step (possibly before Migtime) to view data and identify subherds, then divide individuals into subherds and rerun analysis. Example: D4 would split into 3 groups (west of Hwy 287, towards Hwy 230, west towards the divide). Add stacked buffered line layers (400 m buffer, per Jerod Merkle). **Research (2026-07-14):** Migration Mapper has no built-in subherd partitioning — `herd_id` is just a filename prefix (DAU code), and there's no grouping/clustering mechanism. No precedent to follow. Approaches under consideration: (1) **In-app visual selection** — show tracklines on the Tab 1 map, let users draw polygons or lasso-select animals into named groups, then run the analysis per group. Most polished but significant to build. (2) **Animal tag UI** — lighter middle ground: a multi-select/tag panel in Tab 1 or Tab 2 where users assign animals to named groups after viewing the data, then run per group. (3) **External pre-processing** — users split their input CSV into separate files by subherd before loading. No app changes, but puts the burden on the user.
 - **Statewide grid + polygon shapefile for migration output.** Lower priority — Flenner? Add a statewide grid and polygon shapefile to export migration outputs into.
+- **Add WLD file documentation.** Explain what WLD files are, where they come from, what variables they contain, and how the merge works — both in the app UI (tooltip/help text) and in INFORMATION.md.
+- **Explore contour outputs.** Investigate the contour shapefile outputs — verify they render correctly, contain expected geometry, and match Migration Mapper's contour output format.
+- **Compare outputs across drop/fill levels.** Run side-by-side comparisons of population outputs with different `min_area_drop` / `min_area_fill` thresholds to evaluate quality and determine good defaults.
+- **Smoothing + drop/fill for all polygon outputs.** Currently smoothing and min-area drop/fill may only apply to contour-level outputs. Verify and extend to all polygon outputs (banded corridors, range UDs, etc.).
+- **Note in outputs: individuals are stacked, not sequences.** Add a note/label in the population output UI and exported metadata clarifying that individual UDs are stacked (averaged), not per-sequence UDs.
+- **Information popups (ℹ buttons).** Add small info buttons next to key parameters/UI elements that show a popup explaining what the parameter does, recommended values, and defaults. Will create a reference document specifying the content for each popup. Covers WLD file documentation (#9) and the "individuals not sequences" note (#13).
+- **User guide.** Create a step-by-step user guide explaining how to use the app for different purposes. Link or include in the repository.
 
+
+### 2026-07-16 — Defaults, bug fixes, line buffer, memory fix, migtime speedup, minimum output rework
+
+**BBMM default changes.** Max lag: 8 → 27 hours. Grid buffer (mult4buff): 0.3 → 0.2; removed "R default 0.3" helper text. Per-individual UDs and intermediate range UDs now default ON; range UDs relabeled to "Intermediate range UDs (mean-UD density, e.g., Summer and Winter range UDs)". Extra BBMM outputs checkbox removed (individual sub-options are now the checkboxes).
+
+**TIGER road crossings default ON.** Tab 1 "Detect road crossings" checkbox now `value=True`.
+
+**Bio-year start defaults note.** Added "Recommended: Mule Deer Feb. 1; Elk Feb. 15" below bio-year inputs on Tab 1, Tab 2 sequencing settings, and Tab 2 migtime import.
+
+**Default population contour type to Volume.** Tab 4 `pop-contour-type` radio default changed from Area to Volume.
+
+**Raster overlay crash fix.** `_render_mem_product` (main.py) called `_rgba_to_png(rgba)` but the function is named `_png_encode_rgba` — `NameError`. Fixed to `_png_encode_rgba`. Originally misdiagnosed as a matplotlib issue; the matplotlib dependency was already removed by `_ramp_rgb` + `_png_encode_rgba`.
+
+**Population outputs OOM on Volume contour type — fixed.** `calc_population_use` and `compute_season_banded_products` (`population_outputs.py`) allocated a duplicate 3D float64 array via `np.zeros_like(stack)` for normalization. With 168 layers × 1020 × 750, that was ~981 MiB on top of the stack itself. Fix: (1) parse/stack UDs as float32 instead of float64 (halves the stack); (2) normalize in-place and accumulate into a 2D sum instead of a second 3D array. Net memory reduction ~75%.
+
+**Line buffer in BBMM extra outputs.** New optional checkbox under BBMM extra outputs: "Line buffer (buffered migration lines stacked per animal)". Default off. When checked, a distance input appears (default 400 m total width = 200 m each side, round caps). `_build_linebuffer_output` buffers each sequence's LineString, unions all buffers per animal (not per sequence), and writes `V{n}/LineBuffer/LineBuffer_perAnimal.shp` with columns `animal_id`, `n_seqs`, `buff_m`. Logged to processing_log.txt under "LINE BUFFER".
+
+**Migtime export speedup.** The "Export Updated Table" button was slow because it synchronously wrote the migtime CSV, two parquet files, ResidentsNomadsRemoved files, and FlagsRemoved.gpkg (~5-15s for the gpkg alone on 200k rows). Now the migtime CSV writes immediately and the heavy I/O (parquet saves, FlagsRemoved rebuild) runs in a daemon background thread. The user sees the success alert instantly and can move to Tab 3 while persistence finishes. Console prints "Background flag persistence complete." when done.
+
+**minimum1 output removed; min2/min3 changed to count rasters.** minimum1 (≥1 individual) was redundant with the "all" isopleth output — removed. minimum2/minimum3 are now float32 rasters carrying actual overlap-count values clipped to cells where count ≥ N (instead of binary uint8 masks). Polygon outputs for min2/min3 removed. Default `min_individuals` tuple changed from `(1, 2, 3)` to `(2, 3)`.
+
+**Version-local processing log.** Each `V{n}/` folder now gets a `processing_log.txt` summarising the version type (model run or population branch), full parameters, and a human-readable diff of what changed from the parent version (e.g., `contour_type: Area -> Volume`). Written by `_write_version_log`, called from both `_write_version_manifest` (model runs) and `_write_pop_version_manifest` (population branches). The `_write_pop_version_manifest` also now computes and records `changed_from_parent` in the JSON manifest (previously only model-run manifests had this).
+
+**Files touched.** `app/main.py` (road crossing default, BBMM defaults, bio-year notes, contour type default, `_rgba_to_png` fix, `_build_linebuffer_output`, `toggle_linebuffer_distance` callback, `_write_version_log`, `_write_pop_version_manifest` changed-from-parent diff, `export_migtime` background thread), `app/modules/population_outputs.py` (float32 in `calc_population_use` + `compute_season_banded_products`, minimum1 removed, min2/min3 raster-only with count values, default `min_individuals` tuple).
 
 ### 2026-07-15 — Multi-column timestamp selection + CRS/projection handling
 
