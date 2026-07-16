@@ -980,6 +980,9 @@ def _build_loaded_project_summary(df: pd.DataFrame, project_name: str, meta: dic
     processed_at = (meta.get("processed_at") or "").strip()
     if processed_at:
         info_lines.append(html.Div([html.Strong("Processed at: "), processed_at]))
+    saved_crs = (meta.get("input_crs") or "").strip()
+    if saved_crs:
+        info_lines.append(html.Div([html.Strong("Input CRS: "), html.Code(saved_crs)]))
     if enrichment_cols:
         info_lines.append(html.Div([html.Strong("Enrichment present: "), ", ".join(enrichment_cols)]))
 
@@ -1116,7 +1119,7 @@ navbar = dbc.Navbar(
 # Component IDs are the contracts with the callback layer further down.
 # Search for an ID (e.g. "param-herd-id-override") to find both its layout
 # definition here and the callback that reads it.
-def _col_map_row(label, dropdown_id, options=None):
+def _col_map_row(label, dropdown_id, options=None, multi=False):
     return dbc.Row(
         [
             dbc.Col(dbc.Label(label, style={"fontSize": "0.85rem"}), width=4),
@@ -1124,9 +1127,10 @@ def _col_map_row(label, dropdown_id, options=None):
                 dcc.Dropdown(
                     id=dropdown_id,
                     options=options or [],
-                    placeholder="Select column…",
+                    placeholder="Select column…" if not multi else "Select column(s)…",
                     style={"fontSize": "0.85rem"},
                     className="dash-dark-dropdown",
+                    multi=multi,
                 ),
                 width=8,
             ),
@@ -1290,9 +1294,51 @@ tab1_layout = dbc.Container(
                                 dbc.CardBody(
                                     [
                                         _col_map_row("Animal ID column", "col-animal-id"),
-                                        _col_map_row("Timestamp column", "col-timestamp"),
-                                        _col_map_row("Longitude column", "col-lon"),
-                                        _col_map_row("Latitude column", "col-lat"),
+                                        _col_map_row("Timestamp column(s)", "col-timestamp", multi=True),
+                                        html.Div(
+                                            [
+                                                _col_map_row("Longitude column", "col-lon"),
+                                                _col_map_row("Latitude column", "col-lat"),
+                                            ],
+                                            id="coord-lonlat-group",
+                                        ),
+                                        html.Div(
+                                            [
+                                                _col_map_row("UTM Easting column", "col-utm-easting"),
+                                                _col_map_row("UTM Northing column", "col-utm-northing"),
+                                            ],
+                                            id="coord-utm-group",
+                                            style={"display": "none"},
+                                        ),
+                                        dbc.Collapse(
+                                            dbc.Alert(
+                                                [
+                                                    html.Strong("Note: "),
+                                                    "This app automatically assumes the input CSV data is in the "
+                                                    "WGS84 (EPSG:4326) projection, consistent with the collar data "
+                                                    "stored in Wildlife Tracker. If instead of Latitude/Longitude "
+                                                    "information your data uses UTM Northing/Easting, it may be in "
+                                                    "the other commonly used projection/CRS, such as WGS84 UTM "
+                                                    "Zone 13N (EPSG:32613). If this is the case, check the box below. "
+                                                    "If not, please transform your CSV data externally or import a "
+                                                    "zipped shapefile instead.",
+                                                ],
+                                                color="warning",
+                                                className="small mt-2 mb-2",
+                                            ),
+                                            id="csv-crs-warning",
+                                            is_open=False,
+                                        ),
+                                        html.Div(
+                                            dbc.Checkbox(
+                                                id="utm-input-toggle",
+                                                label="Yes, my CSV data is in UTM Zone 13N (EPSG:32613)",
+                                                value=False,
+                                                className="small",
+                                            ),
+                                            id="utm-toggle-wrapper",
+                                            style={"display": "none"},
+                                        ),
                                     ]
                                 ),
                             ],
@@ -3177,21 +3223,34 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
     """Read the first 200 rows of *file_path*, auto-detect common column names,
     and return the tuple of outputs the upload / auto-load callbacks expect.
 
-    Tuple shape (matches the 11-output callback signature):
-        (fname_display, col_opts, col_opts, col_opts, col_opts,
-         id_val, ts_val, lon_val, lat_val,
-         preview_table, processed_source_path)
+    Tuple shape (matches the 18-output callback signature):
+        (fname_display,
+         col_opts x4, id_val, ts_val, lon_val, lat_val,
+         preview_table, source_path,
+         csv_warning_open, utm_toggle_style, utm_checked,
+         utm_opts x2, utm_e_val, utm_n_val,
+         lonlat_style, utm_group_style)
     """
     file_path = Path(file_path)
     suffix = file_path.suffix.lower()
     display_name = display_name or file_path.name
+
+    _UTM_DEFAULTS = (
+        False, {"display": "none"}, False,
+        [], [], None, None,
+        {"display": "block"}, {"display": "none"},
+    )
+
+    detected_crs = None
 
     if suffix == ".csv":
         df = pd.read_csv(str(file_path), nrows=200, low_memory=False)
         source_path = str(file_path)
     elif suffix == ".shp":
         import geopandas as gpd_local
-        df = gpd_local.read_file(str(file_path)).head(200)
+        gdf_preview = gpd_local.read_file(str(file_path)).head(200)
+        detected_crs = gdf_preview.crs
+        df = gdf_preview
         source_path = str(file_path)
     elif suffix == ".zip":
         import zipfile
@@ -3206,17 +3265,28 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
                 None, None, None, None,
                 _err_alert("No shapefile found inside the ZIP."),
                 None,
+                *_UTM_DEFAULTS,
             )
         import geopandas as gpd_local
-        df = gpd_local.read_file(str(shp_files[0])).head(200)
+        gdf_preview = gpd_local.read_file(str(shp_files[0])).head(200)
+        detected_crs = gdf_preview.crs
+        df = gdf_preview
         source_path = str(shp_files[0])
     else:
         return (
             f"Unsupported file type: {display_name}",
-            [], [], [], [], None, None, None, None,
+            [], [], [], [],
+            None, None, None, None,
             _err_alert(f"Unsupported file type '{suffix}'."),
             None,
+            *_UTM_DEFAULTS,
         )
+
+    is_projected = (
+        detected_crs is not None
+        and detected_crs.is_projected
+    )
+    is_csv = suffix == ".csv"
 
     cols = [{"label": c, "value": c} for c in df.columns if c != "geometry"]
 
@@ -3228,12 +3298,32 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
         return None
 
     id_val = _auto(["TrakAID", "animalTrackerId", "LoclAID", "animalIdLocal", "animal_id", "ID", "id", "AnimalID"])
-    ts_val = _auto(["DT_MST", "timestamp", "datetime", "date_time", "DateTime"])
-    lon_val = _auto(["Long", "lon", "longitude", "x", "Longitude"])
-    lat_val = _auto(["Lat", "lat", "latitude", "y", "Latitude"])
+    _ts_match = _auto(["DT_MST", "timestamp", "datetime", "date_time", "DateTime"])
+    ts_val = [_ts_match] if _ts_match else []
+
+    if is_projected:
+        lon_val = None
+        lat_val = None
+        utm_e_val = _auto(["UTME", "UTM_E", "Easting", "easting", "x", "X", "POINT_X"])
+        utm_n_val = _auto(["UTMN", "UTM_N", "Northing", "northing", "y", "Y", "POINT_Y"])
+    else:
+        lon_val = _auto(["Long", "lon", "longitude", "x", "Longitude"])
+        lat_val = _auto(["Lat", "lat", "latitude", "y", "Latitude"])
+        utm_e_val = None
+        utm_n_val = None
 
     preview_table = _make_preview_table(df)
-    fname_display = html.Span(f"Loaded: {display_name}", className="text-success small")
+
+    crs_note = ""
+    if detected_crs and detected_crs.to_epsg():
+        crs_note = f" · CRS: EPSG:{detected_crs.to_epsg()}"
+    elif detected_crs:
+        crs_note = f" · CRS: {detected_crs.name}"
+
+    fname_display = html.Span(
+        f"Loaded: {display_name}{crs_note}",
+        className="text-success small",
+    )
 
     return (
         fname_display,
@@ -3241,6 +3331,15 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
         id_val, ts_val, lon_val, lat_val,
         preview_table,
         source_path,
+        # CSV CRS warning + UTM toggle
+        is_csv,
+        {"display": "block"} if is_csv else {"display": "none"},
+        is_projected,
+        cols, cols,
+        utm_e_val, utm_n_val,
+        # Coordinate group visibility
+        {"display": "none"} if is_projected else {"display": "block"},
+        {"display": "block"} if is_projected else {"display": "none"},
     )
 
 
@@ -3256,6 +3355,15 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
     Output("col-lat", "value"),
     Output("tab1-preview", "children"),
     Output("store-upload-path", "data"),
+    Output("csv-crs-warning", "is_open"),
+    Output("utm-toggle-wrapper", "style"),
+    Output("utm-input-toggle", "value"),
+    Output("col-utm-easting", "options"),
+    Output("col-utm-northing", "options"),
+    Output("col-utm-easting", "value"),
+    Output("col-utm-northing", "value"),
+    Output("coord-lonlat-group", "style"),
+    Output("coord-utm-group", "style"),
     Input("upload-data", "contents"),
     State("upload-data", "filename"),
     State("store-workdir", "data"),
@@ -3276,6 +3384,12 @@ def handle_upload(contents, filename, workdir_path):
     # .shp has no .shx/.dbf/.prj sidecars with it, so GDAL fails with
     # 'Unable to open .shx … Set SHAPE_RESTORE_SHX=YES …'. Short-circuit
     # here with a message the user can actually act on.
+    _UTM_DEFAULTS = (
+        False, {"display": "none"}, False,
+        [], [], None, None,
+        {"display": "block"}, {"display": "none"},
+    )
+
     if suffix == ".shp":
         return (
             f"Cannot upload bare .shp: {filename}",
@@ -3290,6 +3404,7 @@ def handle_upload(contents, filename, workdir_path):
                 "<workdir>/ModelInputs/ and pick the file from the dropdown."
             ),
             None,
+            *_UTM_DEFAULTS,
         )
 
     try:
@@ -3317,6 +3432,7 @@ def handle_upload(contents, filename, workdir_path):
             None, None, None, None,
             _err_alert(f"Upload error: {exc}"),
             None,
+            *_UTM_DEFAULTS,
         )
 
 
@@ -3389,6 +3505,15 @@ def populate_modelinputs_dropdown(workdir_path, current_upload_path, current_sel
     Output("col-lat", "value", allow_duplicate=True),
     Output("tab1-preview", "children", allow_duplicate=True),
     Output("store-upload-path", "data", allow_duplicate=True),
+    Output("csv-crs-warning", "is_open", allow_duplicate=True),
+    Output("utm-toggle-wrapper", "style", allow_duplicate=True),
+    Output("utm-input-toggle", "value", allow_duplicate=True),
+    Output("col-utm-easting", "options", allow_duplicate=True),
+    Output("col-utm-northing", "options", allow_duplicate=True),
+    Output("col-utm-easting", "value", allow_duplicate=True),
+    Output("col-utm-northing", "value", allow_duplicate=True),
+    Output("coord-lonlat-group", "style", allow_duplicate=True),
+    Output("coord-utm-group", "style", allow_duplicate=True),
     Input("modelinputs-select", "value"),
     prevent_initial_call=True,
 )
@@ -3402,13 +3527,19 @@ def select_modelinputs_file(selected_path):
         p = Path(selected_path)
     except Exception:
         raise PreventUpdate
+    _UTM_DEFAULTS = (
+        False, {"display": "none"}, False,
+        [], [], None, None,
+        {"display": "block"}, {"display": "none"},
+    )
+
     if not p.is_file():
-        # Stale dropdown value — file got deleted out from under us.
         return (
             html.Span(f"File no longer exists: {p.name}", className="text-warning small"),
             [], [], [], [], None, None, None, None,
             _err_alert(f"Selected file no longer exists on disk: {selected_path}"),
             None,
+            *_UTM_DEFAULTS,
         )
     try:
         _log_action("SELECT_INPUT", file=p.name)
@@ -3420,7 +3551,24 @@ def select_modelinputs_file(selected_path):
             [], [], [], [], None, None, None, None,
             _err_alert(f"Could not read {p.name}: {exc}"),
             None,
+            *_UTM_DEFAULTS,
         )
+
+
+# ---------------------------------------------------------------------------
+# CSV UTM checkbox toggle — swap lon/lat ↔ easting/northing when user clicks
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    Output("coord-lonlat-group", "style", allow_duplicate=True),
+    Output("coord-utm-group", "style", allow_duplicate=True),
+    Input("utm-input-toggle", "value"),
+    prevent_initial_call=True,
+)
+def toggle_coord_inputs(use_utm):
+    if use_utm:
+        return {"display": "none"}, {"display": "block"}
+    return {"display": "block"}, {"display": "none"}
 
 
 # ---------------------------------------------------------------------------
@@ -3541,6 +3689,9 @@ def toggle_stopover_pct(checked):
     State("store-workdir", "data"),
     State("detect-road-crossings", "value"),
     State("param-herd-id-override", "value"),
+    State("utm-input-toggle", "value"),
+    State("col-utm-easting", "value"),
+    State("col-utm-northing", "value"),
     prevent_initial_call=True,
 )
 def process_uploaded_data(
@@ -3549,7 +3700,7 @@ def process_uploaded_data(
     dop_cutoff, sat_cutoff, raster_vars, project_name,
     wld_path, wld_vars_default, wld_vars_advanced,
     existing_processed_json, workdir_path, detect_roads,
-    herd_id_override,
+    herd_id_override, use_utm, utm_easting_col, utm_northing_col,
 ):
     """Run the full data processing pipeline.
 
@@ -3614,11 +3765,21 @@ def process_uploaded_data(
         except (TypeError, ValueError):
             return None
 
+    if use_utm:
+        _lon_col = utm_easting_col or "UTME"
+        _lat_col = utm_northing_col or "UTMN"
+        _input_crs = "EPSG:32613"
+    else:
+        _lon_col = lon_col or "Long"
+        _lat_col = lat_col or "Lat"
+        _input_crs = "EPSG:4326"
+
     config = {
         "animal_id_col": animal_col or "LoclAID",
-        "timestamp_col": ts_col or "DT_MST",
-        "lon_col": lon_col or "Long",
-        "lat_col": lat_col or "Lat",
+        "timestamp_col": ts_col if ts_col else "DT_MST",
+        "lon_col": _lon_col,
+        "lat_col": _lat_col,
+        "input_crs": _input_crs,
         "max_speed_kmh": _num_or_none(max_speed),
         "mort_distance_m": _num_or_none(mort_dist),
         "mort_time_hours": _num_or_none(mort_time),
@@ -3784,6 +3945,21 @@ def process_uploaded_data(
                             ]), width=4),
                         ]
                     ),
+                    dbc.Row(
+                        [
+                            dbc.Col(html.Div([
+                                html.Strong("Input CRS: "),
+                                html.Code(final_config.get("input_crs", "EPSG:4326")),
+                                html.Small(
+                                    " → reprojected to WGS84 (EPSG:4326)"
+                                    if final_config.get("input_crs", "EPSG:4326") != "EPSG:4326"
+                                    else "",
+                                    className="text-muted ms-1",
+                                ),
+                            ]), width=8),
+                        ],
+                        className="mt-1",
+                    ),
                 ]
             ),
             className="border-success mb-3",
@@ -3832,6 +4008,7 @@ def process_uploaded_data(
         {
             "input_source_path": str(tmp_path) if tmp_path else "",
             "wld_source_path": str(wld_path) if wld_path else "",
+            "input_crs": final_config.get("input_crs", "EPSG:4326"),
             "processed_at": _dt.datetime.now().isoformat(timespec="seconds"),
             "workdir": str(workdir_path) if workdir_path else "",
         },

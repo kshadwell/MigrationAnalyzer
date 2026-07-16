@@ -31,6 +31,7 @@ DEFAULT_CONFIG: dict = {
     "animal_id_col": "LoclAID",
     "timestamp_col": "DT_MST",
     "timestamp_format": "%Y-%m-%d %H:%M:%S",
+    "input_crs": "EPSG:4326",
     "lon_col": "Long",
     "lat_col": "Lat",
     "utme_col": "UTME",
@@ -127,6 +128,7 @@ def quality_filter(
     lon_col: str = "Long",
     lat_col: str = "Lat",
     log: list[str] | None = None,
+    is_projected: bool = False,
 ) -> pd.DataFrame:
     """
     Quality screening before geometry/movement math.
@@ -167,16 +169,24 @@ def quality_filter(
         log.append("NumSats column not found — skipping satellite check")
 
     # Bad coordinates (positive longitude = Germany/test, or NA) — unmappable,
-    # still removed.
+    # still removed. Skip the hemisphere check for projected CRS (easting values
+    # are always positive).
     if lon_col in df.columns and lat_col in df.columns:
-        bad_lon = (df[lon_col] > 0).sum()
-        na_coords = df[lon_col].isna().sum() + df[lat_col].isna().sum()
-        bad_total = int(bad_lon + na_coords)
-        if bad_total > 0:
-            log.append(f"WARNING: Found {bad_total} records with bad coordinates — removing")
-            df = df[(df[lon_col] < 0) & df[lon_col].notna() & df[lat_col].notna()]
+        na_coords = int(df[lon_col].isna().sum() + df[lat_col].isna().sum())
+        if is_projected:
+            if na_coords > 0:
+                log.append(f"WARNING: Found {na_coords} records with NA coordinates — removing")
+                df = df[df[lon_col].notna() & df[lat_col].notna()]
+            else:
+                log.append("PASS: No NA coordinates (projected CRS — hemisphere check skipped)")
         else:
-            log.append("PASS: All coordinates in Western hemisphere")
+            bad_lon = int((df[lon_col] > 0).sum())
+            bad_total = bad_lon + na_coords
+            if bad_total > 0:
+                log.append(f"WARNING: Found {bad_total} records with bad coordinates — removing")
+                df = df[(df[lon_col] < 0) & df[lon_col].notna() & df[lat_col].notna()]
+            else:
+                log.append("PASS: All coordinates in Western hemisphere")
 
     after = len(df)
     removed = before - after
@@ -192,10 +202,11 @@ def quality_filter(
 def validate_for_migration_mapper(
     df: pd.DataFrame,
     animal_id_col: str = "LoclAID",
-    timestamp_col: str = "DT_MST",
+    timestamp_col: str | list[str] = "DT_MST",
     lon_col: str = "Long",
     lat_col: str = "Lat",
     log: list[str] | None = None,
+    is_projected: bool = False,
 ) -> bool:
     """
     Run the same validation checks as the R script.
@@ -203,6 +214,8 @@ def validate_for_migration_mapper(
     """
     if log is None:
         log = []
+    if isinstance(timestamp_col, str):
+        timestamp_col = [timestamp_col]
 
     log.append("")
     log.append("Running Migration Mapper compatibility checks...")
@@ -211,7 +224,7 @@ def validate_for_migration_mapper(
     passed = True
 
     # Check 1: Required columns
-    required = [animal_id_col, timestamp_col, lon_col, lat_col]
+    required = [animal_id_col] + timestamp_col + [lon_col, lat_col]
     missing = [c for c in required if c not in df.columns]
     if missing:
         log.append(f"FAIL: Missing required columns: {', '.join(missing)}")
@@ -231,25 +244,35 @@ def validate_for_migration_mapper(
     if passed:
         log.append("PASS: No NA/NULL values in required fields")
 
-    # Check 2: No positive longitude
-    if lon_col in df.columns:
+    # Check 2: No positive longitude (geographic CRS only)
+    if not is_projected and lon_col in df.columns:
         germany = int((df[lon_col] > 0).sum())
         if germany > 0:
             log.append(f"FAIL: Found {germany} points with positive longitude (Germany/test data)")
             passed = False
         else:
             log.append("PASS: All coordinates in Western hemisphere")
+    elif is_projected:
+        log.append("INFO: Projected CRS — hemisphere check skipped")
 
     # Check 3: Coordinate ranges
     if lon_col in df.columns and lat_col in df.columns:
-        lon_min, lon_max = df[lon_col].min(), df[lon_col].max()
-        lat_min, lat_max = df[lat_col].min(), df[lat_col].max()
-        log.append(f"INFO: Longitude range: {lon_min:.2f} to {lon_max:.2f}")
-        log.append(f"INFO: Latitude range: {lat_min:.2f} to {lat_max:.2f}")
+        x_min, x_max = df[lon_col].min(), df[lon_col].max()
+        y_min, y_max = df[lat_col].min(), df[lat_col].max()
+        if is_projected:
+            log.append(f"INFO: Easting range: {x_min:.2f} to {x_max:.2f}")
+            log.append(f"INFO: Northing range: {y_min:.2f} to {y_max:.2f}")
+        else:
+            log.append(f"INFO: Longitude range: {x_min:.2f} to {x_max:.2f}")
+            log.append(f"INFO: Latitude range: {y_min:.2f} to {y_max:.2f}")
 
     # Check 4: DateTime format
-    if timestamp_col in df.columns:
-        sample = str(df[timestamp_col].iloc[0])
+    ts_present = [c for c in timestamp_col if c in df.columns]
+    if ts_present and len(df) > 0:
+        if len(ts_present) == 1:
+            sample = str(df[ts_present[0]].iloc[0])
+        else:
+            sample = " ".join(str(df[c].iloc[0]) for c in ts_present)
         import re
         if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", sample):
             log.append(f"PASS: DateTime format valid (sample: {sample})")
@@ -276,7 +299,7 @@ def validate_for_migration_mapper(
 def load_data(
     filepath: str | Path,
     animal_id_col: Optional[str] = None,
-    timestamp_col: Optional[str] = None,
+    timestamp_col: Optional[str | list[str]] = None,
     timestamp_format: str = "%Y-%m-%d %H:%M:%S",
     lon_col: str = "Long",
     lat_col: str = "Lat",
@@ -339,13 +362,21 @@ def load_data(
         # Resolve defaults
         _animal_col = animal_id_col or "LoclAID"
         _ts_col = timestamp_col or "DT_MST"
+        if isinstance(_ts_col, str):
+            _ts_col = [_ts_col]
+
+        # Combine multiple timestamp columns into one before renaming
+        if len(_ts_col) > 1:
+            present = [c for c in _ts_col if c in df.columns]
+            if present:
+                df["timestamp"] = df[present].astype(str).agg(" ".join, axis=1)
+        elif len(_ts_col) == 1 and _ts_col[0] in df.columns:
+            df = df.rename(columns={_ts_col[0]: "timestamp"})
 
         # Rename to standardized names
         rename_map: dict[str, str] = {}
         if _animal_col in df.columns:
             rename_map[_animal_col] = "animal_id"
-        if _ts_col in df.columns:
-            rename_map[_ts_col] = "timestamp"
         if lon_col in df.columns:
             rename_map[lon_col] = "lon"
         if lat_col in df.columns:
@@ -361,23 +392,39 @@ def load_data(
 
         # Parse timestamp
         if "timestamp" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
-            df["timestamp"] = pd.to_datetime(df["timestamp"], format=timestamp_format, errors="coerce")
+            _fmt = "mixed" if len(_ts_col) > 1 else timestamp_format
+            df["timestamp"] = pd.to_datetime(df["timestamp"], format=_fmt, errors="coerce")
 
         gdf = gpd.GeoDataFrame(
             df,
             geometry=gpd.points_from_xy(df["lon"], df["lat"]),
             crs=crs,
         )
+
+        if gdf.crs and gdf.crs.to_epsg() != 4326:
+            gdf = gdf.to_crs("EPSG:4326")
+            gdf["lon"] = gdf.geometry.x
+            gdf["lat"] = gdf.geometry.y
     else:
         # Shapefile / GeoPackage / GeoJSON etc.
         gdf = gpd.read_file(filepath)
+        gdf.attrs["original_crs"] = str(gdf.crs) if gdf.crs else "unknown"
         _animal_col = animal_id_col or "LoclAID"
         _ts_col = timestamp_col or "DT_MST"
+        if isinstance(_ts_col, str):
+            _ts_col = [_ts_col]
+
+        # Combine multiple timestamp columns into one before renaming
+        if len(_ts_col) > 1:
+            present = [c for c in _ts_col if c in gdf.columns]
+            if present:
+                gdf["timestamp"] = gdf[present].astype(str).agg(" ".join, axis=1)
+        elif len(_ts_col) == 1 and _ts_col[0] in gdf.columns:
+            gdf = gdf.rename(columns={_ts_col[0]: "timestamp"})
 
         rename_map = {}
         for src, dst in [
             (_animal_col, "animal_id"),
-            (_ts_col, "timestamp"),
             (lon_col, "lon"),
             (lat_col, "lat"),
             (utme_col, "x"),
@@ -389,7 +436,8 @@ def load_data(
         gdf = gdf.rename(columns=rename_map)
 
         if "timestamp" in gdf.columns:
-            gdf["timestamp"] = pd.to_datetime(gdf["timestamp"], format=timestamp_format, errors="coerce")
+            _fmt = "mixed" if len(_ts_col) > 1 else timestamp_format
+            gdf["timestamp"] = pd.to_datetime(gdf["timestamp"], format=_fmt, errors="coerce")
 
         # Ensure lon/lat columns exist from geometry if missing
         if "lon" not in gdf.columns:
@@ -890,12 +938,22 @@ def process_data(
     log.append(f"  {', '.join(raw_df.columns.tolist())}")
     log.append(f"Total records: {len(raw_df):,}")
 
+    input_crs = cfg.get("input_crs", "EPSG:4326")
+    if ext != ".csv":
+        log.append(f"Input CRS: detected from shapefile .prj")
+    elif input_crs != "EPSG:4326":
+        log.append(f"Input CRS: {input_crs} (will reproject to WGS84 / EPSG:4326)")
+    else:
+        log.append(f"Input CRS: WGS84 (EPSG:4326)")
+
     # ---- 0a. Auto-detect app-download columns and remap ----
     raw_df = detect_and_remap_columns(raw_df, log)
 
     # Resolve column names (use whatever names exist after remapping).
     animal_col = cfg.get("animal_id_col", "LoclAID")
     ts_col = cfg.get("timestamp_col", "DT_MST")
+    if isinstance(ts_col, str):
+        ts_col = [ts_col]
     lon_col = cfg.get("lon_col", "Long")
     lat_col = cfg.get("lat_col", "Lat")
 
@@ -916,7 +974,7 @@ def process_data(
         return name
 
     animal_col = _reconcile(animal_col)
-    ts_col = _reconcile(ts_col)
+    ts_col = [_reconcile(c) for c in ts_col]
     lon_col = _reconcile(lon_col)
     lat_col = _reconcile(lat_col)
 
@@ -926,6 +984,7 @@ def process_data(
     # ---- 0b. Quality filtering (bad coords) + DOP/NumSats logging ----
     # cfg values may be None (user cleared the box) → quality_filter logs the
     # check as disabled and flag_problem_points skips it.
+    _is_projected = input_crs != "EPSG:4326"
     raw_df = quality_filter(
         raw_df,
         dop_cutoff=cfg.get("dop_cutoff"),
@@ -933,10 +992,11 @@ def process_data(
         lon_col=lon_col,
         lat_col=lat_col,
         log=log,
+        is_projected=_is_projected,
     )
 
     # ---- 0c. Sort ----
-    sort_cols = [c for c in [animal_col, ts_col] if c in raw_df.columns]
+    sort_cols = [c for c in [animal_col] + ts_col if c in raw_df.columns]
     if sort_cols:
         raw_df = raw_df.sort_values(sort_cols).reset_index(drop=True)
 
@@ -952,6 +1012,7 @@ def process_data(
         lon_col=lon_col,
         lat_col=lat_col,
         log=log,
+        is_projected=_is_projected,
     )
 
     # ---- 1. Load into GeoDataFrame ----
@@ -971,8 +1032,13 @@ def process_data(
         utme_col=cfg.get("utme_col", "UTME"),
         utmn_col=cfg.get("utmn_col", "UTMN"),
         utm_zone_col=cfg.get("utm_zone_col", "UTM_Zn"),
+        crs=cfg.get("input_crs", "EPSG:4326"),
         df=raw_df,
     )
+
+    original_crs = gdf.attrs.get("original_crs")
+    if original_crs:
+        cfg["input_crs"] = original_crs
 
     # The quality filter was already run on raw_df above, so we don't
     # re-filter on DOP / NumSats here. Keep the lon/lat sanity check though
