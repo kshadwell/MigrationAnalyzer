@@ -4546,6 +4546,14 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, processe
     # fix markers overlaid so the user can see fix density / gaps.
     nsd_fig = go.Figure()
     if nsd_col and nsd_col in animal_df.columns:
+        marker_colors = pd.Series("#000000", index=animal_df.index)
+        has_mort = "mortality_flag" in animal_df.columns
+        has_prob = "problem" in animal_df.columns
+        if has_prob:
+            marker_colors[animal_df["problem"].astype(bool)] = "#B57EDC"
+        if has_mort:
+            marker_colors[animal_df["mortality_flag"].astype(bool)] = "#FF0000"
+
         nsd_fig.add_trace(
             go.Scatter(
                 x=animal_df["timestamp"],
@@ -4553,9 +4561,50 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, processe
                 mode="lines+markers",
                 name="NSD",
                 line={"color": "#cfcfcf", "width": 1.2},
-                marker={"color": "#000000", "size": 5, "line": {"color": "#cfcfcf", "width": 1}},
+                marker={"color": marker_colors.tolist(), "size": 5, "line": {"color": "#cfcfcf", "width": 1}},
             )
         )
+        if has_prob and animal_df["problem"].any():
+            prob_df = animal_df[animal_df["problem"].astype(bool)]
+            nsd_fig.add_trace(go.Scatter(
+                x=[None], y=[None], mode="markers", name="Problem",
+                marker={"color": "#B57EDC", "size": 7},
+                showlegend=True,
+            ))
+        if has_mort and animal_df["mortality_flag"].any():
+            nsd_fig.add_trace(go.Scatter(
+                x=[None], y=[None], mode="markers", name="Mortality",
+                marker={"color": "#FF0000", "size": 7},
+                showlegend=True,
+            ))
+        if "timestamp" in animal_df.columns and len(animal_df) > 1:
+            ts = animal_df["timestamp"].reset_index(drop=True)
+            nsd_vals = animal_df[nsd_col].reset_index(drop=True)
+            dt_hours = ts.diff().dt.total_seconds() / 3600
+            gap_mask = dt_hours > 26
+            gap_idxs = gap_mask[gap_mask].index
+            if len(gap_idxs):
+                gap_x, gap_y, gap_text = [], [], []
+                for idx in gap_idxs:
+                    t0, t1 = ts.iloc[idx - 1], ts.iloc[idx]
+                    mid_t = t0 + (t1 - t0) / 2
+                    y_val = max(nsd_vals.iloc[idx - 1], nsd_vals.iloc[idx])
+                    hrs = dt_hours.iloc[idx]
+                    gap_x.append(mid_t)
+                    gap_y.append(y_val)
+                    gap_text.append(
+                        f"⚠ {hrs:.0f}h gap<br>{t0.strftime('%b %d %H:%M')} → {t1.strftime('%b %d %H:%M')}"
+                    )
+                nsd_fig.add_trace(go.Scatter(
+                    x=gap_x, y=gap_y,
+                    mode="markers",
+                    name="Fix gap (>26h)",
+                    marker={"symbol": "diamond", "color": "#FCA5A5", "size": 10,
+                            "line": {"color": "#FF0000", "width": 1}},
+                    hovertext=gap_text,
+                    hoverinfo="text",
+                ))
+
     nsd_fig.update_layout(
         template="plotly_dark",
         title=f"NSD — {selected_animal}",
@@ -7185,6 +7234,8 @@ def _run_modeling_impl(
         _MODEL_CACHE["utm_crs"] = str(utm_crs)
         _MODEL_CACHE["seq_animal"] = seq_animal
         _MODEL_CACHE["seq_label"] = seq_label
+        _MODEL_CACHE["sequences_dict"] = sequences_dict
+        _MODEL_CACHE["seq_labels"] = seq_labels
         if "timestamp" in df.columns:
             ts = pd.to_datetime(df["timestamp"], errors="coerce").dropna()
             if len(ts):
@@ -7302,9 +7353,13 @@ def _run_modeling_impl(
                     files=";".join(p.name for p in mig_written.values()),
                 )
             except Exception as exc:
-                logger_warn = f"MigLines/MigPoints write skipped: {exc}"
-                # Don't fail the whole run if shapefile writing has trouble.
+                import traceback as _tb_mig
+                logger_warn = f"MigLines/MigPoints write failed: {exc}\n{_tb_mig.format_exc()}"
                 print(logger_warn)
+                _append_processing_log(
+                    [f"MigLines/MigPoints write FAILED: {exc}"],
+                    header="MIG OUTPUT ERROR",
+                )
 
             # Herd-level metadata CSV + XLSX (canonical WMI schema), and
             # the per-season migration_distance_info CSVs that R's code2run.R
@@ -8983,9 +9038,13 @@ def _write_processing_report(df, out_path: Path) -> str:
     State("export-dir", "value"),
     State("store-processed-data", "data"),
     State("store-workdir", "data"),
+    State("store-migtime-table", "data"),
+    State("store-config", "data"),
+    State("store-seq-names", "data"),
     prevent_initial_call=True,
 )
-def handle_export(selected_clicks, all_clicks, checked_ids, out_dir, processed_json, workdir_path):
+def handle_export(selected_clicks, all_clicks, checked_ids, out_dir, processed_json, workdir_path,
+                  migtime_json, config_json, seq_names):
     """Flush population outputs from the in-memory _POP_OUTPUT_CACHE to disk.
 
     "Export Selected" writes only the ticked checklist items; "Export All"
@@ -9061,6 +9120,68 @@ def handle_export(selected_clicks, all_clicks, checked_ids, out_dir, processed_j
                 exported.append(f"{prod['rel_dir']}/{prod['filename']}")
             except Exception as e:
                 failures.append(f"{prod['rel_dir']}/{prod['filename']}: {e}")
+
+        # MigLines / MigPoints shapefiles — use cached or reconstruct.
+        try:
+            sequences_dict = _MODEL_CACHE.get("sequences_dict")
+            if not sequences_dict and processed_json and migtime_json:
+                _rdf = _json_to_df(processed_json, "processed")
+                _rmig = _json_to_df(migtime_json, "migtime")
+                _rnames = _MODEL_CACHE.get("seq_labels") or seq_names or [f"mig{i+1}" for i in range(8)]
+                try:
+                    import geopandas as _gpd_re
+                    per_label = extract_sequences(df=_rdf, migtime_df=_rmig, sequence_names=_rnames)
+                    utm_crs_re = _MODEL_CACHE.get("utm_crs") or "EPSG:32613"
+                    sequences_dict = {}
+                    for label, ld in per_label.items():
+                        if ld.empty:
+                            continue
+                        ld = _gpd_re.GeoDataFrame(
+                            ld, geometry=_gpd_re.points_from_xy(ld["lon"], ld["lat"]), crs="EPSG:4326"
+                        ).to_crs(utm_crs_re)
+                        for mig_key, sub in ld.groupby("mig"):
+                            sub = _gpd_re.GeoDataFrame(sub.copy(), geometry="geometry", crs=ld.crs)
+                            sequences_dict[str(mig_key)] = sub
+                    _MODEL_CACHE["sequences_dict"] = sequences_dict
+                    _MODEL_CACHE["seq_labels"] = _rnames
+                except Exception:
+                    pass
+            if sequences_dict and processed_json and migtime_json:
+                proc_df = _json_to_df(processed_json, "processed")
+                if "timestamp" in proc_df.columns:
+                    proc_df["timestamp"] = pd.to_datetime(proc_df["timestamp"], errors="coerce")
+                mig_df = _json_to_df(migtime_json, "migtime")
+                herd_id = "Herd"
+                bio_month, bio_day = 2, 1
+                if config_json:
+                    cfg_obj = json.loads(config_json) if isinstance(config_json, str) else config_json
+                    if isinstance(cfg_obj, dict):
+                        herd_id = str(cfg_obj.get("herd_id", "Herd")).strip() or "Herd"
+                        bio_month = int(cfg_obj.get("bio_year_start_month", 2) or 2)
+                        bio_day = int(cfg_obj.get("bio_year_start_day", 1) or 1)
+                import datetime as _dt_exp
+                date_stamp = _dt_exp.datetime.now().strftime("%m%d%y")
+                s_labels = _MODEL_CACHE.get("seq_labels") or seq_names or []
+                utm_crs_str = _MODEL_CACHE.get("utm_crs")
+                target_crs = utm_crs_str
+                bbmm_dir = out_path / "BBMM_Output"
+                bbmm_dir.mkdir(parents=True, exist_ok=True)
+                mig_written = write_mig_outputs(
+                    processed_df=proc_df,
+                    migtime_df=mig_df,
+                    sequences_dict=sequences_dict,
+                    out_dir=bbmm_dir,
+                    herd_id=herd_id,
+                    date_stamp=date_stamp,
+                    seq_labels=s_labels,
+                    bio_year_start_month=bio_month,
+                    bio_year_start_day=bio_day,
+                    target_crs=target_crs,
+                )
+                for label, p in mig_written.items():
+                    exported.append(f"BBMM_Output/{p.name}")
+        except Exception as e:
+            failures.append(f"MigLines/MigPoints: {e}")
 
         if want_report:
             if not processed_json:

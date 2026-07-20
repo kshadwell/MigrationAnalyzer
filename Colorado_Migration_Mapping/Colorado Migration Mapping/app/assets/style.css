@@ -90,9 +90,20 @@
     border-color: #56B4E9;
 }
 
-.seq-range-slider .rc-slider-handle:active {
+.seq-range-slider .rc-slider-handle:active,
+.seq-range-slider .rc-slider-handle-click-focused:focus {
     background-color: #333;
     border-color: #56B4E9;
+    z-index: 20 !important;
+}
+
+.seq-range-slider .rc-slider-tooltip {
+    z-index: 5;
+}
+
+.seq-range-slider .rc-slider-handle:active + .rc-slider-tooltip,
+.seq-range-slider .rc-slider-handle-click-focused:focus + .rc-slider-tooltip {
+    z-index: 20 !important;
 }
 
 /* rc-slider's bundled CSS sets these to a muted gray with normal specificity.

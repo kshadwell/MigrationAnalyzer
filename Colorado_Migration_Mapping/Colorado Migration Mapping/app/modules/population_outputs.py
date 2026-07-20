@@ -1892,16 +1892,44 @@ def write_mig_outputs(
             except Exception:
                 pass
 
-            # Shapefile .dbf: field names max 10 chars, no dots.
+            # Shapefile .dbf: field names max 10 chars, no dots, no
+            # duplicate names, no unsupported dtypes. Sanitise thoroughly
+            # so the attribute table opens cleanly in ArcGIS / QGIS.
+            drop_cols = [
+                c for c in mig_points.columns
+                if c != "geometry" and (
+                    hasattr(mig_points[c].dtype, "kind") and mig_points[c].dtype.kind == "m"  # timedelta
+                    or str(mig_points[c].dtype) == "object"
+                    and mig_points[c].dropna().apply(type).isin([list, dict, set]).any()
+                )
+            ]
+            if drop_cols:
+                mig_points = mig_points.drop(columns=drop_cols)
+
+            for col in list(mig_points.columns):
+                if col == "geometry":
+                    continue
+                if pd.api.types.is_datetime64_any_dtype(mig_points[col]):
+                    mig_points[col] = mig_points[col].dt.strftime("%Y-%m-%d %H:%M")
+                elif hasattr(mig_points[col].dtype, "kind") and mig_points[col].dtype.kind == "m":
+                    mig_points = mig_points.drop(columns=[col])
+
             rename_map = {}
+            seen: set[str] = set()
             for col in mig_points.columns:
                 if col == "geometry":
                     continue
                 safe = col.replace(".", "_")[:10]
+                # Deduplicate: append a digit if the truncated name collides.
+                base = safe
+                i = 1
+                while safe.lower() in seen:
+                    suffix = str(i)
+                    safe = base[:10 - len(suffix)] + suffix
+                    i += 1
+                seen.add(safe.lower())
                 if safe != col:
                     rename_map[col] = safe
-                if pd.api.types.is_datetime64_any_dtype(mig_points[col]):
-                    mig_points[col] = mig_points[col].astype(str)
             if rename_map:
                 mig_points = mig_points.rename(columns=rename_map)
             mig_points_gdf = gpd.GeoDataFrame(
