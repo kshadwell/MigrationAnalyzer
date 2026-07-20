@@ -287,6 +287,16 @@ _MAP_CACHE_BIO_KEY: tuple[int, int] | None = None
 # JSON-serialisable through dcc.Store. Tab 4 reads from this cache.
 _MODEL_CACHE: dict[str, Any] = {}
 
+# Background model run state. The run_modeling callback starts a thread and
+# returns immediately; a polling callback watches this dict for completion.
+_MODEL_RUN: dict[str, Any] = {
+    "thread": None,       # threading.Thread or None
+    "run_id": None,       # unique id for the current run
+    "status": "idle",     # "idle" | "running" | "done" | "error"
+    "result": None,       # tuple of callback outputs when done
+    "progress_msg": "",   # latest progress message for the UI
+}
+
 # In-memory cache of Tab 4 population outputs awaiting export. Fully deferred:
 # Tab 4 computes the products and stashes them here (NOT to disk); Tab 5 flushes
 # the user-selected subset to ModelOutputs/ on demand. Like _MODEL_CACHE this is
@@ -1348,7 +1358,11 @@ tab1_layout = dbc.Container(
                                             multiple=False,
                                             accept=".csv,.zip,.shp",
                                         ),
-                                        html.Div(id="upload-filename", className="mt-1 text-muted small"),
+                                        dcc.Loading(
+                                            html.Div(id="upload-filename", className="mt-1 text-muted small"),
+                                            type="circle",
+                                            style={"display": "inline-block"},
+                                        ),
                                     ]
                                 ),
                             ],
@@ -1376,6 +1390,8 @@ tab1_layout = dbc.Container(
                                             id="coord-utm-group",
                                             style={"display": "none"},
                                         ),
+                                        _col_map_row("DOP / Precision column", "col-dop"),
+                                        _col_map_row("Satellites column", "col-sats"),
                                         dbc.Collapse(
                                             dbc.Alert(
                                                 [
@@ -2609,6 +2625,40 @@ tab4_layout = dbc.Container(
                                             id="pop-stopover-collapse",
                                             is_open=True,
                                         ),
+                                        dbc.Checkbox(
+                                            id="pop-minimumx-toggle",
+                                            value=False,
+                                            label="Custom MinimumX layer",
+                                            style={"fontSize": "0.85rem"},
+                                            className="mt-2 mb-1",
+                                        ),
+                                        html.Small(
+                                            "The app outputs layers with at least 2 and at least 3 animals "
+                                            "that have used an area. This option lets you define a custom X — "
+                                            "the output is a clipped raster showing cells where at least X "
+                                            "animals used the area.",
+                                            className="text-muted d-block mb-1",
+                                            style={"fontSize": "0.7rem"},
+                                        ),
+                                        dbc.Collapse(
+                                            [
+                                                dbc.Label(
+                                                    id="pop-minimumx-label",
+                                                    children="Minimum number of animals",
+                                                    style={"fontSize": "0.85rem"},
+                                                ),
+                                                dbc.Input(
+                                                    id="pop-minimumx-value",
+                                                    type="number",
+                                                    value=4,
+                                                    min=1,
+                                                    max=999,
+                                                    step=1,
+                                                ),
+                                            ],
+                                            id="pop-minimumx-collapse",
+                                            is_open=False,
+                                        ),
                                         dbc.Button(
                                             "Generate Population Outputs",
                                             id="btn-gen-pop",
@@ -3034,6 +3084,8 @@ app.layout = dbc.Container(
         dcc.Store(id="store-animal-classification", data={}, storage_type="local"),  # id_bio_year -> resident/nomadic/migratory
         dcc.Store(id="store-map-payload"),       # JSON payload sent into MapLibre iframe (Tab 2)
         dcc.Store(id="store-road-crossings", data={}),    # animal_key -> {road: bool, highway: bool}
+        dcc.Store(id="store-model-run-id", data=None),    # unique id when a background model run is active
+        dcc.Interval(id="model-poll-interval", interval=3000, disabled=True),
         dbc.Tabs(
             id="main-tabs",
             active_tab="tab-1",
@@ -3256,7 +3308,7 @@ def load_project(n_clicks, project_name):
 # Callbacks — Tab 1: Data Import & Cleaning
 # ===========================================================================
 
-def _create_companion_file(file_path: Path) -> None:
+def _create_companion_file_sync(file_path: Path) -> None:
     """If file_path is a CSV, create a companion .shp in the same folder.
     If it's a .shp, create a companion .csv. Silently skips if the companion
     already exists or if the conversion fails."""
@@ -3295,17 +3347,29 @@ def _create_companion_file(file_path: Path) -> None:
         pass
 
 
+def _create_companion_file(file_path: Path) -> None:
+    """Run companion file creation in a background thread so it doesn't block
+    the UI during file upload/selection."""
+    import threading
+    threading.Thread(
+        target=_create_companion_file_sync,
+        args=(file_path,),
+        daemon=True,
+    ).start()
+
+
 def _preview_input_file(file_path: str | Path, display_name: str | None = None) -> tuple:
     """Read the first 200 rows of *file_path*, auto-detect common column names,
     and return the tuple of outputs the upload / auto-load callbacks expect.
 
-    Tuple shape (matches the 18-output callback signature):
+    Tuple shape (matches the 24-output callback signature):
         (fname_display,
          col_opts x4, id_val, ts_val, lon_val, lat_val,
          preview_table, source_path,
          csv_warning_open, utm_toggle_style, utm_checked,
          utm_opts x2, utm_e_val, utm_n_val,
-         lonlat_style, utm_group_style)
+         lonlat_style, utm_group_style,
+         dop_opts, sat_opts, dop_val, sat_val)
     """
     file_path = Path(file_path)
     suffix = file_path.suffix.lower()
@@ -3316,6 +3380,7 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
         [], [], None, None,
         {"display": "block"}, {"display": "none"},
     )
+    _DOP_SAT_DEFAULTS = ([], [], None, None)
 
     detected_crs = None
 
@@ -3342,6 +3407,7 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
                 _err_alert("No shapefile found inside the ZIP."),
                 None,
                 *_UTM_DEFAULTS,
+                *_DOP_SAT_DEFAULTS,
             )
         import geopandas as gpd_local
         gdf_preview = gpd_local.read_file(str(shp_files[0])).head(200)
@@ -3356,6 +3422,7 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
             _err_alert(f"Unsupported file type '{suffix}'."),
             None,
             *_UTM_DEFAULTS,
+            *_DOP_SAT_DEFAULTS,
         )
 
     is_projected = (
@@ -3388,6 +3455,9 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
         utm_e_val = None
         utm_n_val = None
 
+    dop_val = _auto(["DOP", "dop", "PDOP", "pdop", "HDOP", "hdop", "Precision"])
+    sat_val = _auto(["NumSats", "numsats", "Satellites", "satellites", "n_sats", "NSats", "SatCount"])
+
     preview_table = _make_preview_table(df)
 
     crs_note = ""
@@ -3416,6 +3486,9 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
         # Coordinate group visibility
         {"display": "none"} if is_projected else {"display": "block"},
         {"display": "block"} if is_projected else {"display": "none"},
+        # DOP / Satellites column mapping
+        cols, cols,
+        dop_val, sat_val,
     )
 
 
@@ -3440,6 +3513,10 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
     Output("col-utm-northing", "value"),
     Output("coord-lonlat-group", "style"),
     Output("coord-utm-group", "style"),
+    Output("col-dop", "options"),
+    Output("col-sats", "options"),
+    Output("col-dop", "value"),
+    Output("col-sats", "value"),
     Input("upload-data", "contents"),
     State("upload-data", "filename"),
     State("store-workdir", "data"),
@@ -3465,6 +3542,7 @@ def handle_upload(contents, filename, workdir_path):
         [], [], None, None,
         {"display": "block"}, {"display": "none"},
     )
+    _DOP_SAT_DEFAULTS = ([], [], None, None)
 
     if suffix == ".shp":
         return (
@@ -3481,6 +3559,7 @@ def handle_upload(contents, filename, workdir_path):
             ),
             None,
             *_UTM_DEFAULTS,
+            *_DOP_SAT_DEFAULTS,
         )
 
     try:
@@ -3509,6 +3588,7 @@ def handle_upload(contents, filename, workdir_path):
             _err_alert(f"Upload error: {exc}"),
             None,
             *_UTM_DEFAULTS,
+            *_DOP_SAT_DEFAULTS,
         )
 
 
@@ -3590,6 +3670,10 @@ def populate_modelinputs_dropdown(workdir_path, current_upload_path, current_sel
     Output("col-utm-northing", "value", allow_duplicate=True),
     Output("coord-lonlat-group", "style", allow_duplicate=True),
     Output("coord-utm-group", "style", allow_duplicate=True),
+    Output("col-dop", "options", allow_duplicate=True),
+    Output("col-sats", "options", allow_duplicate=True),
+    Output("col-dop", "value", allow_duplicate=True),
+    Output("col-sats", "value", allow_duplicate=True),
     Input("modelinputs-select", "value"),
     prevent_initial_call=True,
 )
@@ -3608,6 +3692,7 @@ def select_modelinputs_file(selected_path):
         [], [], None, None,
         {"display": "block"}, {"display": "none"},
     )
+    _DOP_SAT_DEFAULTS = ([], [], None, None)
 
     if not p.is_file():
         return (
@@ -3616,6 +3701,7 @@ def select_modelinputs_file(selected_path):
             _err_alert(f"Selected file no longer exists on disk: {selected_path}"),
             None,
             *_UTM_DEFAULTS,
+            *_DOP_SAT_DEFAULTS,
         )
     try:
         _log_action("SELECT_INPUT", file=p.name)
@@ -3628,6 +3714,7 @@ def select_modelinputs_file(selected_path):
             _err_alert(f"Could not read {p.name}: {exc}"),
             None,
             *_UTM_DEFAULTS,
+            *_DOP_SAT_DEFAULTS,
         )
 
 
@@ -3737,6 +3824,21 @@ def toggle_stopover_pct(checked):
 
 
 @app.callback(
+    Output("pop-minimumx-collapse", "is_open"),
+    Output("pop-minimumx-label", "children"),
+    Output("pop-minimumx-value", "max"),
+    Input("pop-minimumx-toggle", "value"),
+)
+def toggle_minimumx(checked):
+    n_animals = 999
+    seq_animal = _MODEL_CACHE.get("seq_animal", {})
+    if seq_animal:
+        n_animals = len(set(seq_animal.values()))
+    label = f"Minimum number of animals (1–{n_animals})"
+    return bool(checked), label, n_animals
+
+
+@app.callback(
     Output("tab1-status", "children"),
     Output("tab1-summary", "children"),
     Output("store-processed-data", "data"),
@@ -3768,6 +3870,8 @@ def toggle_stopover_pct(checked):
     State("utm-input-toggle", "value"),
     State("col-utm-easting", "value"),
     State("col-utm-northing", "value"),
+    State("col-dop", "value"),
+    State("col-sats", "value"),
     prevent_initial_call=True,
 )
 def process_uploaded_data(
@@ -3777,6 +3881,7 @@ def process_uploaded_data(
     wld_path, wld_vars_default, wld_vars_advanced,
     existing_processed_json, workdir_path, detect_roads,
     herd_id_override, use_utm, utm_easting_col, utm_northing_col,
+    dop_col, sat_col,
 ):
     """Run the full data processing pipeline.
 
@@ -3865,6 +3970,8 @@ def process_uploaded_data(
         "bio_year_start_day": int(bio_day) if bio_day not in (None, "") else 1,
         "dop_cutoff": _num_or_none(dop_cutoff),
         "sat_cutoff": _num_or_none(sat_cutoff),
+        "dop_col": dop_col or "DOP",
+        "sat_col": sat_col or "NumSats",
     }
 
     # ---- Stage 3: heavy core ----
@@ -6783,6 +6890,8 @@ def _apply_model_ui_params(config: dict, model: str, p: dict) -> None:
     Output("model-progress", "value"),
     Output("model-results-table", "children"),
     Output("store-model-results", "data"),
+    Output("store-model-run-id", "data"),
+    Output("model-poll-interval", "disabled"),
     Input("btn-run-models", "n_clicks"),
     State("store-processed-data", "data"),
     State("store-migtime-table", "data"),
@@ -6790,11 +6899,6 @@ def _apply_model_ui_params(config: dict, model: str, p: dict) -> None:
     State("model-cores", "value"),
     State({"type": "seq-name", "index": dash.ALL}, "value"),
     State("store-config", "data"),
-    # Dynamic model-param panel inputs. These use pattern-matching ids
-    # ({"type": "model-param", "key": ...}); only the selected model's inputs
-    # are in the layout at any moment, and `ALL` matches exactly those (zero or
-    # more) without erroring on the absent ones — a plain string State would
-    # throw "nonexistent object" for the other models' ids.
     State({"type": "model-param", "key": dash.ALL}, "value"),
     State({"type": "model-param", "key": dash.ALL}, "id"),
     State("model-cell-size", "value"),
@@ -6804,25 +6908,84 @@ def run_modeling(
     n_clicks, processed_json, migtime_json, model, n_cores, seq_name_inputs, config_json,
     model_param_values, model_param_ids, cell_size,
 ):
-    """Drive the modelling pipeline end-to-end.
+    """Launch the modelling pipeline in a background thread so it survives
+    browser disconnects and computer sleep. Returns immediately with a
+    'running' status; the polling callback picks up results."""
+    import threading
+    import uuid
 
-    Stages:
-      1. Guard on Tab 1 / Tab 2 prerequisites.
-      2. Reproject WGS84 → estimated UTM CRS (modelling needs metres).
-      3. Build the pop grid once across ALL data — every per-sequence UD
-         shares this grid for the population merge in Tab 4.
-      4. Flatten {seq_label: combined_gdf} → {mig_key: per-animal_subset}.
-         The mig_key is "<animal>_<bio_year>_<label>" — that's what becomes
-         the .tif filename and the metadata table's `sequence` column.
-      5. Stash live objects in _MODEL_CACHE (numpy arrays + Shapely geoms
-         can't survive JSON, so they don't go into dcc.Store).
-      6. Optional WMI-canonical shapefile + metadata writes if workdir set.
-      7. Build & persist the results metadata table.
-    """
     if not processed_json:
-        return _err_alert("No processed data. Complete Tab 1 first."), 0, "", None
+        return _err_alert("No processed data. Complete Tab 1 first."), 0, "", None, None, True
     if not migtime_json:
-        return _err_alert("No migration sequences. Complete Tab 2 first."), 0, "", None
+        return _err_alert("No migration sequences. Complete Tab 2 first."), 0, "", None, None, True
+
+    run_id = str(uuid.uuid4())[:8]
+    _MODEL_RUN["run_id"] = run_id
+    _MODEL_RUN["status"] = "running"
+    _MODEL_RUN["result"] = None
+    _MODEL_RUN["progress_msg"] = f"Starting {model.upper()} model run..."
+
+    args = (processed_json, migtime_json, model, n_cores, seq_name_inputs,
+            config_json, model_param_values, model_param_ids, cell_size)
+    t = threading.Thread(target=_run_modeling_impl, args=args, daemon=True)
+    t.start()
+    _MODEL_RUN["thread"] = t
+
+    status_alert = dbc.Alert(
+        f"Model run started ({model.upper()}). This will continue even if your computer sleeps.",
+        color="info", className="py-2",
+    )
+    return status_alert, 10, "", None, run_id, False
+
+
+@app.callback(
+    Output("model-status", "children", allow_duplicate=True),
+    Output("model-progress", "value", allow_duplicate=True),
+    Output("model-results-table", "children", allow_duplicate=True),
+    Output("store-model-results", "data", allow_duplicate=True),
+    Output("store-model-run-id", "data", allow_duplicate=True),
+    Output("model-poll-interval", "disabled", allow_duplicate=True),
+    Input("model-poll-interval", "n_intervals"),
+    State("store-model-run-id", "data"),
+    prevent_initial_call=True,
+)
+def poll_model_run(n_intervals, run_id):
+    """Poll for background model run completion."""
+    if not run_id or _MODEL_RUN.get("run_id") != run_id:
+        raise PreventUpdate
+    if _MODEL_RUN["status"] == "running":
+        thread = _MODEL_RUN.get("thread")
+        if thread is not None and not thread.is_alive():
+            _MODEL_RUN["status"] = "error"
+            if _MODEL_RUN.get("result") is None:
+                _MODEL_RUN["result"] = (_err_alert("Model run thread died unexpectedly."), 0, "", None)
+        else:
+            msg = _MODEL_RUN.get("progress_msg", "Running...")
+            return dbc.Alert(msg, color="info", className="py-2"), 50, dash.no_update, dash.no_update, dash.no_update, False
+    # Done or error — return the stored result and disable polling.
+    result = _MODEL_RUN.get("result")
+    _MODEL_RUN["status"] = "idle"
+    _MODEL_RUN["thread"] = None
+    if result is None:
+        return _err_alert("Model run finished but produced no result."), 0, "", None, None, True
+    status, progress, table, results_json = result
+    return status, progress, table, results_json, None, True
+
+
+def _run_modeling_impl(
+    processed_json, migtime_json, model, n_cores, seq_name_inputs, config_json,
+    model_param_values, model_param_ids, cell_size,
+):
+    """Background thread target — runs the full modelling pipeline and stores
+    its result in _MODEL_RUN for the polling callback to pick up."""
+
+    def _finish(result_tuple):
+        _MODEL_RUN["result"] = result_tuple
+        _MODEL_RUN["status"] = "done"
+
+    def _fail(msg):
+        _MODEL_RUN["result"] = (_err_alert(msg), 0, "", None)
+        _MODEL_RUN["status"] = "error"
 
     import datetime as _dt_mdl
     _model_start = _dt_mdl.datetime.now()
@@ -6837,7 +7000,7 @@ def run_modeling(
         # project to UTM for modelling (the R workflow requires metre units).
         import geopandas as gpd
         if "lon" not in df.columns or "lat" not in df.columns:
-            return _err_alert("Processed data missing lon/lat. Re-run Tab 1."), 0, "", None
+            return _fail("Processed data missing lon/lat. Re-run Tab 1.")
         gdf_wgs = gpd.GeoDataFrame(
             df, geometry=gpd.points_from_xy(df["lon"], df["lat"]), crs="EPSG:4326",
         )
@@ -6869,7 +7032,7 @@ def run_modeling(
                 df=df, migtime_df=migtime, sequence_names=seq_labels,
             )
         except Exception as exc:
-            return _err_alert(f"Sequence extraction failed: {exc}"), 0, "", None
+            return _fail(f"Sequence extraction failed: {exc}")
 
         # Flatten {label: gdf-with-all-animals} -> {mig_key: per-animal sub-gdf}
         # The `mig` column in each gdf is "<animal>_<bio_year>_<label>".
@@ -6895,10 +7058,10 @@ def run_modeling(
                 seq_label[str(mig_key)] = str(label)
 
         if not sequences_dict:
-            return _err_alert(
+            return _fail(
                 "No migration sequences could be extracted from the migtime table. "
                 "Check that some animal-years have non-empty mig1..migN windows."
-            ), 0, "", None
+            )
 
         # Compose the modelling config — pulls in BBMM auto-logic for coarse fix rates.
         fix_rate_hours = float(df["fix_rate_hours"].median()) if "fix_rate_hours" in df.columns else None
@@ -6985,6 +7148,7 @@ def run_modeling(
         }
 
         # Actually run the pipeline.
+        _MODEL_RUN["progress_msg"] = f"Running {model.upper()} on {len(sequences_dict)} sequences..."
         try:
             results, meta_df = run_all_sequences(
                 sequences_dict=sequences_dict,
@@ -7007,7 +7171,9 @@ def run_modeling(
                 ],
                 header="MODEL RUN",
             )
-            return _err_alert(f"Modeling failed: {exc}\n{traceback.format_exc()[:600]}"), 0, "", None
+            return _fail(f"Modeling failed: {exc}\n{traceback.format_exc()[:600]}")
+
+        _MODEL_RUN["progress_msg"] = f"{model.upper()} complete — writing output files..."
 
         # Stash the live objects for Tab 4 (population merging needs the raw
         # UD rasters + footprint polygons + pop_grid, none of which survive
@@ -7115,7 +7281,7 @@ def run_modeling(
                         bio_month = int(cfg_obj.get("bio_year_start_month", 2) or 2)
                         bio_day = int(cfg_obj.get("bio_year_start_day", 1) or 1)
                 import datetime as _dt
-                date_stamp = _dt.datetime.now().strftime("%m%Y")
+                date_stamp = _dt.datetime.now().strftime("%m%d%y")
                 bbmm_dir = _workdir_version() / "BBMM_Output"
                 bbmm_dir.mkdir(parents=True, exist_ok=True)
                 mig_written = write_mig_outputs(
@@ -7218,7 +7384,7 @@ def run_modeling(
 
         n_ok = int((results_df["status"] == "Complete").sum()) if not results_df.empty else 0
         n_err = int((results_df["status"] == "Error").sum()) if not results_df.empty else 0
-        msg = f"Modeling complete. {n_ok} sequences modelled with {model.upper()}; {n_err} errors."
+        msg = f"Modeling complete — {n_ok} sequences modelled with {model.upper()}, {n_err} errors. Proceed to Population Outputs (Tab 4)."
 
         # ---- processing_log.txt: model section ----
         _runtime = (_dt_mdl.datetime.now() - _model_start).total_seconds()
@@ -7250,10 +7416,10 @@ def run_modeling(
             )
         _append_processing_log(log_lines, header="MODEL RUN")
 
-        return _ok_alert(msg), 100, table, _df_to_json(results_df, "model_results")
+        _finish((_ok_alert(msg), 100, table, _df_to_json(results_df, "model_results")))
 
     except Exception as exc:
-        return _err_alert(f"Modeling error: {exc}\n{traceback.format_exc()[:600]}"), 0, "", None
+        _fail(f"Modeling error: {exc}\n{traceback.format_exc()[:600]}")
 
 
 def _model_results_table_from_results(results: dict) -> "tuple":
@@ -7520,13 +7686,16 @@ def refresh_pop_seasons_checklist(_model_results_json, _active_tab):
     State("pop-smooth-bw", "value"),
     State("pop-stopover-toggle", "value"),
     State("pop-stopover-pct", "value"),
+    State("pop-minimumx-toggle", "value"),
+    State("pop-minimumx-value", "value"),
     State("store-config", "data"),
     prevent_initial_call=True,
 )
 def generate_pop_outputs(
     n_clicks, processed_json, model_results_json,
     seasons, merge_order, contour_type, contour_levels_str,
-    min_drop, min_fill, smooth, smooth_bw, stopover_on, stopover_pct, config_json,
+    min_drop, min_fill, smooth, smooth_bw, stopover_on, stopover_pct,
+    minimumx_on, minimumx_value, config_json,
 ):
     if not processed_json:
         return _err_alert("No processed data. Complete Tab 1 first."), "", None
@@ -7638,6 +7807,19 @@ def generate_pop_outputs(
             if n_individuals > 0 else {}
         )
 
+        # Build min_individuals tuple: always include 2 and 3; optionally
+        # add a user-defined X from the MinimumX UI.
+        min_ind_list = [2, 3]
+        if minimumx_on:
+            try:
+                x = int(minimumx_value or 4)
+                x = max(1, min(x, n_individuals))
+                if x not in min_ind_list:
+                    min_ind_list.append(x)
+            except (TypeError, ValueError):
+                pass
+        min_ind_tuple = tuple(sorted(min_ind_list))
+
         # ---- Diagnostics: how much overlap is actually there? ----
         # The "Area" contour level X means "cells where at least X% of sequences
         # had non-zero UD". For 232 sequences, 5% means ≥12 overlapping. If the
@@ -7721,7 +7903,7 @@ def generate_pop_outputs(
         except Exception:
             pass
         import datetime as _dt
-        date_stamp = _dt.datetime.now().strftime("%m%Y")
+        date_stamp = _dt.datetime.now().strftime("%m%d%y")
 
         # Build per-season animal-level UD dicts from the already-stacked data.
         ud_by_season: dict[str, dict[str, np.ndarray]] = {}
@@ -7763,6 +7945,7 @@ def generate_pop_outputs(
                 prods = compute_season_banded_products(
                     ud_dict=season_ud, grid_meta=pop_grid,
                     herd_id=herd_id, season_label=season_label, date_stamp=date_stamp,
+                    min_individuals=min_ind_tuple,
                     stopover_pct=pop_config["stopover_pct"],
                     min_area_drop=pop_config["min_area_drop"],
                     min_area_fill=pop_config["min_area_fill"],
@@ -7816,6 +7999,7 @@ def generate_pop_outputs(
                             ud_dict=season_yr_ud, grid_meta=pop_grid,
                             herd_id=herd_id, season_label=f"{slbl}_{by}",
                             date_stamp=date_stamp,
+                            min_individuals=min_ind_tuple,
                             stopover_pct=pop_config["stopover_pct"],
                             min_area_drop=pop_config["min_area_drop"],
                             min_area_fill=pop_config["min_area_fill"],
@@ -7851,6 +8035,7 @@ def generate_pop_outputs(
                         ud_dict=all_season_yr_ud, grid_meta=pop_grid,
                         herd_id=herd_id, season_label=f"All_{by}",
                         date_stamp=date_stamp,
+                        min_individuals=min_ind_tuple,
                         stopover_pct=pop_config["stopover_pct"],
                         min_area_drop=pop_config["min_area_drop"],
                         min_area_fill=pop_config["min_area_fill"],

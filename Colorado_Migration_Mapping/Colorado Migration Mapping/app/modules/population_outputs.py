@@ -840,7 +840,7 @@ def calc_season_banded_outputs(
         Either an already-abbreviated label (``"Spr"``, ``"Fal"``, ``"All"``)
         or a free-form one — passed through :func:`_season_abbrev` either way.
     date_stamp:
-        ``"MMYYYY"`` token. Defaults to today.
+        ``"MMDDYY"`` token. Defaults to today.
     min_individuals:
         Thresholds for the ``minN`` files (e.g. ``(1, 2, 3)``).
     top_pct:
@@ -951,7 +951,7 @@ def compute_season_banded_products(
         raise ValueError("ud_dict is empty.")
 
     if date_stamp is None:
-        date_stamp = _dt.datetime.now().strftime("%m%Y")
+        date_stamp = _dt.datetime.now().strftime("%m%d%y")
     season = _season_abbrev(season_label)
     herd = _sanitize_token(herd_id)
     prefix = f"{herd}_BBMM_{season}_{date_stamp}"
@@ -1238,7 +1238,7 @@ def write_herd_metadata(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     if date_stamp is None:
-        date_stamp = _dt.datetime.now().strftime("%m%Y")
+        date_stamp = _dt.datetime.now().strftime("%m%d%y")
     herd_token = _sanitize_token(herd_id)
 
     # ----- Per-sequence stats -------------------------------------------------
@@ -1733,7 +1733,7 @@ def write_mig_outputs(
     herd_id:
         Filename prefix (e.g. ``"A37"``).
     date_stamp:
-        ``"MMYYYY"`` token. Defaults to today.
+        ``"MMDDYY"`` token. Defaults to today.
     seq_labels:
         User-supplied per-slot labels in slot order
         (``["Spring", "Fall", ...]``). Used to map each sequence back to
@@ -1750,7 +1750,7 @@ def write_mig_outputs(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     if date_stamp is None:
-        date_stamp = _dt.datetime.now().strftime("%m%Y")
+        date_stamp = _dt.datetime.now().strftime("%m%d%y")
     herd_token = _sanitize_token(herd_id)
 
     # Build "label -> slot index" lookup so we can write "mig1".."mig8".
@@ -1804,14 +1804,12 @@ def write_mig_outputs(
             continue
         line = LineString(list(zip(xs, ys)))
 
-        # Mig_Start / Mig_End as Unix epoch (seconds) STRING — matches ref.
         dates = pd.to_datetime(sub["date"], errors="coerce")
         t_start = dates.min()
         t_end = dates.max()
         duration_days = (t_end - t_start).total_seconds() / 86400.0
-        # Unix epoch in seconds (ref uses 10-digit values like "1617148800").
-        mig_start_str = str(int(t_start.timestamp())) if pd.notna(t_start) else ""
-        mig_end_str = str(int(t_end.timestamp())) if pd.notna(t_end) else ""
+        mig_start_str = t_start.strftime("%Y-%m-%d") if pd.notna(t_start) else ""
+        mig_end_str = t_end.strftime("%Y-%m-%d") if pd.notna(t_end) else ""
 
         # Distances (km). MaxPair_km = greatest straight-line distance between
         # any two fixes (migration spread); shapefile .dbf caps field names at
@@ -1830,7 +1828,7 @@ def write_mig_outputs(
             "Mig_End": mig_end_str,
             "Duration": round(float(duration_days), 4),
             "Season": str(season_label),
-            "FXR.n": int(len(sub)),
+            "FXR_n": int(len(sub)),
             "Eucl_Dist_": round(eucl_dist_km, 6),
             "Cumu_Dist_": round(cumu_dist_km, 6),
             "MaxPair_km": round(maxpair_km, 6),
@@ -1894,10 +1892,18 @@ def write_mig_outputs(
             except Exception:
                 pass
 
-            # Datetime cols don't survive shapefile DBF — coerce to ISO strings.
+            # Shapefile .dbf: field names max 10 chars, no dots.
+            rename_map = {}
             for col in mig_points.columns:
+                if col == "geometry":
+                    continue
+                safe = col.replace(".", "_")[:10]
+                if safe != col:
+                    rename_map[col] = safe
                 if pd.api.types.is_datetime64_any_dtype(mig_points[col]):
                     mig_points[col] = mig_points[col].astype(str)
+            if rename_map:
+                mig_points = mig_points.rename(columns=rename_map)
             mig_points_gdf = gpd.GeoDataFrame(
                 mig_points,
                 geometry=mig_points.get("geometry"),

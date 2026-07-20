@@ -129,6 +129,8 @@ def quality_filter(
     lat_col: str = "Lat",
     log: list[str] | None = None,
     is_projected: bool = False,
+    dop_col: str = "DOP",
+    sat_col: str = "NumSats",
 ) -> pd.DataFrame:
     """
     Quality screening before geometry/movement math.
@@ -153,20 +155,20 @@ def quality_filter(
     # DOP — counted here, flagged (not dropped) in flag_problem_points.
     if dop_cutoff is None:
         log.append("DOP cutoff blank — DOP flagging disabled")
-    elif "DOP" in df.columns:
-        high_dop = int(df["DOP"].gt(dop_cutoff).sum())
-        log.append(f"Records with high DOP (>{dop_cutoff}): {high_dop:,} (kept, will be flagged)")
+    elif dop_col in df.columns:
+        high_dop = int(df[dop_col].gt(dop_cutoff).sum())
+        log.append(f"Records with high DOP (>{dop_cutoff}, col='{dop_col}'): {high_dop:,} (kept, will be flagged)")
     else:
-        log.append("DOP column not found — skipping DOP check")
+        log.append(f"DOP column '{dop_col}' not found — skipping DOP check")
 
     # Satellites — counted here, flagged (not dropped) in flag_problem_points.
     if sat_cutoff is None:
         log.append("Satellite cutoff blank — satellite flagging disabled")
-    elif "NumSats" in df.columns:
-        low_sats = int(df["NumSats"].lt(sat_cutoff).sum())
-        log.append(f"Records with low satellites (<{sat_cutoff}): {low_sats:,} (kept, will be flagged)")
+    elif sat_col in df.columns:
+        low_sats = int(df[sat_col].lt(sat_cutoff).sum())
+        log.append(f"Records with low satellites (<{sat_cutoff}, col='{sat_col}'): {low_sats:,} (kept, will be flagged)")
     else:
-        log.append("NumSats column not found — skipping satellite check")
+        log.append(f"Satellites column '{sat_col}' not found — skipping satellite check")
 
     # Bad coordinates (positive longitude = Germany/test, or NA) — unmappable,
     # still removed. Skip the hemisphere check for projected CRS (easting values
@@ -682,23 +684,20 @@ def calc_nsd(
     pd.DataFrame
         df with NSD columns appended.
     """
-    df = df.copy()
-
     ref_x_col = f"ref_x_{group_col}"
     ref_y_col = f"ref_y_{group_col}"
     nsd_col = f"nsd_{group_col}"
     disp_col = f"displacement_{group_col}"
 
-    # Compute reference location per group
-    ref_locs = (
-        df.sort_values([group_col, date_col])
-        .groupby(group_col, sort=False)
-        .apply(lambda g: g[["x", "y"]].head(n_ref_points).mean())
-    )
+    # Compute reference location per group — vectorised via first-N slicing
+    sorted_df = df.sort_values([group_col, date_col])
+    cumcount = sorted_df.groupby(group_col, sort=False).cumcount()
+    first_n = sorted_df[cumcount < n_ref_points]
+    ref_locs = first_n.groupby(group_col, sort=False)[["x", "y"]].mean()
     ref_locs.columns = [ref_x_col, ref_y_col]
-    ref_locs = ref_locs.reset_index()
 
-    df = df.merge(ref_locs, on=group_col, how="left")
+    df[ref_x_col] = df[group_col].map(ref_locs[ref_x_col])
+    df[ref_y_col] = df[group_col].map(ref_locs[ref_y_col])
 
     dx = (df["x"] - df[ref_x_col]).to_numpy(dtype=float)
     dy = (df["y"] - df[ref_y_col]).to_numpy(dtype=float)
@@ -766,6 +765,8 @@ def flag_problem_points(
     max_speed_kmh: float | None = 10.8,
     dop_cutoff: float | None = 10,
     sat_cutoff: float | None = 6,
+    dop_col: str = "DOP",
+    sat_col: str = "NumSats",
 ) -> pd.DataFrame:
     """
     Flag implausible / low-quality fixes. Sets 'problem' = 1 where ANY of:
@@ -810,15 +811,15 @@ def flag_problem_points(
         )
 
     # DOP — poor fix geometry (kept & flagged, not dropped).
-    if dop_cutoff is not None and "DOP" in df.columns:
-        dop_arr = pd.to_numeric(df["DOP"], errors="coerce").to_numpy(dtype=float)
+    if dop_cutoff is not None and dop_col in df.columns:
+        dop_arr = pd.to_numeric(df[dop_col], errors="coerce").to_numpy(dtype=float)
         problem |= np.where(
             np.isfinite(dop_arr) & (dop_arr > dop_cutoff), 1, 0
         )
 
     # Satellites — too few satellites for a reliable fix.
-    if sat_cutoff is not None and "NumSats" in df.columns:
-        sat_arr = pd.to_numeric(df["NumSats"], errors="coerce").to_numpy(dtype=float)
+    if sat_cutoff is not None and sat_col in df.columns:
+        sat_arr = pd.to_numeric(df[sat_col], errors="coerce").to_numpy(dtype=float)
         problem |= np.where(
             np.isfinite(sat_arr) & (sat_arr < sat_cutoff), 1, 0
         )
@@ -930,9 +931,13 @@ def process_data(
     if ext == ".csv":
         raw_df = pd.read_csv(filepath, low_memory=False)
     else:
-        raw_df = gpd.read_file(filepath)
-        if hasattr(raw_df, "drop"):
-            raw_df = pd.DataFrame(raw_df.drop(columns=["geometry"], errors="ignore"))
+        # Read only the attribute table (ignore_geometry) — geometry gets
+        # rebuilt from lon/lat in load_data anyway, and parsing Point objects
+        # through fiona is the single biggest bottleneck for large shapefiles.
+        import pyogrio
+        raw_df = pd.DataFrame(
+            pyogrio.read_dataframe(str(filepath), read_geometry=False)
+        )
 
     log.append(f"Columns in the data:")
     log.append(f"  {', '.join(raw_df.columns.tolist())}")
@@ -993,6 +998,8 @@ def process_data(
         lat_col=lat_col,
         log=log,
         is_projected=_is_projected,
+        dop_col=cfg.get("dop_col", "DOP"),
+        sat_col=cfg.get("sat_col", "NumSats"),
     )
 
     # ---- 0c. Sort ----
@@ -1100,6 +1107,8 @@ def process_data(
         max_speed_kmh=_spd,
         dop_cutoff=_dop,
         sat_cutoff=_sat,
+        dop_col=cfg.get("dop_col", "DOP"),
+        sat_col=cfg.get("sat_col", "NumSats"),
     )
     n_prob = int(gdf["problem"].sum())
     _crit = ", ".join(

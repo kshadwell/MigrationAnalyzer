@@ -238,6 +238,9 @@ These are the in-flight tasks mirrored from the session task list.
 
 - **Diagnose BBMM output divergence vs. canonical reference.** Two suspected causes: (1) `scipy.optimize.minimize_scalar` vs. R `optim` for the Horne 2007 MLE, and (2) our `T_total` divisor in `_bbmm_bridge_accumulate` sums only kept segments while R's `sum(time.lag)` sums all pairs including the ones excluded by `max.lag`. Compare per-season `.tif` outputs against the canonical `A37_BBMM_*` set at `K:\MigrationAnalysis\A37\2026.zip` → `OutputData/Jaffe_IndStackedOutput_040226/`. Visual divergence first confirmed 2026-05-18 after wiring `calc_season_banded_outputs` (this item now subsumes that earlier "BBMM per-season UD `.tif` outputs visually differ" Pending note). Additional differences to check beyond the two suspected causes:
   - **BBMM motion-variance estimator path**: our Horne (2007) MLE via `scipy.optimize.minimize_scalar` vs. R `BBMM::brownian.motion.variance` — different numerical optimisers, possibly different residual parametrisation.
+    - **How the estimator works:** `_estimate_brownian_motion_variance` (`modeling.py`) slides a window of three consecutive GPS fixes (an "interior triplet": points `i`, `i+1`, `i+2`) across the track. For each triplet it linearly interpolates where `i+1` *should* be on the straight line from `i` to `i+2` (proportional to elapsed time, `alpha = lag1 / (lag1+lag2)`), then measures the squared residual — how far the actual fix deviates from that interpolation. Under Brownian motion that residual is bivariate-normal with variance `v = t_total * alpha * (1-alpha) * sigma² + location_error_terms`. The MLE finds the single `sigma²` (motion variance) that best explains all valid triplets' residuals via negative-log-likelihood minimisation.
+    - **Why the two paths may diverge:** (a) SciPy `minimize_scalar(method="bounded")` vs. R's `optimize()` (Brent's method) may converge differently on flat/noisy likelihoods; (b) the likelihood data term is `sq/(2v)` for a proper bivariate-normal — using `sq/v` (which some implementations have done) double-weights the residual and biases sigma² high, producing over-diffuse UDs.
+    - **Why we use the Python path:** avoids the R subprocess dependency; the project goal is a self-contained Python stack. The R bridge (`dbbmm_bridge.R`) remains as interim fallback only.
   - **Bandwidth / grid alignment**: our subgrid is built per-sequence from the seq bbox + `mult4buff`; the R workflow may carry global grid cells more strictly.
   - **`apply_tail_cutoff` placement**: we cut the 99.99% tail on each individual UD *before* averaging. R may apply the cutoff after the population merge.
   - **Population merging step**: our `calc_season_banded_outputs` normalises each individual to sum=1 then averages. R's `CalcPopUse` may do a weighted sum or volume-rank-based aggregation.
@@ -256,7 +259,20 @@ These are the in-flight tasks mirrored from the session task list.
 - **Note in outputs: individuals are stacked, not sequences.** Add a note/label in the population output UI and exported metadata clarifying that individual UDs are stacked (averaged), not per-sequence UDs.
 - **Information popups (ℹ buttons).** Add small info buttons next to key parameters/UI elements that show a popup explaining what the parameter does, recommended values, and defaults. Will create a reference document specifying the content for each popup. Covers WLD file documentation (#9) and the "individuals not sequences" note (#13).
 - **User guide.** Create a step-by-step user guide explaining how to use the app for different purposes. Link or include in the repository.
+- **Slow working directory selection.** Selecting a working directory takes a very long time to finish updating. Investigate whether this is a machine/network issue or an app bottleneck (e.g., scanning large directories, loading cached data).
 
+
+### 2026-07-17 — Shapefile attribute table fix, MinimumX custom layer
+
+**MinimumX custom layer.** Added an optional MinimumX output to the population outputs tab. When the user checks the MinimumX box, they can specify a custom threshold X (1 to N animals in the dataset). The app then outputs a clipped raster showing cells where at least X animals used the area, in addition to the default min2 and min3 layers. The dynamic max is set from the number of animals in `_MODEL_CACHE["seq_animal"]`. All three `compute_season_banded_products` call sites pass the extended `min_individuals` tuple.
+
+**Files touched.** `app/main.py` (MinimumX UI: checkbox, collapse, label, input; toggle callback; `generate_pop_outputs` updated with `minimumx_on`/`minimumx_value` states; `min_ind_tuple` built and passed to all three `compute_season_banded_products` calls).
+
+### 2026-07-17 — Shapefile attribute table fix (FXR.n dot in field name)
+
+**MigLines attribute table unreadable in GIS.** Opening `E4_MigLines_072026.shp` in ArcGIS/QGIS failed with "A column was specified that does not exist." Root cause: the `FXR.n` field name contains a dot, which shapefile .dbf doesn't support — fiona/geopandas writes it but the reader can't resolve it back. Fix: renamed `FXR.n` → `FXR_n` in `write_mig_outputs` (`population_outputs.py`). Also added a general field-name sanitizer for MigPoints (which inherits all `processed_df` columns): dots → underscores, truncate to 10 characters.
+
+**Files touched.** `app/modules/population_outputs.py` (`FXR_n` rename, MigPoints column sanitizer).
 
 ### 2026-07-16 — Defaults, bug fixes, line buffer, memory fix, migtime speedup, minimum output rework
 
