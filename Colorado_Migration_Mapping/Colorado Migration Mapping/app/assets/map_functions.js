@@ -114,7 +114,7 @@ window.dccFunctions.dayToDate = function(value) {
     var d = new Date(base.getTime() + Number(value) * 86400000);
     var mm = String(d.getUTCMonth() + 1).padStart(2, '0');
     var dd = String(d.getUTCDate()).padStart(2, '0');
-    return d.getUTCFullYear() + '-' + mm + '-' + dd;
+    return mm + '/' + dd;
 };
 
 // ---------------------------------------------------------------------------
@@ -137,11 +137,21 @@ window.dccFunctions.dayToDate = function(value) {
         // as the entry point.
         var sliderEl = e.target.closest && e.target.closest('.seq-range-slider');
         if (!sliderEl) return;
-        // If the click landed directly on a thumb (role="slider"), let the
-        // slider's native handler move that handle — only intercept clicks
-        // BETWEEN the two thumbs.
+        // If the click landed directly on a thumb (role="slider"), promote
+        // that thumb's tooltip z-index so it overlaps the other, then let the
+        // slider's native handler move it.
         var thumbHit = e.target.closest && e.target.closest('[role="slider"]');
-        if (thumbHit && sliderEl.contains(thumbHit)) return;
+        if (thumbHit && sliderEl.contains(thumbHit)) {
+            var allThumbs = Array.from(sliderEl.querySelectorAll('[role="slider"]'));
+            var thumbIdx = allThumbs.indexOf(thumbHit);
+            // Log the DOM around the thumb so we can see where tooltips live
+            allThumbs.forEach(function (th, i) {
+                var z = (i === thumbIdx) ? '20' : '5';
+                th.style.zIndex = z;
+                if (th.parentElement) th.parentElement.style.zIndex = z;
+            });
+            return;
+        }
 
         var handles = sliderEl.querySelectorAll('[role="slider"]');
         if (handles.length < 2) return;

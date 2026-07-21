@@ -90,20 +90,9 @@
     border-color: #56B4E9;
 }
 
-.seq-range-slider .rc-slider-handle:active,
-.seq-range-slider .rc-slider-handle-click-focused:focus {
+.seq-range-slider .rc-slider-handle:active {
     background-color: #333;
     border-color: #56B4E9;
-    z-index: 20 !important;
-}
-
-.seq-range-slider .rc-slider-tooltip {
-    z-index: 5;
-}
-
-.seq-range-slider .rc-slider-handle:active + .rc-slider-tooltip,
-.seq-range-slider .rc-slider-handle-click-focused:focus + .rc-slider-tooltip {
-    z-index: 20 !important;
 }
 
 /* rc-slider's bundled CSS sets these to a muted gray with normal specificity.
@@ -131,15 +120,16 @@
 }
 
 .seq-range-slider .rc-slider-tooltip-inner {
-    font-size: 0.65rem;
+    font-size: 0.6rem;
     min-width: 0;                    /* let the box shrink to its text */
-    padding: 1px 5px;
+    padding: 0px 3px;
     text-align: center;
     color: #000 !important;          /* dark text */
     background-color: #fff !important;
     border: 1px solid #888;
     box-shadow: none;
     white-space: nowrap;
+    line-height: 1.3;
 }
 
 /* rc-slider's tooltip arrow defaults to a dark fill that no longer matches the
@@ -181,4 +171,19 @@
 }
 .dash-dark-dropdown .Select-menu-outer .Select-option.is-focused {
     background-color: #444 !important;
+}
+
+/* Raster tree panel — ArcGIS-style collapsible contents tree */
+#raster-tree-container .form-check {
+    min-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    margin-bottom: 0;
+}
+#raster-tree-container .form-check-label {
+    font-size: 0.78rem;
+    color: #ccc;
+}
+#raster-tree-container .form-check-input:checked + .form-check-label {
+    color: #fff;
 }

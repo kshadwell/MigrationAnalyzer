@@ -1421,6 +1421,18 @@ tab1_layout = dbc.Container(
                                             id="utm-toggle-wrapper",
                                             style={"display": "none"},
                                         ),
+                                        html.Hr(className="my-2"),
+                                        dbc.Checkbox(
+                                            id="filter-calves-toggle",
+                                            label="Filter out calves/fawns",
+                                            value=True,
+                                            className="small",
+                                        ),
+                                        dbc.Collapse(
+                                            _col_map_row("Age class column", "col-age-class"),
+                                            id="age-class-col-wrapper",
+                                            is_open=True,
+                                        ),
                                     ]
                                 ),
                             ],
@@ -2023,9 +2035,18 @@ tab2_layout = dbc.Container(
                                 "overflow": "hidden",
                             },
                         ),
-                        # NSD plot — same resizable wrapper pattern, taller
-                        # default. responsive=True makes Plotly redraw on
-                        # container resize so the chart fills the box.
+                        dbc.Checklist(
+                            id="nsd-overlay-toggles",
+                            options=[
+                                {"label": " Problem points", "value": "problem"},
+                                {"label": " Mortality points", "value": "mortality"},
+                                {"label": " Fix gaps (>26 h)", "value": "gaps"},
+                            ],
+                            value=["problem", "mortality", "gaps"],
+                            inline=True,
+                            className="small mb-1",
+                            style={"fontSize": "0.8rem"},
+                        ),
                         html.Div(
                             dcc.Graph(
                                 id="nsd-plot",
@@ -2785,39 +2806,38 @@ tab5_layout = dbc.Container(
                             ],
                             className="mb-3",
                         ),
-                        # Raster (.tif) overlay — view a UD / footprint / banded
-                        # population raster from the working directory on the map.
+                        # Raster (.tif) overlay — ArcGIS-style collapsible
+                        # contents tree. Groups are version+category; each
+                        # group expands to show checkboxes for individual files.
                         dbc.Card(
                             [
                                 dbc.CardHeader("Raster Overlay (.tif)"),
                                 dbc.CardBody(
                                     [
-                                        dbc.Label("Category", style={"fontSize": "0.85rem"}),
-                                        dcc.Dropdown(
-                                            id="raster-overlay-category",
-                                            # Options are populated dynamically per
-                                            # version by populate_raster_categories
-                                            # (e.g. "V1 · UD", "V2 · Population").
-                                            options=[],
-                                            placeholder="Pick a version + category…",
-                                            style={"fontSize": "0.82rem", "marginBottom": "8px"},
-                                            className="dash-dark-dropdown",
+                                        html.Div(
+                                            id="raster-tree-container",
+                                            style={
+                                                "maxHeight": "360px",
+                                                "overflowY": "auto",
+                                                "fontSize": "0.8rem",
+                                            },
                                         ),
-                                        dbc.Label("Files (stack several)", style={"fontSize": "0.85rem"}),
-                                        dcc.Dropdown(
-                                            id="raster-overlay-file",
-                                            options=[],
-                                            placeholder="(pick a category)",
-                                            multi=True,
-                                            style={"fontSize": "0.8rem", "marginBottom": "6px"},
-                                            className="dash-dark-dropdown",
+                                        dcc.Store(id="raster-overlay-file", data=[]),
+                                        dcc.Store(id="raster-overlay-category", data=""),
+                                        dbc.Button(
+                                            "Clear overlay",
+                                            id="btn-clear-raster-overlay",
+                                            color="secondary", outline=True, size="sm",
+                                            className="w-100 mt-2",
                                         ),
                                         dbc.Button(
-                                            "Select all in category",
+                                            "Select all",
                                             id="btn-select-all-rasters",
                                             color="secondary", outline=True, size="sm",
-                                            className="w-100 mb-2",
+                                            className="w-100 mt-1",
+                                            style={"display": "none"},
                                         ),
+                                        html.Hr(className="my-2"),
                                         dbc.Label("Colour scale", style={"fontSize": "0.85rem"}),
                                         dcc.Dropdown(
                                             id="raster-overlay-cmap",
@@ -2836,57 +2856,42 @@ tab5_layout = dbc.Container(
                                             min=0, max=1, step=0.05, value=0.7,
                                             marks={i: {"label": str(i), "style": {"color": "white"}} for i in [0, 0.5, 1]},
                                         ),
-                                        dbc.Button(
-                                            "Clear overlay",
-                                            id="btn-clear-raster-overlay",
-                                            color="secondary", outline=True, size="sm",
-                                            className="w-100 mt-2",
-                                        ),
                                         html.Div(id="raster-overlay-info", className="mt-2 small text-muted"),
                                     ]
                                 ),
                             ],
                             className="mb-3",
                         ),
-                        # Vector overlay — toggle any shapefile / GeoJSON found
-                        # anywhere under the working directory's ModelOutputs/.
+                        # Vector overlay — ArcGIS-style collapsible contents
+                        # tree, grouped by subfolder under ModelOutputs/.
                         dbc.Card(
                             [
                                 dbc.CardHeader("Vector Overlays (.shp / .geojson)"),
                                 dbc.CardBody(
                                     [
-                                        dbc.Label("Files (stack several)", style={"fontSize": "0.85rem"}),
-                                        dcc.Dropdown(
-                                            id="vector-overlay-files",
-                                            options=[],
-                                            placeholder="(none found in ModelOutputs)",
-                                            multi=True,
-                                            style={"fontSize": "0.8rem", "marginBottom": "6px"},
-                                            className="dash-dark-dropdown",
+                                        html.Div(
+                                            id="vector-tree-container",
+                                            style={
+                                                "maxHeight": "300px",
+                                                "overflowY": "auto",
+                                                "fontSize": "0.8rem",
+                                            },
                                         ),
-                                        dbc.Row(
-                                            [
-                                                dbc.Col(
-                                                    dbc.Button(
-                                                        "Select all",
-                                                        id="btn-select-all-vectors",
-                                                        color="secondary", outline=True, size="sm",
-                                                        className="w-100",
-                                                    ),
-                                                    width=6,
-                                                ),
-                                                dbc.Col(
-                                                    dbc.Button(
-                                                        "Refresh list",
-                                                        id="btn-refresh-vectors",
-                                                        color="secondary", outline=True, size="sm",
-                                                        className="w-100",
-                                                    ),
-                                                    width=6,
-                                                ),
-                                            ],
-                                            className="g-1 mb-2",
+                                        dcc.Store(id="vector-overlay-files", data=[]),
+                                        dbc.Button(
+                                            "Select all",
+                                            id="btn-select-all-vectors",
+                                            color="secondary", outline=True, size="sm",
+                                            className="w-100 mt-1",
+                                            style={"display": "none"},
                                         ),
+                                        dbc.Button(
+                                            "Refresh list",
+                                            id="btn-refresh-vectors",
+                                            color="secondary", outline=True, size="sm",
+                                            className="w-100 mt-1",
+                                        ),
+                                        html.Hr(className="my-2"),
                                         dbc.Label("Fill opacity", style={"fontSize": "0.85rem"}),
                                         dcc.Slider(
                                             id="vector-overlay-opacity",
@@ -3362,14 +3367,15 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
     """Read the first 200 rows of *file_path*, auto-detect common column names,
     and return the tuple of outputs the upload / auto-load callbacks expect.
 
-    Tuple shape (matches the 24-output callback signature):
+    Tuple shape (matches the 26-output callback signature):
         (fname_display,
          col_opts x4, id_val, ts_val, lon_val, lat_val,
          preview_table, source_path,
          csv_warning_open, utm_toggle_style, utm_checked,
          utm_opts x2, utm_e_val, utm_n_val,
          lonlat_style, utm_group_style,
-         dop_opts, sat_opts, dop_val, sat_val)
+         dop_opts, sat_opts, dop_val, sat_val,
+         age_opts, age_val)
     """
     file_path = Path(file_path)
     suffix = file_path.suffix.lower()
@@ -3381,6 +3387,7 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
         {"display": "block"}, {"display": "none"},
     )
     _DOP_SAT_DEFAULTS = ([], [], None, None)
+    _AGE_DEFAULTS = ([], None)
 
     detected_crs = None
 
@@ -3408,6 +3415,7 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
                 None,
                 *_UTM_DEFAULTS,
                 *_DOP_SAT_DEFAULTS,
+                *_AGE_DEFAULTS,
             )
         import geopandas as gpd_local
         gdf_preview = gpd_local.read_file(str(shp_files[0])).head(200)
@@ -3457,6 +3465,7 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
 
     dop_val = _auto(["DOP", "dop", "PDOP", "pdop", "HDOP", "hdop", "Precision"])
     sat_val = _auto(["NumSats", "numsats", "Satellites", "satellites", "n_sats", "NSats", "SatCount"])
+    age_val = _auto(["captureAgeClass", "AgeClass", "age_class", "Age", "ageclass"])
 
     preview_table = _make_preview_table(df)
 
@@ -3489,6 +3498,8 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
         # DOP / Satellites column mapping
         cols, cols,
         dop_val, sat_val,
+        # Age class column mapping
+        cols, age_val,
     )
 
 
@@ -3517,6 +3528,8 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
     Output("col-sats", "options"),
     Output("col-dop", "value"),
     Output("col-sats", "value"),
+    Output("col-age-class", "options"),
+    Output("col-age-class", "value"),
     Input("upload-data", "contents"),
     State("upload-data", "filename"),
     State("store-workdir", "data"),
@@ -3674,6 +3687,8 @@ def populate_modelinputs_dropdown(workdir_path, current_upload_path, current_sel
     Output("col-sats", "options", allow_duplicate=True),
     Output("col-dop", "value", allow_duplicate=True),
     Output("col-sats", "value", allow_duplicate=True),
+    Output("col-age-class", "options", allow_duplicate=True),
+    Output("col-age-class", "value", allow_duplicate=True),
     Input("modelinputs-select", "value"),
     prevent_initial_call=True,
 )
@@ -3824,6 +3839,14 @@ def toggle_stopover_pct(checked):
 
 
 @app.callback(
+    Output("age-class-col-wrapper", "is_open"),
+    Input("filter-calves-toggle", "value"),
+)
+def toggle_age_class_col(checked):
+    return bool(checked)
+
+
+@app.callback(
     Output("pop-minimumx-collapse", "is_open"),
     Output("pop-minimumx-label", "children"),
     Output("pop-minimumx-value", "max"),
@@ -3872,6 +3895,8 @@ def toggle_minimumx(checked):
     State("col-utm-northing", "value"),
     State("col-dop", "value"),
     State("col-sats", "value"),
+    State("filter-calves-toggle", "value"),
+    State("col-age-class", "value"),
     prevent_initial_call=True,
 )
 def process_uploaded_data(
@@ -3881,7 +3906,7 @@ def process_uploaded_data(
     wld_path, wld_vars_default, wld_vars_advanced,
     existing_processed_json, workdir_path, detect_roads,
     herd_id_override, use_utm, utm_easting_col, utm_northing_col,
-    dop_col, sat_col,
+    dop_col, sat_col, filter_calves, age_class_col,
 ):
     """Run the full data processing pipeline.
 
@@ -3984,6 +4009,28 @@ def process_uploaded_data(
         gdf, final_config, processing_log = process_data(tmp_path, config=config)
     except Exception as exc:
         return _err_alert(f"Processing failed: {exc}\n{traceback.format_exc()}"), "", None, None, dash.no_update, dash.no_update
+
+    # ---- Stage 3b: filter calves/fawns ----
+    _age_col = age_class_col or "captureAgeClass"
+    if filter_calves and _age_col in gdf.columns:
+        _EXCLUDED_AGE_CLASSES = {"calf", "fawn"}
+        non_adult_mask = gdf[_age_col].astype(str).str.strip().str.lower().isin(_EXCLUDED_AGE_CLASSES)
+        calves_df = gdf[non_adult_mask].copy()
+        n_calves = len(calves_df)
+        if n_calves:
+            gdf = gdf[~non_adult_mask].copy()
+            _aid = "animal_id" if "animal_id" in calves_df.columns else config["animal_id_col"]
+            processing_log.append(f"Calves/fawns filtered: {n_calves:,} fixes removed ({calves_df[_aid].nunique()} animals)")
+            exports_dir = _migtime_exports_dir(workdir_path)
+            if exports_dir is not None:
+                exports_dir.mkdir(parents=True, exist_ok=True)
+                calves_df.drop(columns=["geometry"], errors="ignore").to_csv(
+                    exports_dir / "calves_fawns.csv", index=False,
+                )
+        else:
+            processing_log.append("Calves/fawns filter: all animals are Adult, none removed")
+    elif filter_calves:
+        processing_log.append(f"Calves/fawns filter: column '{_age_col}' not found, skipped")
 
     # Manual Herd ID override from the Tab 1 input field. Stripped + sanitised
     # to the same character set the auto-derivation uses (alnum + _ + -).
@@ -4482,12 +4529,13 @@ def build_migtime_store(selected_animal, autodetect_clicks, n_seqs, processed_js
     Input("store-migtime-table", "data"),
     Input("store-seq-names", "data"),
     Input("seq-num-sequences", "value"),
+    Input("nsd-overlay-toggles", "value"),
     State("store-processed-data", "data"),
     State("seq-bio-year-month", "value"),
     State("seq-bio-year-day", "value"),
     prevent_initial_call=True,
 )
-def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, processed_json, bio_month, bio_day):
+def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_overlays, processed_json, bio_month, bio_day):
     """Tab-2 RENDERER: rebuild the four plots + the slider cards from the
     migtime table, which is the single source of truth for which sequences
     exist for this animal.
@@ -4546,12 +4594,13 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, processe
     # fix markers overlaid so the user can see fix density / gaps.
     nsd_fig = go.Figure()
     if nsd_col and nsd_col in animal_df.columns:
+        _overlays = nsd_overlays or []
         marker_colors = pd.Series("#000000", index=animal_df.index)
         has_mort = "mortality_flag" in animal_df.columns
         has_prob = "problem" in animal_df.columns
-        if has_prob:
+        if has_prob and "problem" in _overlays:
             marker_colors[animal_df["problem"].astype(bool)] = "#B57EDC"
-        if has_mort:
+        if has_mort and "mortality" in _overlays:
             marker_colors[animal_df["mortality_flag"].astype(bool)] = "#FF0000"
 
         nsd_fig.add_trace(
@@ -4564,20 +4613,19 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, processe
                 marker={"color": marker_colors.tolist(), "size": 5, "line": {"color": "#cfcfcf", "width": 1}},
             )
         )
-        if has_prob and animal_df["problem"].any():
-            prob_df = animal_df[animal_df["problem"].astype(bool)]
+        if "problem" in _overlays and has_prob and animal_df["problem"].any():
             nsd_fig.add_trace(go.Scatter(
                 x=[None], y=[None], mode="markers", name="Problem",
                 marker={"color": "#B57EDC", "size": 7},
                 showlegend=True,
             ))
-        if has_mort and animal_df["mortality_flag"].any():
+        if "mortality" in _overlays and has_mort and animal_df["mortality_flag"].any():
             nsd_fig.add_trace(go.Scatter(
                 x=[None], y=[None], mode="markers", name="Mortality",
                 marker={"color": "#FF0000", "size": 7},
                 showlegend=True,
             ))
-        if "timestamp" in animal_df.columns and len(animal_df) > 1:
+        if "gaps" in _overlays and "timestamp" in animal_df.columns and len(animal_df) > 1:
             ts = animal_df["timestamp"].reset_index(drop=True)
             nsd_vals = animal_df[nsd_col].reset_index(drop=True)
             dt_hours = ts.diff().dt.total_seconds() / 3600
@@ -4857,8 +4905,8 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, processe
                                     "always_visible": True,
                                     "transform": "dayToDate",
                                     "style": {
-                                        "fontSize": "0.65rem",
-                                        "padding": "1px 4px",
+                                        "fontSize": "0.6rem",
+                                        "padding": "0px 3px",
                                         "color": "#000",
                                         "backgroundColor": "#fff",
                                     },
@@ -5059,6 +5107,42 @@ def _parse_external_migtime(
     out["bio_year_full"] = ["" if y is None else str(y) for y in full_year]
     out["bio_year"] = out["bio_year_full"]
     out["id_bio_year"] = out["animal_id"] + "_" + out["bio_year_full"]
+
+    # Reverse-map friendly column names (Spring_start → mig1_start) using the
+    # seq_map legend written at export time, so re-imported exports round-trip.
+    if "seq_map" in df.columns:
+        legend = str(df["seq_map"].iloc[0]) if len(df) else ""
+        for pair in legend.split(";"):
+            if "=" not in pair:
+                continue
+            slot, nm = pair.split("=", 1)
+            slot, nm = slot.strip(), nm.strip()
+            if not (slot.startswith("mig") and nm and nm != slot):
+                continue
+            for suffix in ("_start", "_end"):
+                friendly = f"{nm}{suffix}"
+                if friendly in df.columns:
+                    df = df.rename(columns={friendly: f"{slot}{suffix}"})
+        df = df.drop(columns=["seq_map"], errors="ignore")
+        norm = {_norm_hdr(h): h for h in df.columns}
+
+    # If no seq_map was present, try to match any <Name>_start/<Name>_end pairs
+    # to sequential mig slots so exports from older versions still import.
+    has_any_mig = any(norm.get(f"mig{i}start") for i in range(1, 9))
+    if not has_any_mig:
+        used_cols = set()
+        slot_i = 1
+        for col in df.columns:
+            if col.endswith("_start") and col not in used_cols:
+                base = col[:-6]
+                end_col = f"{base}_end"
+                if end_col in df.columns:
+                    df = df.rename(columns={col: f"mig{slot_i}_start", end_col: f"mig{slot_i}_end"})
+                    used_cols.update({col, end_col})
+                    slot_i += 1
+                    if slot_i > 8:
+                        break
+        norm = {_norm_hdr(h): h for h in df.columns}
 
     start_cols = []
     for i in range(1, 9):
@@ -8470,88 +8554,126 @@ _RASTER_CATEGORIES = [
 
 
 @app.callback(
-    Output("raster-overlay-category", "options"),
+    Output("raster-tree-container", "children"),
     Input("main-tabs", "active_tab"),
     Input("store-model-results", "data"),
     Input("store-pop-outputs", "data"),
-    prevent_initial_call=False,
+    Input("btn-clear-raster-overlay", "n_clicks"),
+    prevent_initial_call=True,
 )
-def populate_raster_categories(active_tab, _model, _pop):
-    """Populate the raster category dropdown with every version+subfolder that
-    actually holds .tif files — e.g. "V1 · UD (per sequence)", "V2 · Population
-    (banded)". Lets the user view rasters from ANY version, including a model
-    version whose UDs a later population-only version only references."""
+def build_raster_tree(active_tab, _model_results, _pop, _clear):
+    """Build an ArcGIS-style collapsible tree of raster categories. Each
+    category is a clickable header with a triangle; expanding it reveals
+    checkboxes for individual .tif files."""
+    if ctx.triggered_id == "btn-clear-raster-overlay":
+        pass  # rebuild tree with nothing checked
+
     if _ACTIVE_WORKDIR is None:
-        return []
+        return html.Span("Set a working directory first.", className="text-muted")
     try:
         mo = _workdir_outputs()
     except Exception:
-        return []
-    opts = []
+        return html.Span("No outputs found.", className="text-muted")
+
+    groups = []
     for v in _list_versions():
         vdir = mo / f"V{v}"
         for sub, label in _RASTER_CATEGORIES:
             d = vdir / sub
             if not d.is_dir():
                 continue
-            if any(d.rglob("*.tif")):
-                opts.append({"label": f"V{v} · {label}", "value": f"V{v}/{sub}"})
-    # Add in-memory population products (not yet exported to disk).
+            tifs = sorted(d.rglob("*.tif"), key=lambda p: p.name.lower())
+            if not tifs:
+                continue
+            group_key = f"V{v}/{sub}"
+            group_label = f"V{v} · {label}"
+            options = [
+                {"label": t.stem, "value": str(t)} for t in tifs
+            ]
+            groups.append((group_key, group_label, options))
+
     if _POP_OUTPUT_CACHE.get("products"):
-        mem_cats = {}
+        mem_groups: dict[str, list] = {}
         for p in _POP_OUTPUT_CACHE["products"]:
             if p.get("kind") in ("count", "float32", "uint8") and p.get("array") is not None:
                 cat = p.get("category", "Population")
-                mem_cats[cat] = True
-        for cat in mem_cats:
-            opts.append({"label": f"(in memory) {cat}", "value": f"__mem__::{cat}"})
-    return opts
+                mem_groups.setdefault(cat, []).append(
+                    {"label": p["filename"].replace(".tif", ""), "value": f"__mem__::{p['id']}"}
+                )
+        for cat, opts in mem_groups.items():
+            groups.append((f"__mem__{cat}", f"(in memory) {cat}", opts))
+
+    if not groups:
+        return html.Span("No raster outputs found.", className="text-muted")
+
+    tree_items = []
+    for group_key, group_label, options in groups:
+        safe_key = group_key.replace("/", "_").replace(" ", "_")
+        header = html.Div(
+            [
+                html.Span(
+                    "▶ ",
+                    id={"type": "raster-tree-arrow", "index": safe_key},
+                    style={"cursor": "pointer", "userSelect": "none",
+                           "display": "inline-block", "width": "1em",
+                           "transition": "transform 0.15s"},
+                ),
+                html.Span(
+                    group_label,
+                    style={"cursor": "pointer", "fontWeight": "600"},
+                    id={"type": "raster-tree-label", "index": safe_key},
+                ),
+                html.Span(
+                    f"  ({len(options)})",
+                    className="text-muted",
+                    style={"fontSize": "0.75rem"},
+                ),
+            ],
+            id={"type": "raster-tree-header", "index": safe_key},
+            n_clicks=0,
+            style={"padding": "3px 0", "borderBottom": "1px solid #333"},
+        )
+        body = dbc.Collapse(
+            dbc.Checklist(
+                id={"type": "raster-tree-checklist", "index": safe_key},
+                options=options,
+                value=[],
+                style={"paddingLeft": "1.2em", "fontSize": "0.78rem"},
+                labelStyle={"display": "block", "padding": "1px 0"},
+                inputStyle={"marginRight": "6px"},
+            ),
+            id={"type": "raster-tree-collapse", "index": safe_key},
+            is_open=False,
+        )
+        tree_items.append(html.Div([header, body]))
+
+    return tree_items
 
 
 @app.callback(
-    Output("raster-overlay-file", "options"),
-    Output("raster-overlay-file", "value"),
-    Input("raster-overlay-category", "value"),
-    Input("main-tabs", "active_tab"),
-    Input("store-model-results", "data"),
-    Input("btn-select-all-rasters", "n_clicks"),
-    State("raster-overlay-file", "value"),
+    Output({"type": "raster-tree-collapse", "index": dash.MATCH}, "is_open"),
+    Output({"type": "raster-tree-arrow", "index": dash.MATCH}, "children"),
+    Input({"type": "raster-tree-header", "index": dash.MATCH}, "n_clicks"),
+    State({"type": "raster-tree-collapse", "index": dash.MATCH}, "is_open"),
     prevent_initial_call=True,
 )
-def populate_raster_overlay_files(category, active_tab, _model_results, _select_all, current_files):
-    """List the .tif files in the chosen version+subfolder ("V{n}/<sub>")
-    or in-memory products ("__mem__::<category>").
-    Refreshes when the category changes, when Tab 5 is opened, or after a model
-    run / load. The picker is multi-select; "Select all in category" fills it
-    with every file. Selections that survive a refresh are kept."""
-    if not category or _ACTIVE_WORKDIR is None:
-        return [], []
+def toggle_raster_tree_group(n_clicks, is_open):
+    if not n_clicks:
+        raise PreventUpdate
+    new_open = not is_open
+    return new_open, "▼ " if new_open else "▶ "
 
-    # In-memory products (not yet exported to disk).
-    if category.startswith("__mem__::"):
-        mem_cat = category[len("__mem__::"):]
-        options = []
-        for p in (_POP_OUTPUT_CACHE.get("products") or []):
-            if p.get("category") == mem_cat and p.get("kind") in ("count", "float32", "uint8") and p.get("array") is not None:
-                options.append({"label": p["filename"], "value": f"__mem__::{p['id']}"})
-        valid_values = [o["value"] for o in options]
-    else:
-        try:
-            folder = _workdir_outputs() / category
-        except Exception:
-            return [], []
-        if not folder.is_dir():
-            return [], []
-        tifs = sorted(folder.rglob("*.tif"), key=lambda p: p.name.lower())
-        options = [{"label": p.relative_to(folder).as_posix(), "value": str(p)} for p in tifs]
-        valid_values = [o["value"] for o in options]
 
-    if ctx.triggered_id == "btn-select-all-rasters":
-        return options, valid_values
-    if ctx.triggered_id == "raster-overlay-category":
-        return options, []                       # switching category clears the stack
-    kept = [v for v in (current_files or []) if v in set(valid_values)]
-    return options, kept
+@app.callback(
+    Output("raster-overlay-file", "data"),
+    Input({"type": "raster-tree-checklist", "index": dash.ALL}, "value"),
+    prevent_initial_call=True,
+)
+def aggregate_raster_selections(all_values):
+    selected = []
+    for vals in (all_values or []):
+        selected.extend(vals or [])
+    return selected
 
 
 def _render_mem_product(product_id: str, cmap: str = "viridis"):
@@ -8612,7 +8734,7 @@ def _render_mem_product(product_id: str, cmap: str = "viridis"):
 @app.callback(
     Output("raster-overlay-group", "children"),
     Output("raster-overlay-info", "children"),
-    Input("raster-overlay-file", "value"),
+    Input("raster-overlay-file", "data"),
     Input("raster-overlay-opacity", "value"),
     Input("raster-overlay-cmap", "value"),
     Input("btn-clear-raster-overlay", "n_clicks"),
@@ -8685,6 +8807,17 @@ def _vector_file_to_geojson(path: "Path"):
             # Drop datetime/other non-JSON columns that break json serialisation.
             keep = [c for c in gdf.columns if c == gdf.geometry.name
                     or gdf[c].dtype.kind in "ifbO"]
+            # For large point layers (e.g. MigPoints), strip heavy attribute
+            # columns to keep the GeoJSON payload small enough for the browser.
+            _MAX_DISPLAY_COLS = 8
+            geom_name = gdf.geometry.name
+            if len(gdf) > 2000 and sum(1 for c in keep if c != geom_name) > _MAX_DISPLAY_COLS:
+                _PREFERRED = ["animal_id", "id_bio_year", "timestamp", "seq_id",
+                              "sequence", "mig_seq", "problem", "mortality_flag"]
+                non_geom = [c for c in keep if c != geom_name]
+                priority = [c for c in _PREFERRED if c in non_geom]
+                rest = [c for c in non_geom if c not in priority]
+                keep = [geom_name] + (priority + rest)[:_MAX_DISPLAY_COLS]
             result = json.loads(gdf[keep].to_json())
     except Exception:
         result = None
@@ -8695,44 +8828,113 @@ def _vector_file_to_geojson(path: "Path"):
 
 
 @app.callback(
-    Output("vector-overlay-files", "options"),
-    Output("vector-overlay-files", "value"),
+    Output("vector-tree-container", "children"),
     Input("main-tabs", "active_tab"),
     Input("store-model-results", "data"),
     Input("store-pop-outputs", "data"),
     Input("btn-refresh-vectors", "n_clicks"),
-    Input("btn-select-all-vectors", "n_clicks"),
-    State("vector-overlay-files", "value"),
     prevent_initial_call=True,
 )
-def populate_vector_overlay_files(active_tab, _model, _pop, _refresh, _select_all, current):
-    """List every .shp / .geojson found recursively under the working directory's
-    ModelOutputs/. Multi-select; "Select all" fills the picker."""
+def build_vector_tree(active_tab, _model, _pop, _refresh):
+    """Build an ArcGIS-style collapsible tree of vector files, grouped by
+    subfolder under ModelOutputs/."""
     if _ACTIVE_WORKDIR is None:
-        return [], []
+        return html.Span("Set a working directory first.", className="text-muted")
     try:
         root = _workdir_outputs()
     except Exception:
-        return [], []
+        return html.Span("No outputs found.", className="text-muted")
     if not root.is_dir():
-        return [], []
+        return html.Span("No outputs found.", className="text-muted")
+
     vecs = sorted(
         [p for p in root.rglob("*") if p.suffix.lower() in {".shp", ".geojson"}],
         key=lambda p: str(p).lower(),
     )
-    # Label = path relative to ModelOutputs so duplicate filenames stay distinct.
-    options = [{"label": str(p.relative_to(root)), "value": str(p)} for p in vecs]
-    valid = [o["value"] for o in options]
-    if ctx.triggered_id == "btn-select-all-vectors":
-        return options, valid
-    kept = [v for v in (current or []) if v in set(valid)]
-    return options, kept
+    if not vecs:
+        return html.Span("No vector files found.", className="text-muted")
+
+    from collections import OrderedDict
+    grouped: OrderedDict[str, list] = OrderedDict()
+    for p in vecs:
+        rel = p.relative_to(root)
+        folder = str(rel.parent) if str(rel.parent) != "." else "(root)"
+        grouped.setdefault(folder, []).append(p)
+
+    tree_items = []
+    for folder, files in grouped.items():
+        safe_key = "vec_" + folder.replace("/", "_").replace("\\", "_").replace(" ", "_")
+        header = html.Div(
+            [
+                html.Span(
+                    "▶ ",
+                    id={"type": "vector-tree-arrow", "index": safe_key},
+                    style={"cursor": "pointer", "userSelect": "none",
+                           "display": "inline-block", "width": "1em",
+                           "transition": "transform 0.15s"},
+                ),
+                html.Span(
+                    folder,
+                    style={"cursor": "pointer", "fontWeight": "600"},
+                ),
+                html.Span(
+                    f"  ({len(files)})",
+                    className="text-muted",
+                    style={"fontSize": "0.75rem"},
+                ),
+            ],
+            id={"type": "vector-tree-header", "index": safe_key},
+            n_clicks=0,
+            style={"padding": "3px 0", "borderBottom": "1px solid #333"},
+        )
+        options = [{"label": p.stem, "value": str(p)} for p in files]
+        body = dbc.Collapse(
+            dbc.Checklist(
+                id={"type": "vector-tree-checklist", "index": safe_key},
+                options=options,
+                value=[],
+                style={"paddingLeft": "1.2em", "fontSize": "0.78rem"},
+                labelStyle={"display": "block", "padding": "1px 0"},
+                inputStyle={"marginRight": "6px"},
+            ),
+            id={"type": "vector-tree-collapse", "index": safe_key},
+            is_open=False,
+        )
+        tree_items.append(html.Div([header, body]))
+
+    return tree_items
+
+
+@app.callback(
+    Output({"type": "vector-tree-collapse", "index": dash.MATCH}, "is_open"),
+    Output({"type": "vector-tree-arrow", "index": dash.MATCH}, "children"),
+    Input({"type": "vector-tree-header", "index": dash.MATCH}, "n_clicks"),
+    State({"type": "vector-tree-collapse", "index": dash.MATCH}, "is_open"),
+    prevent_initial_call=True,
+)
+def toggle_vector_tree_group(n_clicks, is_open):
+    if not n_clicks:
+        raise PreventUpdate
+    new_open = not is_open
+    return new_open, "▼ " if new_open else "▶ "
+
+
+@app.callback(
+    Output("vector-overlay-files", "data"),
+    Input({"type": "vector-tree-checklist", "index": dash.ALL}, "value"),
+    prevent_initial_call=True,
+)
+def aggregate_vector_selections(all_values):
+    selected = []
+    for vals in (all_values or []):
+        selected.extend(vals or [])
+    return selected
 
 
 @app.callback(
     Output("vector-overlay-group", "children"),
     Output("vector-overlay-info", "children"),
-    Input("vector-overlay-files", "value"),
+    Input("vector-overlay-files", "data"),
     Input("vector-overlay-opacity", "value"),
     prevent_initial_call=True,
 )
