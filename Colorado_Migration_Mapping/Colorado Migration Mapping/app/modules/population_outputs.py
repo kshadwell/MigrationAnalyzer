@@ -780,20 +780,11 @@ def _sanitize_token(value: str) -> str:
 
 
 def _season_abbrev(label: str) -> str:
-    """Map a sequence label to the 3-letter WMI convention (Spr / Fal / Sum /
-    Win). Falls back to a sanitised version of the original label."""
+    """Sanitise a sequence label for use in filenames. Uses the full label
+    (e.g. 'Spring', 'Fall') rather than a 3-letter abbreviation."""
     if not label:
         return "All"
-    low = str(label).strip().lower()
-    if low.startswith("spr"):
-        return "Spr"
-    if low.startswith("fal") or low.startswith("aut"):
-        return "Fal"
-    if low.startswith("sum"):
-        return "Sum"
-    if low.startswith("win"):
-        return "Win"
-    return _sanitize_token(label)[:5]
+    return _sanitize_token(label.strip())
 
 
 def calc_season_banded_outputs(
@@ -1157,21 +1148,11 @@ _KM_TO_MILES = 0.621371
 
 
 def _season_abbrev_lower(label: str) -> str:
-    """Lowercase 3-letter season abbreviation for column suffixes
-    (spr / fal / sum / win / all). Mirrors _season_abbrev but emits
-    the case the WMI metadata file uses (Animals_spr, Seqs_fal, ...)."""
+    """Lowercase season label for metadata column suffixes
+    (e.g. Animals_spring, Seqs_fall)."""
     if not label:
         return "all"
-    low = str(label).strip().lower()
-    if low.startswith("spr"):
-        return "spr"
-    if low.startswith("fal") or low.startswith("aut"):
-        return "fal"
-    if low.startswith("sum"):
-        return "sum"
-    if low.startswith("win"):
-        return "win"
-    return _sanitize_token(low)[:5].lower()
+    return _sanitize_token(label.strip()).lower()
 
 
 def _stat_or_na(values, fn, fmt=None):

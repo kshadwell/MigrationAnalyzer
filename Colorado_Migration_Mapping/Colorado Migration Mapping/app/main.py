@@ -6837,6 +6837,12 @@ def render_model_params(model, processed_json):
                 value=True,
                 style={"fontSize": "0.8rem"},
             ),
+            dbc.Checkbox(
+                id={"type": "model-param", "key": "bbmm_year_summaries"},
+                label="Per-year summaries (banded outputs by bio-year — extends processing time)",
+                value=False,
+                style={"fontSize": "0.8rem"},
+            ),
             dbc.Label("Range min. days of data", style={"fontSize": "0.8rem", "marginTop": "4px"}),
             dbc.Input(
                 id={"type": "model-param", "key": "bbmm_range_mindays"},
@@ -7322,6 +7328,7 @@ def _run_modeling_impl(
         # None → off). Not model params, so _apply_model_ui_params ignores them.
         want_individual = bool(ui_params.get("bbmm_individual"))
         want_ranges = bool(ui_params.get("bbmm_ranges"))
+        want_year_summaries = bool(ui_params.get("bbmm_year_summaries"))
         want_linebuffer = bool(ui_params.get("bbmm_linebuffer"))
         try:
             linebuffer_distance = float(ui_params.get("bbmm_linebuffer_distance") or 400)
@@ -8241,31 +8248,61 @@ def generate_pop_outputs(
             _collect_banded("All", ud_dict)
 
         # ---- Year summaries (by bio-year) ----
-        # For each bio-year, produce:
-        #   1. Per-season stacked count surface (Spring 2020, Fall 2020, etc.)
-        #   2. All-season population summary for that year
-        #   3. Per-individual combined UD for that year
-        # Output folder: YearSummaries/<bio_year>/
-        bio_years_sorted = sorted(
-            [y for y in seq_ud_by_year if y != "all"],
-            key=lambda v: (int(v) if v.isdigit() else 0, v),
-        )
         year_summary_lines: list[str] = []
-        for by in bio_years_sorted:
-            yr_seasons = seq_ud_by_year[by]  # {season: {animal_id: [ud_arrays]}}
-            yr_prefix = f"BioYear_{by}"
+        if want_year_summaries:
+            bio_years_sorted = sorted(
+                [y for y in seq_ud_by_year if y != "all"],
+                key=lambda v: (int(v) if v.isdigit() else 0, v),
+            )
+            for by in bio_years_sorted:
+                yr_seasons = seq_ud_by_year[by]  # {season: {animal_id: [ud_arrays]}}
+                yr_prefix = f"BioYear_{by}"
 
-            # 1. Per-season stacked count for this year
-            for slbl, animals_in_season in yr_seasons.items():
-                season_yr_ud: dict[str, np.ndarray] = {}
-                for aid, ud_list in animals_in_season.items():
-                    season_yr_ud[aid] = np.mean(np.stack(ud_list, axis=0), axis=0) if len(ud_list) > 1 else ud_list[0]
-                if season_yr_ud:
+                for slbl, animals_in_season in yr_seasons.items():
+                    season_yr_ud: dict[str, np.ndarray] = {}
+                    for aid, ud_list in animals_in_season.items():
+                        season_yr_ud[aid] = np.mean(np.stack(ud_list, axis=0), axis=0) if len(ud_list) > 1 else ud_list[0]
+                    if season_yr_ud:
+                        try:
+                            prods = compute_season_banded_products(
+                                ud_dict=season_yr_ud, grid_meta=pop_grid,
+                                herd_id=herd_id, season_label=slbl,
+                                date_stamp=by,
+                                min_individuals=min_ind_tuple,
+                                stopover_pct=pop_config["stopover_pct"],
+                                min_area_drop=pop_config["min_area_drop"],
+                                min_area_fill=pop_config["min_area_fill"],
+                                simplify=pop_config["smooth"],
+                                smooth_bandwidth=pop_config["smooth_bandwidth"],
+                            )
+                            for p in prods:
+                                cache_products.append({
+                                    "id": f"yearsummary::{by}::{slbl}::{p['key']}",
+                                    "label": f"{yr_prefix} {slbl}: {p['label']}",
+                                    "category": f"Year summary — {by}",
+                                    "rel_dir": f"YearSummaries/{by}",
+                                    "filename": p["filename"], "kind": p["kind"],
+                                    "array": p.get("array"), "gdf": p.get("gdf"),
+                                })
+                        except Exception:
+                            pass
+
+                all_season_yr_ud: dict[str, np.ndarray] = {}
+                for slbl, animals_in_season in yr_seasons.items():
+                    for aid, ud_list in animals_in_season.items():
+                        mean_ud = np.mean(np.stack(ud_list, axis=0), axis=0) if len(ud_list) > 1 else ud_list[0]
+                        if aid in all_season_yr_ud:
+                            all_season_yr_ud[aid] = np.mean(
+                                np.stack([all_season_yr_ud[aid], mean_ud], axis=0), axis=0
+                            )
+                        else:
+                            all_season_yr_ud[aid] = mean_ud
+                if all_season_yr_ud:
                     try:
                         prods = compute_season_banded_products(
-                            ud_dict=season_yr_ud, grid_meta=pop_grid,
-                            herd_id=herd_id, season_label=f"{slbl}_{by}",
-                            date_stamp=date_stamp,
+                            ud_dict=all_season_yr_ud, grid_meta=pop_grid,
+                            herd_id=herd_id, season_label="All",
+                            date_stamp=by,
                             min_individuals=min_ind_tuple,
                             stopover_pct=pop_config["stopover_pct"],
                             min_area_drop=pop_config["min_area_drop"],
@@ -8275,8 +8312,8 @@ def generate_pop_outputs(
                         )
                         for p in prods:
                             cache_products.append({
-                                "id": f"yearsummary::{by}::{slbl}::{p['key']}",
-                                "label": f"{yr_prefix} {slbl}: {p['label']}",
+                                "id": f"yearsummary::{by}::All::{p['key']}",
+                                "label": f"{yr_prefix} All seasons: {p['label']}",
                                 "category": f"Year summary — {by}",
                                 "rel_dir": f"YearSummaries/{by}",
                                 "filename": p["filename"], "kind": p["kind"],
@@ -8285,64 +8322,27 @@ def generate_pop_outputs(
                     except Exception:
                         pass
 
-            # 2. All-season population summary for this year
-            all_season_yr_ud: dict[str, np.ndarray] = {}
-            for slbl, animals_in_season in yr_seasons.items():
-                for aid, ud_list in animals_in_season.items():
-                    mean_ud = np.mean(np.stack(ud_list, axis=0), axis=0) if len(ud_list) > 1 else ud_list[0]
-                    if aid in all_season_yr_ud:
-                        all_season_yr_ud[aid] = np.mean(
-                            np.stack([all_season_yr_ud[aid], mean_ud], axis=0), axis=0
-                        )
+                for aid, yr_ud in all_season_yr_ud.items():
+                    total = yr_ud.sum()
+                    if total > 0:
+                        normed = (yr_ud / total).astype(np.float32)
                     else:
-                        all_season_yr_ud[aid] = mean_ud
-            if all_season_yr_ud:
-                try:
-                    prods = compute_season_banded_products(
-                        ud_dict=all_season_yr_ud, grid_meta=pop_grid,
-                        herd_id=herd_id, season_label=f"All_{by}",
-                        date_stamp=date_stamp,
-                        min_individuals=min_ind_tuple,
-                        stopover_pct=pop_config["stopover_pct"],
-                        min_area_drop=pop_config["min_area_drop"],
-                        min_area_fill=pop_config["min_area_fill"],
-                        simplify=pop_config["smooth"],
-                        smooth_bandwidth=pop_config["smooth_bandwidth"],
-                    )
-                    for p in prods:
-                        cache_products.append({
-                            "id": f"yearsummary::{by}::All::{p['key']}",
-                            "label": f"{yr_prefix} All seasons: {p['label']}",
-                            "category": f"Year summary — {by}",
-                            "rel_dir": f"YearSummaries/{by}",
-                            "filename": p["filename"], "kind": p["kind"],
-                            "array": p.get("array"), "gdf": p.get("gdf"),
-                        })
-                except Exception:
-                    pass
+                        normed = yr_ud.astype(np.float32)
+                    fname = f"{herd_id}_{aid}_{by}_combinedUD.tif"
+                    cache_products.append({
+                        "id": f"yearsummary::{by}::ind::{aid}",
+                        "label": f"{yr_prefix} {aid} combined UD",
+                        "category": f"Year summary — {by}",
+                        "rel_dir": f"YearSummaries/{by}/IndividualUDs",
+                        "filename": fname, "kind": "float32",
+                        "array": normed,
+                    })
 
-            # 3. Per-individual combined UD for this year (one tif per animal)
-            for aid, yr_ud in all_season_yr_ud.items():
-                total = yr_ud.sum()
-                if total > 0:
-                    normed = (yr_ud / total).astype(np.float32)
-                else:
-                    normed = yr_ud.astype(np.float32)
-                fname = f"{herd_id}_{aid}_{by}_combinedUD.tif"
-                cache_products.append({
-                    "id": f"yearsummary::{by}::ind::{aid}",
-                    "label": f"{yr_prefix} {aid} combined UD",
-                    "category": f"Year summary — {by}",
-                    "rel_dir": f"YearSummaries/{by}/IndividualUDs",
-                    "filename": fname, "kind": "float32",
-                    "array": normed,
-                })
-
-            n_animals_yr = len(all_season_yr_ud)
-            n_seasons_yr = len(yr_seasons)
-            year_summary_lines.append(
-                f"Bio-year {by}: {n_seasons_yr} season(s), {n_animals_yr} individual(s)"
-            )
+                n_animals_yr = len(all_season_yr_ud)
+                n_seasons_yr = len(yr_seasons)
+                year_summary_lines.append(
+                    f"Bio-year {by}: {n_seasons_yr} season(s), {n_animals_yr} individual(s)"
+                )
         if year_summary_lines:
             banded_summary.append("Year summaries: " + "; ".join(year_summary_lines))
 
@@ -9507,6 +9507,16 @@ def handle_export(selected_clicks, all_clicks, checked_ids, out_dir, processed_j
                 dest_dir = out_path / prod["rel_dir"]
                 write_product(prod, dest_dir, grid_meta)
                 exported.append(f"{prod['rel_dir']}/{prod['filename']}")
+                if prod.get("kind") == "float32" and prod["filename"].endswith("_meanUD.tif"):
+                    try:
+                        range_dir = out_path / "RangeUDs"
+                        range_dir.mkdir(parents=True, exist_ok=True)
+                        import shutil
+                        src = dest_dir / prod["filename"]
+                        shutil.copy2(str(src), str(range_dir / prod["filename"]))
+                        exported.append(f"RangeUDs/{prod['filename']}")
+                    except Exception:
+                        pass
             except Exception as e:
                 failures.append(f"{prod['rel_dir']}/{prod['filename']}: {e}")
 
