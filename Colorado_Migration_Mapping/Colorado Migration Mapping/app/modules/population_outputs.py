@@ -1195,6 +1195,7 @@ def write_herd_metadata(
     analyst: str = "Unknown",
     date_stamp: str | None = None,
     season_labels_order: list[str] | None = None,
+    version: str | None = None,
 ) -> dict[str, Path]:
     """Write the herd-level metadata summary CSV + XLSX in the WMI 2-column
     key/value schema. Filename: ``<herd>_metadata_<MMYYYY>.{csv,xlsx}``.
@@ -1265,8 +1266,7 @@ def write_herd_metadata(
         t_start = sub["date"].min() if "date" in sub.columns else pd.NaT
         t_end = sub["date"].max() if "date" in sub.columns else pd.NaT
         days = float((t_end - t_start).total_seconds() / 86400.0) if pd.notna(t_start) and pd.notna(t_end) else float("nan")
-        eucl_km = float(np.hypot(xs[-1] - xs[0], ys[-1] - ys[0]) / 1000.0)
-        cumu_km = float(np.sqrt(np.diff(xs) ** 2 + np.diff(ys) ** 2).sum() / 1000.0)
+        eucl_km, cumu_km, maxpair_km = _line_distances_km(xs, ys)
         per_seq.append({
             "season": season_label,
             "animal_id": animal_id,
@@ -1277,6 +1277,7 @@ def write_herd_metadata(
             "cumu_miles": cumu_km * _KM_TO_MILES,
             "eucl_km": eucl_km,
             "cumu_km": cumu_km,
+            "maxpair_km": maxpair_km,
         })
 
     # Group seqs by season, then build the canonical key/value list.
@@ -1302,14 +1303,28 @@ def write_herd_metadata(
     elif species is None:
         species = "Unknown"
 
+    if version is not None:
+        rows.append(("Version", version))
     rows.append(("Herd_Name", herd_token))
     rows.append(("Species", species))
     rows.append(("Analyses_Date", _dt.datetime.now().strftime("%m/%d/%Y")))
     rows.append(("Analyst", analyst))
 
-    # Individuals / Males / Females
+    # NumInd — total unique individuals in the dataset
     n_individuals = int(processed_df["animal_id"].nunique()) if "animal_id" in processed_df.columns else 0
-    rows.append(("Individuals", n_individuals))
+    rows.append(("NumInd", n_individuals))
+
+    # MigInd — unique animals with at least one migration sequence
+    mig_animals = set()
+    for key in sequences_dict:
+        parts = str(key).rsplit("_", 2)
+        if len(parts) == 3:
+            mig_animals.add(parts[0])
+        else:
+            mig_animals.add(str(key))
+    rows.append(("MigInd", len(mig_animals)))
+
+    # NumMale / NumFemale
     if "Sex" in processed_df.columns:
         sex_groups = processed_df.dropna(subset=["Sex"]).groupby("animal_id")["Sex"].first()
         n_males = int((sex_groups.astype(str).str.upper().isin({"M", "MALE"})).sum())
@@ -1317,8 +1332,8 @@ def write_herd_metadata(
     else:
         n_males = 0
         n_females = 0
-    rows.append(("Males", n_males))
-    rows.append(("Females", n_females))
+    rows.append(("NumMale", n_males))
+    rows.append(("NumFemale", n_females))
 
     # Project year range
     if "timestamp" in processed_df.columns:
@@ -1426,6 +1441,31 @@ def write_herd_metadata(
     rows.append(("avg_mig_miles_eucl_all", _stat_or_na(all_eucl, np.mean)))
     rows.append(("avg_mig_km_eucl_all", _stat_or_na(all_eucl_km, np.mean)))
 
+    # ----- Per-season sd (standard deviation) for cumu & eucl distances -------
+    def _sd_or_na(vals):
+        a = np.asarray(vals, dtype=float)
+        if len(a) < 2:
+            return "NA"
+        return round(float(a.std(ddof=1)), 4)
+
+    for label, abbrev in season_abbrevs:
+        seqs = by_season.get(label, [])
+        cumu_km = [r["cumu_km"] for r in seqs if r.get("cumu_km") is not None]
+        eucl_km = [r["eucl_km"] for r in seqs if r.get("eucl_km") is not None]
+        rows.append((f"sd_mig_km_cumu_{abbrev}", _sd_or_na(cumu_km)))
+        rows.append((f"sd_mig_km_eucl_{abbrev}", _sd_or_na(eucl_km)))
+
+    # ----- Per-season maxpair spread (greatest distance between any two fixes) -
+    for label, abbrev in season_abbrevs:
+        seqs = by_season.get(label, [])
+        mp = [r["maxpair_km"] for r in seqs if r.get("maxpair_km") is not None]
+        rows.append((f"avg_maxpair_km_{abbrev}", _stat_or_na(mp, np.mean)))
+        rows.append((f"min_maxpair_km_{abbrev}", _stat_or_na(mp, np.min)))
+        rows.append((f"max_maxpair_km_{abbrev}", _stat_or_na(mp, np.max)))
+        rows.append((f"sd_maxpair_km_{abbrev}", _sd_or_na(mp)))
+    all_mp = [r["maxpair_km"] for r in per_seq if r.get("maxpair_km") is not None]
+    rows.append(("avg_maxpair_km_all", _stat_or_na(all_mp, np.mean)))
+
     # ----- Annual active collars (Chloe-style) --------------------------------
     # Number of unique animals with data in each biological year. Added both as
     # per-year rows here and written to a dedicated <herd>_annualCollars CSV.
@@ -1447,12 +1487,14 @@ def write_herd_metadata(
     for yr_label, cnt in annual_pairs:
         rows.append((f"ActiveCollars_{yr_label}", cnt))
 
-    # Two-column dataframe with the WMI quirky header layout:
-    # first column unnamed, second column "V1".
-    df_meta = pd.DataFrame(rows, columns=["", "V1"])
+    # Horizontal layout: each field is a column, single data row.
+    df_meta = pd.DataFrame([{k: v for k, v in rows}])
+
+    meta_dir = out_dir / "Metadata"
+    meta_dir.mkdir(parents=True, exist_ok=True)
 
     written: dict[str, Path] = {}
-    csv_path = out_dir / f"{herd_token}_metadata_{date_stamp}.csv"
+    csv_path = meta_dir / f"{herd_token}_MigMetadata_{date_stamp}.csv"
     df_meta.to_csv(csv_path, index=False, encoding="utf-8")
     written["csv"] = csv_path
 
@@ -1460,14 +1502,14 @@ def write_herd_metadata(
     # Chloe's metadata_annualCollars.csv.
     if annual_pairs:
         annual_df = pd.DataFrame(annual_pairs, columns=["Year", "ActiveCollars"])
-        annual_path = out_dir / f"{herd_token}_annualCollars_{date_stamp}.csv"
+        annual_path = meta_dir / f"{herd_token}_annualCollars_{date_stamp}.csv"
         annual_df.to_csv(annual_path, index=False, encoding="utf-8")
         written["annual_collars"] = annual_path
 
     # XLSX mirror — requires openpyxl. Sheet name matches filename stem.
     try:
-        xlsx_path = out_dir / f"{herd_token}_metadata_{date_stamp}.xlsx"
-        sheet_name = f"{herd_token}_metadata_{date_stamp}"[:31]  # Excel sheet name cap
+        xlsx_path = meta_dir / f"{herd_token}_MigMetadata_{date_stamp}.xlsx"
+        sheet_name = f"{herd_token}_MigMetadata_{date_stamp}"[:31]  # Excel sheet name cap
         df_meta.to_excel(xlsx_path, sheet_name=sheet_name, index=False)
         written["xlsx"] = xlsx_path
     except Exception:
@@ -1625,14 +1667,14 @@ def write_flags_removed_shapefile(
 
     Drops rows where ``problem == 1`` or ``mortality_flag == 1`` (auto- or
     user-flagged), preserving everything else verbatim. Writes to
-    ``out_dir / EXPORTS / <name>.gpkg``.
+    ``out_dir / RemovedPoints / <name>.gpkg``.
 
     Returns the ``.gpkg`` Path, or ``None`` if no rows remain after filtering.
     """
     import datetime as _dt
 
     out_dir = Path(out_dir)
-    exports_dir = out_dir / "EXPORTS"
+    exports_dir = out_dir / "RemovedPoints"
     exports_dir.mkdir(parents=True, exist_ok=True)
 
     if date_stamp is None:
@@ -2002,15 +2044,14 @@ def export_all(
     # ------------------------------------------------------------------
     # Population use contours
     # ------------------------------------------------------------------
-    pu_dir = out_dir / "popUseMerged"
-    shp = export_shapefiles(pop_use_gdf, pu_dir, "Pop_use_contours")
+    contours_dir = out_dir / "Contours"
+    shp = export_shapefiles(pop_use_gdf, contours_dir, "Pop_use_contours")
     written["pop_use"].append(shp)
 
     # ------------------------------------------------------------------
     # Footprint contours
     # ------------------------------------------------------------------
-    fp_dir = out_dir / "footPrintsMerged"
-    shp = export_shapefiles(pop_foot_gdf, fp_dir, "Footprint_contours")
+    shp = export_shapefiles(pop_foot_gdf, contours_dir, "Footprint_contours")
     written["pop_foot"].append(shp)
 
     # ------------------------------------------------------------------

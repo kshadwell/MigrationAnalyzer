@@ -56,6 +56,7 @@ _seq_point_style = {"variable": "dashExtensions.default.seqPointStyle"}
 # assets/map_functions.js (dashExtensions.default.contourStyle).
 _contour_style = {"variable": "dashExtensions.default.contourStyle"}
 _seq_line_style = {"variable": "dashExtensions.default.seqLineStyle"}
+_vec_point_style = {"variable": "dashExtensions.default.vecPointStyle"}
 
 # ---------------------------------------------------------------------------
 # Module imports — three-tier fallback so the Dash UI still loads even when
@@ -99,7 +100,6 @@ try:
         write_mig_outputs,
         write_flags_removed_shapefile,
         write_herd_metadata,
-        write_per_season_distance_csvs,
         generate_metadata_summary,
         export_all,
     )
@@ -146,7 +146,6 @@ except ImportError:
             write_mig_outputs,
             write_flags_removed_shapefile,
             write_herd_metadata,
-            write_per_season_distance_csvs,
             generate_metadata_summary,
             export_all,
         )
@@ -234,9 +233,6 @@ except ImportError:
             return None
 
         def write_herd_metadata(*a, **k):
-            return {}
-
-        def write_per_season_distance_csvs(*a, **k):
             return {}
 
         def generate_metadata_summary(*a, **k):
@@ -475,8 +471,19 @@ def _workdir_outputs(workdir: Path | None = None) -> Path:
     return p
 
 
+def _parse_version_num(dirname: str) -> int | None:
+    """Extract the version number from a folder name like 'V3' or 'V3_072126'."""
+    if not dirname.startswith("V"):
+        return None
+    rest = dirname[1:]
+    num_part = rest.split("_", 1)[0]
+    if num_part.isdigit():
+        return int(num_part)
+    return None
+
+
 def _list_versions(workdir: Path | None = None) -> list[int]:
-    """Existing version numbers under <workdir>/ModelOutputs/ (V1, V2, …), ascending."""
+    """Existing version numbers under <workdir>/ModelOutputs/ (V1, V2_072126, …), ascending."""
     base = workdir or _ACTIVE_WORKDIR
     if base is None:
         return []
@@ -485,13 +492,26 @@ def _list_versions(workdir: Path | None = None) -> list[int]:
         return []
     out: list[int] = []
     for p in mo.glob("V*"):
-        if p.is_dir() and p.name[1:].isdigit():
-            out.append(int(p.name[1:]))
+        if p.is_dir():
+            v = _parse_version_num(p.name)
+            if v is not None:
+                out.append(v)
     return sorted(out)
 
 
+def _resolve_version_dir(base: Path, v: int) -> Path:
+    """Find the actual directory for version *v* under ModelOutputs/.
+    Handles both old-style 'V3' and new-style 'V3_072126' folder names."""
+    mo = base / "ModelOutputs"
+    if mo.is_dir():
+        for p in mo.glob(f"V{v}*"):
+            if p.is_dir() and _parse_version_num(p.name) == v:
+                return p
+    return mo / f"V{v}"
+
+
 def _workdir_version(workdir: Path | None = None, version: int | None = None) -> Path:
-    """Path to the active versioned output folder <workdir>/ModelOutputs/V{n}/.
+    """Path to the active versioned output folder <workdir>/ModelOutputs/V{n}_MMDDYY/.
     Uses the explicit ``version``, else the active one, else the latest existing
     (or V1 if none). Created if absent. Model runs start a NEW version via
     :func:`_start_new_version`; everything downstream writes into the current one."""
@@ -504,20 +524,23 @@ def _workdir_version(workdir: Path | None = None, version: int | None = None) ->
         existing = _list_versions(base)
         v = existing[-1] if existing else 1
         _ACTIVE_VERSION = v
-    p = base / "ModelOutputs" / f"V{v}"
+    p = _resolve_version_dir(base, v)
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def _start_new_version(workdir: Path | None = None) -> int:
     """Begin a new output version (max existing + 1) and make it active. Called
-    at the start of a model run so each run's outputs land in their own folder."""
+    at the start of a model run so each run's outputs land in their own folder.
+    Folder name includes the creation date, e.g. V3_072126."""
+    import datetime as _dt
     global _ACTIVE_VERSION
     base = workdir or _ACTIVE_WORKDIR
     existing = _list_versions(base)
     v = (existing[-1] + 1) if existing else 1
     _ACTIVE_VERSION = v
-    (base / "ModelOutputs" / f"V{v}").mkdir(parents=True, exist_ok=True)
+    date_stamp = _dt.datetime.now().strftime("%m%d%y")
+    (base / "ModelOutputs" / f"V{v}_{date_stamp}").mkdir(parents=True, exist_ok=True)
     return v
 
 
@@ -532,7 +555,7 @@ def _write_version_manifest(version: int, model: str, model_params: dict,
     if base is None:
         return
     mo = base / "ModelOutputs"
-    vdir = mo / f"V{version}"
+    vdir = _resolve_version_dir(base, version)
     vdir.mkdir(parents=True, exist_ok=True)
 
     # Parent = highest existing version below this one.
@@ -541,7 +564,7 @@ def _write_version_manifest(version: int, model: str, model_params: dict,
     changed: dict[str, dict] = {}
     if parent is not None:
         try:
-            prev = json.loads((mo / f"V{parent}" / "version_manifest.json").read_text(encoding="utf-8"))
+            prev = json.loads(_resolve_version_dir(base, parent).joinpath("version_manifest.json").read_text(encoding="utf-8"))
             prev_params = prev.get("model_params", {}) or {}
             for k in sorted(set(prev_params) | set(model_params)):
                 a, b = prev_params.get(k), model_params.get(k)
@@ -648,7 +671,7 @@ def _latest_version_with_model(workdir: Path | None = None) -> int | None:
     if base is None:
         return None
     for v in reversed(_list_versions(base)):
-        ud = base / "ModelOutputs" / f"V{v}" / "UDs"
+        ud = _resolve_version_dir(base, v) / "UDs"
         if ud.is_dir() and any(ud.glob("*.tif")):
             return v
     return None
@@ -664,13 +687,14 @@ def _write_pop_version_manifest(version: int, parent: int | None,
     if base is None:
         return
     mo = base / "ModelOutputs"
-    vdir = mo / f"V{version}"
+    vdir = _resolve_version_dir(base, version)
     vdir.mkdir(parents=True, exist_ok=True)
 
     reused: dict[str, str] = {}
     if model_source is not None:
+        src_dir = _resolve_version_dir(base, model_source)
         for sub in ("UDs", "Footprints", "model_results.csv"):
-            reused[sub] = f"../V{model_source}/{sub}"
+            reused[sub] = f"../{src_dir.name}/{sub}"
     shared_inputs: dict[str, str] = {}
     for rel in ("processed_data.parquet", "road_crossings.json"):
         if (mo / rel).exists():
@@ -684,7 +708,7 @@ def _write_pop_version_manifest(version: int, parent: int | None,
     changed: dict[str, dict] = {}
     if parent is not None:
         try:
-            prev = json.loads((mo / f"V{parent}" / "version_manifest.json").read_text(encoding="utf-8"))
+            prev = json.loads(_resolve_version_dir(base, parent).joinpath("version_manifest.json").read_text(encoding="utf-8"))
             prev_pop = prev.get("pop_config") or prev.get("model_params") or {}
             cur_pop = pop_config or {}
             for k in sorted(set(prev_pop) | set(cur_pop)):
@@ -726,7 +750,7 @@ def _record_pop_export(version: int, pop_config, workdir: Path | None = None) ->
     if base is None:
         return
     _POP_EXPORTED[version] = _pop_config_signature(pop_config)
-    vdir = base / "ModelOutputs" / f"V{version}"
+    vdir = _resolve_version_dir(base, version)
     vdir.mkdir(parents=True, exist_ok=True)
     mpath = vdir / "version_manifest.json"
     try:
@@ -750,7 +774,7 @@ def _seed_pop_exported(workdir: Path | None = None) -> None:
     if base is None:
         return
     for v in _list_versions(base):
-        mpath = base / "ModelOutputs" / f"V{v}" / "version_manifest.json"
+        mpath = _resolve_version_dir(base, v) / "version_manifest.json"
         if not mpath.exists():
             continue
         try:
@@ -811,13 +835,12 @@ def _log_action(action: str, **fields) -> None:
 
 
 def _append_processing_log(lines: list[str], header: str | None = None) -> None:
-    """Append a timestamped section to <workdir>/ModelOutputs/processing_log.txt.
+    """Append a timestamped section to both the top-level processing_log.txt
+    and the active version's processing_log.txt.
 
-    processing_log.txt starts life as the Tab-1 data-processing report; this lets
-    the later workflow steps (migtime export, modelling, population outputs) add
-    their own dated sections so the file is a full record of the run — model
-    chosen, every parameter used (defaults included), success/errors, runtime,
-    and where outputs landed. Silent no-op if no workdir; never raises."""
+    The top-level file is a cumulative record across all versions; each
+    version folder gets its own complete log of everything that happened
+    during that run. Silent no-op if no workdir; never raises."""
     if _ACTIVE_WORKDIR is None:
         return
     try:
@@ -827,8 +850,17 @@ def _append_processing_log(lines: list[str], header: str | None = None) -> None:
         if header:
             block.append(f"{header}   [{ts}]")
         block.extend(str(ln) for ln in lines)
+        text = "\n".join(block) + "\n"
         with open(_workdir_outputs() / "processing_log.txt", "a", encoding="utf-8") as f:
-            f.write("\n".join(block) + "\n")
+            f.write(text)
+        if _ACTIVE_VERSION is not None:
+            try:
+                vdir = _resolve_version_dir(_ACTIVE_WORKDIR, _ACTIVE_VERSION)
+                vdir.mkdir(parents=True, exist_ok=True)
+                with open(vdir / "processing_log.txt", "a", encoding="utf-8") as f:
+                    f.write(text)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -1028,7 +1060,8 @@ def _build_loaded_project_summary(df: pd.DataFrame, project_name: str, meta: dic
         if c in df.columns:
             n_valid = int(df[c].notna().sum() if df[c].dtype == float else (df[c] != 0).sum())
             enrichment_cols.append(f"{c} ({n_valid:,})")
-    wld_col_names = {name for (name, _label, _grp) in WLD_COLUMNS.values()}
+    _RASTER_COLS = {"elevation_m", "snow_depth_m", "swe_m", "snow_density_kgm3"}
+    wld_col_names = {name for (name, _label, _grp) in WLD_COLUMNS.values()} - _RASTER_COLS
     wld_present = [c for c in df.columns if c in wld_col_names]
     if wld_present:
         enrichment_cols.append(f"+ {len(wld_present)} WLD vars")
@@ -1422,16 +1455,28 @@ tab1_layout = dbc.Container(
                                             style={"display": "none"},
                                         ),
                                         html.Hr(className="my-2"),
-                                        dbc.Checkbox(
-                                            id="filter-calves-toggle",
-                                            label="Filter out calves/fawns",
-                                            value=True,
-                                            className="small",
-                                        ),
-                                        dbc.Collapse(
-                                            _col_map_row("Age class column", "col-age-class"),
-                                            id="age-class-col-wrapper",
-                                            is_open=True,
+                                        _col_map_row("Age class column", "col-age-class"),
+                                        html.Div(
+                                            [
+                                                html.Small(
+                                                    "Which age classes should be included in your analysis? "
+                                                    "Calves/fawns are typically excluded, but you can choose below.",
+                                                    className="text-muted d-block mb-1",
+                                                ),
+                                                dbc.Checklist(
+                                                    id="age-class-include",
+                                                    options=[],
+                                                    value=[],
+                                                    inline=True,
+                                                    className="small",
+                                                ),
+                                                html.Small(
+                                                    id="age-class-hint",
+                                                    className="text-muted",
+                                                ),
+                                            ],
+                                            id="age-class-checklist-wrapper",
+                                            style={"display": "none"},
                                         ),
                                     ]
                                 ),
@@ -2552,7 +2597,7 @@ tab4_layout = dbc.Container(
                                                 {"label": " Area", "value": "area"},
                                                 {"label": " Volume", "value": "volume"},
                                             ],
-                                            value="volume",
+                                            value="area",
                                             className="mb-2",
                                             inline=True,
                                             labelStyle={"color": "white"},
@@ -2696,7 +2741,7 @@ tab4_layout = dbc.Container(
                                             className="w-100",
                                         ),
                                         html.Small(
-                                            "Loads the saved popUseMerged / footPrintsMerged contours from "
+                                            "Loads the saved contour shapefiles from "
                                             "this working directory so you can view them in Tab 5 without "
                                             "re-generating.",
                                             className="text-muted d-block mt-1",
@@ -2853,7 +2898,7 @@ tab5_layout = dbc.Container(
                                         dbc.Label("Opacity", style={"fontSize": "0.85rem"}),
                                         dcc.Slider(
                                             id="raster-overlay-opacity",
-                                            min=0, max=1, step=0.05, value=0.7,
+                                            min=0, max=1, step=0.05, value=1,
                                             marks={i: {"label": str(i), "style": {"color": "white"}} for i in [0, 0.5, 1]},
                                         ),
                                         html.Div(id="raster-overlay-info", className="mt-2 small text-muted"),
@@ -3266,6 +3311,7 @@ def maybe_clear_all_projects(selected):
     Output("store-road-crossings", "data", allow_duplicate=True),
     Output("project-load-status", "children"),
     Output("project-name", "value"),
+    Output("store-config", "data", allow_duplicate=True),
     Input("btn-load-project", "n_clicks"),
     State("project-selector", "value"),
     prevent_initial_call=True,
@@ -3282,7 +3328,7 @@ def load_project(n_clicks, project_name):
 
     saved_df = _load_processed_from_disk(project_name)
     if saved_df is None:
-        return dash.no_update, dash.no_update, dash.no_update, _err_alert("No data found for this project."), dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update, _err_alert("No data found for this project."), dash.no_update, dash.no_update
 
     # Pre-populate _MAP_CACHE so the first Tab 2 render is instant. Without
     # this the first animal-select after load would block for several seconds
@@ -3303,26 +3349,42 @@ def load_project(n_clicks, project_name):
     if rc_path.exists():
         road_crossings = json.loads(rc_path.read_text())
 
+    # Restore config (including herd_id) from saved project metadata so
+    # output file naming uses the original herd ID, not the "Herd" fallback.
+    config_json = None
+    meta = _load_project_meta(project_name)
+    if meta and "config" in meta:
+        config_json = json.dumps(meta["config"])
+    elif project_name:
+        config_json = json.dumps({"herd_id": project_name.split("_")[0]})
+
     n_animals = saved_df["animal_id"].nunique() if "animal_id" in saved_df.columns else "?"
     status = _ok_alert(f"Loaded {project_name.replace('_', ' ')} — {len(saved_df):,} points, {n_animals} animals")
 
-    return _df_to_json(df_out, "processed"), notes, road_crossings, status, project_name.replace("_", " ")
+    return _df_to_json(df_out, "processed"), notes, road_crossings, status, project_name.replace("_", " "), config_json
 
 
 # ===========================================================================
 # Callbacks — Tab 1: Data Import & Cleaning
 # ===========================================================================
 
+def _shp_sidecars_complete(shp_path: Path) -> bool:
+    """True if a shapefile has all required sidecar files."""
+    return all(shp_path.with_suffix(s).exists() for s in (".shp", ".shx", ".dbf", ".prj"))
+
+
 def _create_companion_file_sync(file_path: Path) -> None:
     """If file_path is a CSV, create a companion .shp in the same folder.
     If it's a .shp, create a companion .csv. Silently skips if the companion
-    already exists or if the conversion fails."""
+    already exists (with all sidecars) or if the conversion fails.
+    Writes to a temp name first, then renames, so a partial write never
+    blocks future retries."""
     import geopandas as gpd
     suffix = file_path.suffix.lower()
     try:
         if suffix == ".csv":
             companion = file_path.with_suffix(".shp")
-            if companion.exists():
+            if _shp_sidecars_complete(companion):
                 return
             df = pd.read_csv(str(file_path), low_memory=False)
             lon_col = lat_col = None
@@ -3337,7 +3399,13 @@ def _create_companion_file_sync(file_path: Path) -> None:
                     df, geometry=gpd.points_from_xy(df[lon_col], df[lat_col]),
                     crs="EPSG:4326",
                 )
-                gdf.to_file(companion)
+                tmp_shp = file_path.with_suffix(".tmp.shp")
+                gdf.to_file(tmp_shp)
+                for s in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
+                    src = file_path.with_suffix(".tmp" + s)
+                    dst = file_path.with_suffix(s)
+                    if src.exists():
+                        src.replace(dst)
         elif suffix == ".shp":
             companion = file_path.with_suffix(".csv")
             if companion.exists():
@@ -3359,7 +3427,7 @@ def _create_companion_file(file_path: Path) -> None:
     threading.Thread(
         target=_create_companion_file_sync,
         args=(file_path,),
-        daemon=True,
+        daemon=False,
     ).start()
 
 
@@ -3839,11 +3907,38 @@ def toggle_stopover_pct(checked):
 
 
 @app.callback(
-    Output("age-class-col-wrapper", "is_open"),
-    Input("filter-calves-toggle", "value"),
+    Output("age-class-include", "options"),
+    Output("age-class-include", "value"),
+    Output("age-class-checklist-wrapper", "style"),
+    Output("age-class-hint", "children"),
+    Input("col-age-class", "value"),
+    State("store-tmp-path", "data"),
+    prevent_initial_call=True,
 )
-def toggle_age_class_col(checked):
-    return bool(checked)
+def populate_age_class_checklist(age_col, tmp_path):
+    """Read unique age-class values from the uploaded data and populate the
+    inclusion checklist. Pre-checks all classes except calf/fawn."""
+    hidden = {"display": "none"}
+    if not age_col or not tmp_path:
+        return [], [], hidden, ""
+    try:
+        p = Path(tmp_path)
+        if p.suffix.lower() == ".csv":
+            df = pd.read_csv(str(p), low_memory=False, usecols=[age_col])
+        else:
+            import geopandas as _gpd
+            df = _gpd.read_file(str(p))[[age_col]]
+        vals = sorted(df[age_col].dropna().astype(str).str.strip().unique(), key=str.lower)
+        if not vals:
+            return [], [], hidden, ""
+        options = [{"label": f" {v}", "value": v} for v in vals]
+        _EXCLUDE_DEFAULT = {"calf", "fawn"}
+        included = [v for v in vals if v.lower() not in _EXCLUDE_DEFAULT]
+        excluded = [v for v in vals if v.lower() in _EXCLUDE_DEFAULT]
+        hint = f"{len(excluded)} class(es) unchecked by default" if excluded else ""
+        return options, included, {"display": "block"}, hint
+    except Exception:
+        return [], [], hidden, ""
 
 
 @app.callback(
@@ -3895,7 +3990,7 @@ def toggle_minimumx(checked):
     State("col-utm-northing", "value"),
     State("col-dop", "value"),
     State("col-sats", "value"),
-    State("filter-calves-toggle", "value"),
+    State("age-class-include", "value"),
     State("col-age-class", "value"),
     prevent_initial_call=True,
 )
@@ -3906,7 +4001,7 @@ def process_uploaded_data(
     wld_path, wld_vars_default, wld_vars_advanced,
     existing_processed_json, workdir_path, detect_roads,
     herd_id_override, use_utm, utm_easting_col, utm_northing_col,
-    dop_col, sat_col, filter_calves, age_class_col,
+    dop_col, sat_col, age_class_include, age_class_col,
 ):
     """Run the full data processing pipeline.
 
@@ -4010,27 +4105,35 @@ def process_uploaded_data(
     except Exception as exc:
         return _err_alert(f"Processing failed: {exc}\n{traceback.format_exc()}"), "", None, None, dash.no_update, dash.no_update
 
-    # ---- Stage 3b: filter calves/fawns ----
+    # ---- Stage 3b: filter by age class ----
     _age_col = age_class_col or "captureAgeClass"
-    if filter_calves and _age_col in gdf.columns:
-        _EXCLUDED_AGE_CLASSES = {"calf", "fawn"}
-        non_adult_mask = gdf[_age_col].astype(str).str.strip().str.lower().isin(_EXCLUDED_AGE_CLASSES)
-        calves_df = gdf[non_adult_mask].copy()
-        n_calves = len(calves_df)
-        if n_calves:
-            gdf = gdf[~non_adult_mask].copy()
-            _aid = "animal_id" if "animal_id" in calves_df.columns else config["animal_id_col"]
-            processing_log.append(f"Calves/fawns filtered: {n_calves:,} fixes removed ({calves_df[_aid].nunique()} animals)")
-            exports_dir = _migtime_exports_dir(workdir_path)
-            if exports_dir is not None:
-                exports_dir.mkdir(parents=True, exist_ok=True)
-                calves_df.drop(columns=["geometry"], errors="ignore").to_csv(
-                    exports_dir / "calves_fawns.csv", index=False,
+    _included = set(age_class_include or [])
+    if _included and _age_col in gdf.columns:
+        actual_vals = set(gdf[_age_col].astype(str).str.strip().unique())
+        excluded_vals = actual_vals - _included
+        if excluded_vals:
+            exclude_mask = gdf[_age_col].astype(str).str.strip().isin(excluded_vals)
+            excluded_df = gdf[exclude_mask].copy()
+            n_excluded = len(excluded_df)
+            if n_excluded:
+                gdf = gdf[~exclude_mask].copy()
+                _aid = "animal_id" if "animal_id" in excluded_df.columns else config["animal_id_col"]
+                processing_log.append(
+                    f"Age-class filter: {n_excluded:,} fixes removed ({excluded_df[_aid].nunique()} animals) "
+                    f"— excluded classes: {', '.join(sorted(excluded_vals))}"
                 )
+                exports_dir = _migtime_exports_dir(workdir_path)
+                if exports_dir is not None:
+                    exports_dir.mkdir(parents=True, exist_ok=True)
+                    excluded_df.drop(columns=["geometry"], errors="ignore").to_csv(
+                        exports_dir / "excluded_age_classes.csv", index=False,
+                    )
+            else:
+                processing_log.append("Age-class filter: no fixes matched excluded classes")
         else:
-            processing_log.append("Calves/fawns filter: all animals are Adult, none removed")
-    elif filter_calves:
-        processing_log.append(f"Calves/fawns filter: column '{_age_col}' not found, skipped")
+            processing_log.append("Age-class filter: all classes included, none removed")
+    elif _age_col not in (gdf.columns if hasattr(gdf, 'columns') else []):
+        processing_log.append(f"Age-class filter: column '{_age_col}' not found, skipped")
 
     # Manual Herd ID override from the Tab 1 input field. Stripped + sanitised
     # to the same character set the auto-derivation uses (alnum + _ + -).
@@ -4241,6 +4344,7 @@ def process_uploaded_data(
             "input_crs": final_config.get("input_crs", "EPSG:4326"),
             "processed_at": _dt.datetime.now().isoformat(timespec="seconds"),
             "workdir": str(workdir_path) if workdir_path else "",
+            "config": final_config,
         },
         proj,
     )
@@ -5429,11 +5533,13 @@ def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store
                 _save_processed_to_disk(df.copy())
                 if _ACTIVE_WORKDIR is not None:
                     outputs = _workdir_outputs()
+                    removed_dir = outputs / "RemovedPoints"
+                    removed_dir.mkdir(parents=True, exist_ok=True)
                     if not removed_df.empty:
                         removed_df["classification"] = (
                             removed_df["id_bio_year"].astype(str).map(class_store)
                         )
-                        removed_df.to_csv(outputs / "ResidentsNomadsRemoved.csv", index=False)
+                        removed_df.to_csv(removed_dir / "ResidentsNomadsRemoved.csv", index=False)
                         try:
                             import geopandas as gpd
                             if {"lon", "lat"}.issubset(removed_df.columns):
@@ -5442,7 +5548,7 @@ def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store
                                     geometry=gpd.points_from_xy(removed_df["lon"], removed_df["lat"]),
                                     crs="EPSG:4326",
                                 )
-                                grn.to_file(outputs / "ResidentsNomadsRemoved.shp")
+                                grn.to_file(removed_dir / "ResidentsNomadsRemoved.shp")
                         except Exception as shp_exc:
                             print(f"WARNING: ResidentsNomadsRemoved.shp write failed: {shp_exc}")
                         _log_action(
@@ -7455,6 +7561,7 @@ def _run_modeling_impl(
                     sp_non_null = df["Species"].dropna()
                     if not sp_non_null.empty:
                         species = str(sp_non_null.iloc[0])
+                v_label = _resolve_version_dir(_ACTIVE_WORKDIR, _ACTIVE_VERSION).name if _ACTIVE_VERSION else None
                 herd_meta = write_herd_metadata(
                     processed_df=df,
                     sequences_dict=sequences_dict,
@@ -7463,16 +7570,12 @@ def _run_modeling_impl(
                     species=species,
                     date_stamp=date_stamp,
                     season_labels_order=seq_labels,
-                )
-                dist_csvs = write_per_season_distance_csvs(
-                    sequences_dict=sequences_dict,
-                    out_dir=meta_outputs_dir,
+                    version=v_label,
                 )
                 _log_action(
                     "METADATA_EXPORT",
                     herd_id=herd_id,
                     herd_files=";".join(p.name for p in herd_meta.values()),
-                    distance_files=";".join(p.name for p in dist_csvs.values()),
                 )
             except Exception as meta_exc:
                 print(f"WARNING: metadata export skipped: {meta_exc}")
@@ -7598,25 +7701,50 @@ def _model_results_table_from_results(results: dict) -> "tuple":
     return results_df, table
 
 
+def _read_shp_cached(shp_path: Path):
+    """Read a shapefile, reproject to EPSG:4326, and return a GeoJSON dict.
+    Writes a .display.geojson companion on first read; subsequent calls load
+    the companion directly (skipping GeoPandas)."""
+    if not shp_path.exists():
+        return None
+    companion = shp_path.with_suffix(".display.geojson")
+    mtime = shp_path.stat().st_mtime
+    if companion.is_file() and companion.stat().st_mtime >= mtime:
+        try:
+            with open(companion, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except Exception:
+            pass
+    try:
+        import geopandas as gpd
+        gdf = gpd.read_file(str(shp_path))
+        if gdf.crs is not None and not gdf.crs.equals("EPSG:4326"):
+            gdf = gdf.to_crs(epsg=4326)
+        json_str = gdf.to_json()
+        result = json.loads(json_str)
+        try:
+            with open(companion, "w", encoding="utf-8") as fh:
+                fh.write(json_str)
+        except Exception:
+            pass
+        return result
+    except Exception:
+        return None
+
+
 def _load_pop_outputs_from_disk(outputs: Path):
     """Read prior population/footprint contour shapefiles back into the
     store-pop-outputs JSON shape ({"use", "footprint", "config"}) in EPSG:4326,
     so Tab 5 can draw them without re-generating. Returns a JSON string or None
     if neither shapefile exists."""
-    import geopandas as gpd
-    use_shp = outputs / "popUseMerged" / "Pop_use_contours.shp"
-    foot_shp = outputs / "footPrintsMerged" / "Footprint_contours.shp"
-    use_fc = foot_fc = None
-    if use_shp.exists():
-        try:
-            use_fc = json.loads(gpd.read_file(use_shp).to_crs("EPSG:4326").to_json())
-        except Exception:
-            use_fc = None
-    if foot_shp.exists():
-        try:
-            foot_fc = json.loads(gpd.read_file(foot_shp).to_crs("EPSG:4326").to_json())
-        except Exception:
-            foot_fc = None
+    use_shp = outputs / "Contours" / "Pop_use_contours.shp"
+    if not use_shp.exists():
+        use_shp = outputs / "popUseMerged" / "Pop_use_contours.shp"
+    foot_shp = outputs / "Contours" / "Footprint_contours.shp"
+    if not foot_shp.exists():
+        foot_shp = outputs / "footPrintsMerged" / "Footprint_contours.shp"
+    use_fc = _read_shp_cached(use_shp)
+    foot_fc = _read_shp_cached(foot_shp)
     if use_fc is None and foot_fc is None:
         return None
     return json.dumps({"use": use_fc, "footprint": foot_fc, "config": {}}, default=str)
@@ -7744,7 +7872,7 @@ def _pop_preview_from_store(pop_json) -> Any:
     prevent_initial_call=True,
 )
 def load_previous_pop_outputs(n_clicks):
-    """Load saved population contours (popUseMerged / footPrintsMerged) from the
+    """Load saved population contours (Contours/) from the
     working directory into store-pop-outputs — so Tab 5 can draw them and Tab 4
     shows the contour-area preview — without re-running the population merge."""
     nu = dash.no_update
@@ -7759,7 +7887,7 @@ def load_previous_pop_outputs(n_clicks):
     if not pop_store:
         return (
             _err_alert(
-                "No saved population outputs found in popUseMerged/ or footPrintsMerged/. "
+                "No saved population outputs found in Contours/. "
                 "Generate them first, or check that the working directory holds your results."
             ),
             nu, nu,
@@ -8063,20 +8191,20 @@ def generate_pop_outputs(
             cache_products.append({
                 "id": "contour::pop_use",
                 "label": f"Population use contours ({len(pop_use_gdf)} polygons)",
-                "category": "Merged contours", "rel_dir": "popUseMerged",
+                "category": "Merged contours", "rel_dir": "Contours",
                 "filename": "Pop_use_contours.shp", "kind": "vector",
                 "array": None, "gdf": pop_use_gdf,
             })
-            wrote_lines.append(f"popUseMerged/Pop_use_contours.shp  ({len(pop_use_gdf)} polygons)")
+            wrote_lines.append(f"Contours/Pop_use_contours.shp  ({len(pop_use_gdf)} polygons)")
         if pop_foot_gdf is not None and len(pop_foot_gdf) > 0:
             cache_products.append({
                 "id": "contour::footprint",
                 "label": f"Population footprint contours ({len(pop_foot_gdf)} polygons)",
-                "category": "Merged contours", "rel_dir": "footPrintsMerged",
+                "category": "Merged contours", "rel_dir": "Contours",
                 "filename": "Footprint_contours.shp", "kind": "vector",
                 "array": None, "gdf": pop_foot_gdf,
             })
-            wrote_lines.append(f"footPrintsMerged/Footprint_contours.shp  ({len(pop_foot_gdf)} polygons)")
+            wrote_lines.append(f"Contours/Footprint_contours.shp  ({len(pop_foot_gdf)} polygons)")
 
         # Per-season banded products + one combined "All" pass.
         def _collect_banded(season_label: str, season_ud: dict[str, np.ndarray]) -> None:
@@ -8577,7 +8705,7 @@ def build_raster_tree(active_tab, _model_results, _pop, _clear):
 
     groups = []
     for v in _list_versions():
-        vdir = mo / f"V{v}"
+        vdir = _resolve_version_dir(_ACTIVE_WORKDIR, v)
         for sub, label in _RASTER_CATEGORIES:
             d = vdir / sub
             if not d.is_dir():
@@ -8585,8 +8713,8 @@ def build_raster_tree(active_tab, _model_results, _pop, _clear):
             tifs = sorted(d.rglob("*.tif"), key=lambda p: p.name.lower())
             if not tifs:
                 continue
-            group_key = f"V{v}/{sub}"
-            group_label = f"V{v} · {label}"
+            group_key = f"{vdir.name}/{sub}"
+            group_label = f"{vdir.name} · {label}"
             options = [
                 {"label": t.stem, "value": str(t)} for t in tifs
             ]
@@ -8788,7 +8916,9 @@ _VECTOR_CACHE: dict[tuple, Any] = {}
 
 def _vector_file_to_geojson(path: "Path"):
     """Read a .shp/.geojson, reproject to EPSG:4326, return a GeoJSON dict (or
-    None). Memoised by (path, mtime)."""
+    None). Memoised by (path, mtime). On first load of a .shp, writes a
+    .display.geojson companion so subsequent loads skip GeoPandas entirely."""
+    import time as _time
     try:
         mtime = path.stat().st_mtime
     except OSError:
@@ -8796,19 +8926,51 @@ def _vector_file_to_geojson(path: "Path"):
     key = (str(path), mtime)
     if key in _VECTOR_CACHE:
         return _VECTOR_CACHE[key]
+
+    t0 = _time.perf_counter()
+    companion = path.with_suffix(".display.geojson")
+
+    # Fast path: load pre-baked companion (already EPSG:4326, trimmed columns).
+    if companion.is_file() and companion.stat().st_mtime >= mtime:
+        try:
+            with open(companion, "r", encoding="utf-8") as fh:
+                result = json.load(fh)
+            t1 = _time.perf_counter()
+            print(f"VECTOR PERF [{path.name}]: companion json.load {t1 - t0:.3f}s")
+            if len(_VECTOR_CACHE) > 128:
+                _VECTOR_CACHE.clear()
+            _VECTOR_CACHE[key] = result
+            return result
+        except Exception:
+            pass
+
+    # Slow path: read with GeoPandas, reproject, trim, serialise.
+    _MAX_DISPLAY_POINTS = 15_000
     try:
         import geopandas as gpd_local
         gdf = gpd_local.read_file(str(path))
+        t1 = _time.perf_counter()
+        print(f"VECTOR PERF [{path.name}]: read_file {t1 - t0:.3f}s ({len(gdf)} rows)")
         if gdf.empty:
             result = None
         else:
-            if gdf.crs is not None:
+            if gdf.crs is not None and not gdf.crs.equals("EPSG:4326"):
                 gdf = gdf.to_crs(epsg=4326)
-            # Drop datetime/other non-JSON columns that break json serialisation.
+                t2 = _time.perf_counter()
+                print(f"VECTOR PERF [{path.name}]: to_crs {t2 - t1:.3f}s")
+            else:
+                t2 = t1
+            # Downsample large point layers for display performance.
+            geom_type = gdf.geometry.iloc[0].geom_type if len(gdf) else ""
+            if geom_type in ("Point", "MultiPoint") and len(gdf) > _MAX_DISPLAY_POINTS:
+                import numpy as np
+                step = len(gdf) / _MAX_DISPLAY_POINTS
+                idx = np.round(np.arange(0, len(gdf), step)).astype(int)
+                idx = idx[idx < len(gdf)]
+                print(f"VECTOR PERF [{path.name}]: downsampled {len(gdf)} → {len(idx)} points")
+                gdf = gdf.iloc[idx]
             keep = [c for c in gdf.columns if c == gdf.geometry.name
                     or gdf[c].dtype.kind in "ifbO"]
-            # For large point layers (e.g. MigPoints), strip heavy attribute
-            # columns to keep the GeoJSON payload small enough for the browser.
             _MAX_DISPLAY_COLS = 8
             geom_name = gdf.geometry.name
             if len(gdf) > 2000 and sum(1 for c in keep if c != geom_name) > _MAX_DISPLAY_COLS:
@@ -8818,7 +8980,16 @@ def _vector_file_to_geojson(path: "Path"):
                 priority = [c for c in _PREFERRED if c in non_geom]
                 rest = [c for c in non_geom if c not in priority]
                 keep = [geom_name] + (priority + rest)[:_MAX_DISPLAY_COLS]
-            result = json.loads(gdf[keep].to_json())
+            json_str = gdf[keep].to_json()
+            result = json.loads(json_str)
+            t3 = _time.perf_counter()
+            print(f"VECTOR PERF [{path.name}]: to_json {t3 - t2:.3f}s, total {t3 - t0:.3f}s")
+            try:
+                with open(companion, "w", encoding="utf-8") as fh:
+                    fh.write(json_str)
+                print(f"VECTOR PERF [{path.name}]: wrote companion {companion.name}")
+            except Exception:
+                pass
     except Exception:
         result = None
     if len(_VECTOR_CACHE) > 128:
@@ -8848,7 +9019,9 @@ def build_vector_tree(active_tab, _model, _pop, _refresh):
         return html.Span("No outputs found.", className="text-muted")
 
     vecs = sorted(
-        [p for p in root.rglob("*") if p.suffix.lower() in {".shp", ".geojson"}],
+        [p for p in root.rglob("*")
+         if p.suffix.lower() in {".shp", ".geojson"}
+         and not p.name.endswith(".display.geojson")],
         key=lambda p: str(p).lower(),
     )
     if not vecs:
@@ -8951,12 +9124,26 @@ def render_vector_overlays(paths, fill_opacity):
             skipped += 1
             continue
         color = _VECTOR_PALETTE[i % len(_VECTOR_PALETTE)]
-        children.append(
-            dl.GeoJSON(
-                data=gj,
-                style={"color": color, "weight": 2, "fillColor": color, "fillOpacity": fo},
-            )
+        has_points = any(
+            f.get("geometry", {}).get("type", "") in ("Point", "MultiPoint")
+            for f in gj.get("features", [])
         )
+        if has_points:
+            for f in gj["features"]:
+                f.setdefault("properties", {})["_color"] = color
+            children.append(
+                dl.GeoJSON(
+                    data=gj,
+                    options=dict(pointToLayer=_vec_point_style),
+                )
+            )
+        else:
+            children.append(
+                dl.GeoJSON(
+                    data=gj,
+                    style={"color": color, "weight": 2, "fillColor": color, "fillOpacity": fo},
+                )
+            )
         shown.append((Path(p).name, color, len(gj["features"])))
     if not children:
         return [], html.Span("Selected vector file(s) had no readable features.", className="text-muted")

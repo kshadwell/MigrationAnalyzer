@@ -89,6 +89,13 @@ window.dashExtensions.default = Object.assign({}, window.dashExtensions.default,
     // Tab 5 population-use / footprint contour polygons. Colour comes from
     // properties._color (set per-layer by the contours callback); fill opacity
     // scales with the contour % so the high-use core reads darker.
+    vecPointStyle: function(feature, latlng) {
+        var c = (feature.properties && feature.properties._color) || '#888';
+        return L.circleMarker(latlng, {
+            radius: 3, fillColor: c, color: '#000',
+            weight: 0.3, fillOpacity: 0.9, opacity: 1
+        });
+    },
     contourStyle: function(feature) {
         var p = (feature && feature.properties) || {};
         var color = p._color || '#E63946';
