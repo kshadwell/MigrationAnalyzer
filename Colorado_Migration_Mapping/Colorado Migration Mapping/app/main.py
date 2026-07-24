@@ -255,6 +255,15 @@ app = dash.Dash(
 )
 server = app.server  # expose the underlying Flask server for WSGI deployment
 
+# Dash's assets/ folder does not auto-serve .html files. Add an explicit
+# Flask route so the Tab 2 MapLibre iframe can load maplibre_map.html.
+from flask import send_from_directory as _send_from_directory
+_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+
+@server.route("/assets/<path:filename>")
+def _serve_asset(filename):
+    return _send_from_directory(str(_ASSETS_DIR), filename)
+
 # ---------------------------------------------------------------------------
 # Server-side caches. These are the workaround for the OOM-when-processing-
 # large-datasets bug (see INFORMATION_K.md 2026-05-18 entry). The old design
@@ -3912,7 +3921,7 @@ def toggle_stopover_pct(checked):
     Output("age-class-checklist-wrapper", "style"),
     Output("age-class-hint", "children"),
     Input("col-age-class", "value"),
-    State("store-tmp-path", "data"),
+    State("store-upload-path", "data"),
     prevent_initial_call=True,
 )
 def populate_age_class_checklist(age_col, tmp_path):
@@ -7433,6 +7442,8 @@ def _run_modeling_impl(
         _MODEL_CACHE["seq_label"] = seq_label
         _MODEL_CACHE["sequences_dict"] = sequences_dict
         _MODEL_CACHE["seq_labels"] = seq_labels
+        if want_linebuffer:
+            _MODEL_CACHE["linebuffer_distance"] = linebuffer_distance
         if "timestamp" in df.columns:
             ts = pd.to_datetime(df["timestamp"], errors="coerce").dropna()
             if len(ts):
@@ -9581,6 +9592,19 @@ def handle_export(selected_clicks, all_clicks, checked_ids, out_dir, processed_j
                     exported.append(f"BBMM_Output/{p.name}")
         except Exception as e:
             failures.append(f"MigLines/MigPoints: {e}")
+
+        # Line buffer — regenerate if the model run produced one.
+        try:
+            if sequences_dict and _MODEL_CACHE.get("linebuffer_distance"):
+                lb_dist = float(_MODEL_CACHE["linebuffer_distance"])
+                seq_animal = _MODEL_CACHE.get("seq_animal", {})
+                utm_crs_str = _MODEL_CACHE.get("utm_crs")
+                _build_linebuffer_output(
+                    sequences_dict, seq_animal, lb_dist, out_path, utm_crs_str,
+                )
+                exported.append("LineBuffer/LineBuffer_perAnimal.shp")
+        except Exception as e:
+            failures.append(f"LineBuffer: {e}")
 
         if want_report:
             if not processed_json:

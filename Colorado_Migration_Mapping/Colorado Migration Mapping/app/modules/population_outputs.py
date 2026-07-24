@@ -1023,6 +1023,7 @@ def compute_season_banded_products(
             "label": f"{season} ≥{n} individuals count raster",
             "array": clipped,
         })
+        _add_mask_pair(mask, f"minimum{n}", f"{season} ≥{n} individuals corridor", value=n)
 
     # ---- 3. topP%: top X% by volume of the broad USE (count) surface, not the
     # concentrated mean-UD density (which gave tiny specks). Rank cells by
