@@ -768,7 +768,7 @@ def export_report(
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Per-season banded population outputs
+# Per-season stacked population outputs
 # ---------------------------------------------------------------------------
 
 def _sanitize_token(value: str) -> str:
@@ -787,7 +787,7 @@ def _season_abbrev(label: str) -> str:
     return _sanitize_token(label.strip())
 
 
-def calc_season_banded_outputs(
+def calc_season_stacked_outputs(
     ud_dict: dict[str, np.ndarray],
     grid_meta: dict,
     out_dir: str | Path,
@@ -803,7 +803,7 @@ def calc_season_banded_outputs(
     simplify: bool = True,
     smooth_bandwidth: float = 2.0,
 ) -> dict[str, Path]:
-    """Per-season banded population outputs matching the WMI canonical layout.
+    """Per-season stacked population outputs matching the WMI canonical layout.
 
     For a *single* season's ``ud_dict`` (mig_key -> 2-D UD array, each on the
     same population grid), writes the canonical product set:
@@ -853,10 +853,10 @@ def calc_season_banded_outputs(
     # Compute the products in memory, then write every one to ``out_dir``.
     # The compute/write split lets callers (e.g. the Dash app's Tab 5) hold the
     # products in memory and flush only a user-selected subset to disk later —
-    # see :func:`compute_season_banded_products` and :func:`write_product`.
+    # see :func:`compute_season_stacked_products` and :func:`write_product`.
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    products = compute_season_banded_products(
+    products = compute_season_stacked_products(
         ud_dict, grid_meta,
         herd_id=herd_id, season_label=season_label, date_stamp=date_stamp,
         min_individuals=min_individuals, top_pct=top_pct, stopover_pct=stopover_pct,
@@ -877,11 +877,11 @@ def _mask_to_gdf(
     min_area_drop: float,
     min_area_fill: float,
     value: int | None = None,
+    smoothness: float = 0,
 ) -> gpd.GeoDataFrame | None:
     """Polygonize a boolean band mask into a one-row GeoDataFrame (``value`` /
-    ``band`` columns), applying the same small-speck drop + hole-fill cleanup as
-    the contour pipeline. Returns ``None`` when nothing survives. Pure compute —
-    no disk I/O (the caller writes the returned GeoDataFrame)."""
+    ``band`` columns), applying the same drop + fill + ksmooth cleanup as
+    the contour pipeline. Returns ``None`` when nothing survives."""
     polys = _polygonize_mask(mask, transform)
     if not polys:
         return None
@@ -893,6 +893,8 @@ def _mask_to_gdf(
     elif hasattr(merged, "area") and merged.area < min_area_drop:
         return None
     merged = _fill_holes(merged, min_area_fill)
+    if smoothness and smoothness > 0:
+        merged = _smooth_ksmooth(merged, smoothness)
     if value is None:
         value = (int(name[7:]) if name.startswith("minimum") and name[7:].isdigit()
                  else (int(name[3:]) if name.startswith("top") and name[3:].isdigit() else 0))
@@ -901,7 +903,7 @@ def _mask_to_gdf(
     )
 
 
-def compute_season_banded_products(
+def compute_season_stacked_products(
     ud_dict: dict[str, np.ndarray],
     grid_meta: dict,
     herd_id: str = "Herd",
@@ -916,7 +918,7 @@ def compute_season_banded_products(
     simplify: bool = True,
     smooth_bandwidth: float = 2.0,
 ) -> list[dict]:
-    """Compute the per-season banded population products **in memory** without
+    """Compute the per-season stacked population products **in memory** without
     touching disk. Returns an ordered list of product descriptors; pass each to
     :func:`write_product` to flush it to a directory.
 
@@ -932,7 +934,7 @@ def compute_season_banded_products(
         }
 
     The band logic is identical to the historical write-as-you-go version of
-    :func:`calc_season_banded_outputs`; only the disk writes have been factored
+    :func:`calc_season_stacked_outputs`; only the disk writes have been factored
     out into :func:`write_product`.
     """
     import datetime as _dt
@@ -982,8 +984,10 @@ def compute_season_banded_products(
             "filename": f"{prefix}_{band}.tif", "label": f"{label} (raster)",
             "array": mask.astype(np.uint8),
         })
+        _sm = smooth_bandwidth if simplify else 0
         gdf = _mask_to_gdf(mask, transform, src_crs, band,
-                           min_area_drop, min_area_fill, value=value)
+                           min_area_drop, min_area_fill, value=value,
+                           smoothness=_sm)
         if gdf is not None:
             products.append({
                 "key": f"{band}_shp", "kind": "vector",
@@ -1086,7 +1090,7 @@ def compute_season_banded_products(
 
 def write_product(product: dict, out_dir: str | Path, grid_meta: dict) -> Path:
     """Write a single product descriptor (from
-    :func:`compute_season_banded_products`) to ``out_dir`` and return its Path.
+    :func:`compute_season_stacked_products`) to ``out_dir`` and return its Path.
 
     Dispatches on ``product["kind"]``:
       - ``"count"``   integer overlap surface → float32 GeoTIFF, 0 → NaN nodata
@@ -1236,7 +1240,7 @@ def write_herd_metadata(
         if len(parts) == 3:
             animal_id, _bio_year_str, season_label = parts
         else:
-            animal_id, season_label = str(mig_key), ""
+            animal_id, _bio_year_str, season_label = str(mig_key), "all", ""
         sub = sub.copy()
         if "date" in sub.columns:
             sub["date"] = pd.to_datetime(sub["date"], errors="coerce")
@@ -1251,6 +1255,7 @@ def write_herd_metadata(
         eucl_km, cumu_km, maxpair_km = _line_distances_km(xs, ys)
         per_seq.append({
             "season": season_label,
+            "bio_year": _bio_year_str,
             "animal_id": animal_id,
             "start": t_start,
             "end": t_end,
@@ -1496,6 +1501,81 @@ def write_herd_metadata(
         written["xlsx"] = xlsx_path
     except Exception:
         pass  # If openpyxl isn't available, the CSV is still useful on its own.
+
+    # ----- SequencesSummary.csv ------------------------------------------------
+    # Rows = stats per sequence type (season label), columns = bio-years.
+    try:
+        bio_years = sorted(
+            {r["bio_year"] for r in per_seq if r["bio_year"] != "all"},
+            key=lambda v: (int(v) if v.isdigit() else 0, v),
+        )
+        seasons_in_data = sorted({r["season"] for r in per_seq if r["season"]})
+        if bio_years and seasons_in_data:
+            def _fmt_date(dt):
+                if pd.isna(dt):
+                    return "NA"
+                return dt.strftime("%m/%d")
+
+            summary_rows = []
+            for season in seasons_in_data:
+                metrics = [
+                    (f"n_sequences [{season}]", "n"),
+                    (f"earliest_start [{season}]", "earliest_start"),
+                    (f"latest_start [{season}]", "latest_start"),
+                    (f"median_start [{season}]", "median_start"),
+                    (f"average_start [{season}]", "average_start"),
+                    (f"earliest_end [{season}]", "earliest_end"),
+                    (f"latest_end [{season}]", "latest_end"),
+                    (f"median_end [{season}]", "median_end"),
+                    (f"average_end [{season}]", "average_end"),
+                ]
+                row_data = {m[0]: {} for m in metrics}
+                for yr in bio_years:
+                    seqs = [r for r in per_seq if r["season"] == season and r["bio_year"] == yr]
+                    n = len(seqs)
+                    row_data[f"n_sequences [{season}]"][yr] = n
+                    if n == 0:
+                        for label, _ in metrics[1:]:
+                            row_data[label][yr] = "NA"
+                        continue
+                    starts = sorted([r["start"] for r in seqs if pd.notna(r["start"])])
+                    ends = sorted([r["end"] for r in seqs if pd.notna(r["end"])])
+                    row_data[f"earliest_start [{season}]"][yr] = _fmt_date(starts[0]) if starts else "NA"
+                    row_data[f"latest_start [{season}]"][yr] = _fmt_date(starts[-1]) if starts else "NA"
+                    def _median_avg_mmdd(dates):
+                        ref = min(dates)
+                        offsets = sorted((d - ref).days for d in dates)
+                        med = ref + _dt.timedelta(days=offsets[len(offsets) // 2])
+                        avg = ref + _dt.timedelta(days=int(round(np.mean(offsets))))
+                        return med.strftime("%m/%d"), avg.strftime("%m/%d")
+                    if starts:
+                        med_s, avg_s = _median_avg_mmdd(starts)
+                        row_data[f"median_start [{season}]"][yr] = med_s
+                        row_data[f"average_start [{season}]"][yr] = avg_s
+                    else:
+                        row_data[f"median_start [{season}]"][yr] = "NA"
+                        row_data[f"average_start [{season}]"][yr] = "NA"
+                    row_data[f"earliest_end [{season}]"][yr] = _fmt_date(ends[0]) if ends else "NA"
+                    row_data[f"latest_end [{season}]"][yr] = _fmt_date(ends[-1]) if ends else "NA"
+                    if ends:
+                        med_e, avg_e = _median_avg_mmdd(ends)
+                        row_data[f"median_end [{season}]"][yr] = med_e
+                        row_data[f"average_end [{season}]"][yr] = avg_e
+                    else:
+                        row_data[f"median_end [{season}]"][yr] = "NA"
+                        row_data[f"average_end [{season}]"][yr] = "NA"
+
+                for label, _ in metrics:
+                    summary_rows.append({"metric": label, **row_data[label]})
+
+            df_seq = pd.DataFrame(summary_rows)
+            col_order = ["metric"] + bio_years
+            df_seq = df_seq.reindex(columns=col_order, fill_value="NA")
+            seq_csv = meta_dir / f"{herd_token}_SequencesSummary_{date_stamp}.csv"
+            df_seq.to_csv(seq_csv, index=False, encoding="utf-8")
+            written["sequences_summary"] = seq_csv
+    except Exception:
+        pass
 
     return written
 

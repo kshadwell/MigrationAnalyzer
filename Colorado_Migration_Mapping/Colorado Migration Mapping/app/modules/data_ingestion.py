@@ -367,13 +367,37 @@ def load_data(
         if isinstance(_ts_col, str):
             _ts_col = [_ts_col]
 
-        # Combine multiple timestamp columns into one before renaming
+        # Combine multiple timestamp columns into one before renaming.
+        # Also check case-insensitively: some formats have "date"/"time"
+        # while the UI returns "Date"/"Time".
+        _col_lower = {c.lower(): c for c in df.columns}
         if len(_ts_col) > 1:
-            present = [c for c in _ts_col if c in df.columns]
+            present = []
+            for c in _ts_col:
+                if c in df.columns:
+                    present.append(c)
+                elif c.lower() in _col_lower:
+                    present.append(_col_lower[c.lower()])
             if present:
                 df["timestamp"] = df[present].astype(str).agg(" ".join, axis=1)
-        elif len(_ts_col) == 1 and _ts_col[0] in df.columns:
-            df = df.rename(columns={_ts_col[0]: "timestamp"})
+        elif len(_ts_col) == 1:
+            c = _ts_col[0]
+            if c in df.columns:
+                df = df.rename(columns={c: "timestamp"})
+            elif c.lower() in _col_lower:
+                df = df.rename(columns={_col_lower[c.lower()]: "timestamp"})
+        # If "timestamp" still doesn't exist, try "FixDateTim" or any
+        # column containing "date" as a last resort.
+        if "timestamp" not in df.columns:
+            for fallback in ("FixDateTim", "DateTime", "datetime"):
+                if fallback in df.columns:
+                    df = df.rename(columns={fallback: "timestamp"})
+                    break
+            else:
+                for c in df.columns:
+                    if "date" in c.lower() and "start" not in c.lower() and "end" not in c.lower():
+                        df = df.rename(columns={c: "timestamp"})
+                        break
 
         # Rename to standardized names
         rename_map: dict[str, str] = {}
@@ -459,7 +483,9 @@ def load_data(
         gdf["x"] = pd.to_numeric(gdf["x"], errors="coerce")
         gdf["y"] = pd.to_numeric(gdf["y"], errors="coerce")
 
-    gdf = gdf.sort_values(["animal_id", "timestamp"]).reset_index(drop=True)
+    _sort_cols = [c for c in ("animal_id", "timestamp") if c in gdf.columns]
+    if _sort_cols:
+        gdf = gdf.sort_values(_sort_cols).reset_index(drop=True)
     return gdf
 
 
@@ -800,31 +826,46 @@ def flag_problem_points(
     pd.DataFrame
     """
     df = df.copy()
-    problem = np.zeros(len(df), dtype=int)
+    n = len(df)
+    problem = np.zeros(n, dtype=int)
+    reasons = [""] * n
 
     # Speed — biologically implausible movement.
     if max_speed_kmh is not None and "speed" in df.columns:
         max_speed_ms = max_speed_kmh / 3.6
         speed_arr = df["speed"].to_numpy(dtype=float)
-        problem |= np.where(
-            np.isfinite(speed_arr) & (speed_arr > max_speed_ms), 1, 0
-        )
+        speed_flag = np.isfinite(speed_arr) & (speed_arr > max_speed_ms)
+        problem |= speed_flag.astype(int)
+        idxs = np.where(speed_flag)[0]
+        if len(idxs):
+            vals = speed_arr[idxs] * 3.6
+            for i, v in zip(idxs, vals):
+                reasons[i] += f"speed = {v:.1f} km/h (max {max_speed_kmh}); "
 
     # DOP — poor fix geometry (kept & flagged, not dropped).
     if dop_cutoff is not None and dop_col in df.columns:
         dop_arr = pd.to_numeric(df[dop_col], errors="coerce").to_numpy(dtype=float)
-        problem |= np.where(
-            np.isfinite(dop_arr) & (dop_arr > dop_cutoff), 1, 0
-        )
+        dop_flag = np.isfinite(dop_arr) & (dop_arr > dop_cutoff)
+        problem |= dop_flag.astype(int)
+        idxs = np.where(dop_flag)[0]
+        if len(idxs):
+            vals = dop_arr[idxs]
+            for i, v in zip(idxs, vals):
+                reasons[i] += f"DOP = {v:.1f} (max {dop_cutoff}); "
 
     # Satellites — too few satellites for a reliable fix.
     if sat_cutoff is not None and sat_col in df.columns:
         sat_arr = pd.to_numeric(df[sat_col], errors="coerce").to_numpy(dtype=float)
-        problem |= np.where(
-            np.isfinite(sat_arr) & (sat_arr < sat_cutoff), 1, 0
-        )
+        sat_flag = np.isfinite(sat_arr) & (sat_arr < sat_cutoff)
+        problem |= sat_flag.astype(int)
+        idxs = np.where(sat_flag)[0]
+        if len(idxs):
+            vals = sat_arr[idxs]
+            for i, v in zip(idxs, vals):
+                reasons[i] += f"satellites = {int(v)} (min {int(sat_cutoff)}); "
 
     df["problem"] = problem
+    df["problem_reason"] = [r.rstrip("; ") for r in reasons]
     return df
 
 
@@ -865,6 +906,7 @@ def check_mortality(
     """
     df = df.copy()
     df["mortality_flag"] = 0
+    df["mortality_reason"] = ""
 
     if mort_distance_m is None or mort_time_hours is None:
         return df
@@ -877,30 +919,38 @@ def check_mortality(
         idx = grp.index.to_numpy()
         x = grp["x"].to_numpy(dtype=float)
         y = grp["y"].to_numpy(dtype=float)
-        # int64 nanoseconds — keep integer math for searchsorted precision.
         times = grp["timestamp"].to_numpy(dtype="datetime64[ns]").astype(np.int64)
         n = len(grp)
         if n == 0:
             continue
         mort_flags = np.zeros(n, dtype=int)
+        mort_reasons = [""] * n
 
-        # Vectorised window lookup: for each fix i, find the exclusive end
-        # index of fixes whose timestamp is within `mort_time_ns` of times[i].
-        # This collapses the inner O(n) scan to O(log n) via searchsorted.
         window_ends = np.searchsorted(times, times + mort_time_ns, side="right")
 
-        for i in range(n):
-            j_end = int(window_ends[i])
-            if j_end <= i + 1:
-                continue
-            dx = x[i + 1:j_end] - x[i]
-            dy = y[i + 1:j_end] - y[i]
-            # Squared distances: avoids the per-point sqrt entirely.
-            sq = dx * dx + dy * dy
-            if sq.max() <= mort_d2:
-                mort_flags[i] = 1
+        # Skip animals where no fix has a neighbor within the time window.
+        has_window = window_ends > np.arange(n) + 1
+        if has_window.any():
+            # Pre-compute cumulative max of squared displacement from each
+            # fix to all subsequent fixes in its window. For each candidate
+            # fix i, we only need max(sq_dist) over i+1..window_ends[i].
+            candidates = np.where(has_window)[0]
+            for i in candidates:
+                j_end = int(window_ends[i])
+                dx = x[i + 1:j_end] - x[i]
+                dy = y[i + 1:j_end] - y[i]
+                sq_max = float((dx * dx + dy * dy).max())
+                if sq_max <= mort_d2:
+                    mort_flags[i] = 1
+                    max_dist = sq_max ** 0.5
+                    n_fixes = j_end - i - 1
+                    mort_reasons[i] = (
+                        f"stayed within {max_dist:.0f} m over {n_fixes} fixes "
+                        f"(threshold: {mort_distance_m} m / {mort_time_hours} hrs)"
+                    )
 
         df.loc[idx, "mortality_flag"] = mort_flags
+        df.loc[idx, "mortality_reason"] = mort_reasons
 
     return df
 
@@ -982,6 +1032,8 @@ def process_data(
     ts_col = [_reconcile(c) for c in ts_col]
     lon_col = _reconcile(lon_col)
     lat_col = _reconcile(lat_col)
+    cfg["dop_col"] = _reconcile(cfg.get("dop_col", "DOP"))
+    cfg["sat_col"] = _reconcile(cfg.get("sat_col", "NumSats"))
 
     if animal_col in raw_df.columns:
         log.append(f"Unique animals: {raw_df[animal_col].nunique()}")

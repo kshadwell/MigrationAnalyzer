@@ -94,8 +94,8 @@ try:
     from app.modules.population_outputs import (
         calc_population_use,
         calc_population_footprint,
-        calc_season_banded_outputs,
-        compute_season_banded_products,
+        calc_season_stacked_outputs,
+        compute_season_stacked_products,
         write_product,
         write_mig_outputs,
         write_flags_removed_shapefile,
@@ -140,8 +140,8 @@ except ImportError:
         from modules.population_outputs import (
             calc_population_use,
             calc_population_footprint,
-            calc_season_banded_outputs,
-            compute_season_banded_products,
+            calc_season_stacked_outputs,
+            compute_season_stacked_products,
             write_product,
             write_mig_outputs,
             write_flags_removed_shapefile,
@@ -217,10 +217,10 @@ except ImportError:
         def calc_population_footprint(*a, **k):
             raise NotImplementedError("population_outputs module not found")
 
-        def calc_season_banded_outputs(*a, **k):
+        def calc_season_stacked_outputs(*a, **k):
             raise NotImplementedError("population_outputs module not found")
 
-        def compute_season_banded_products(*a, **k):
+        def compute_season_stacked_products(*a, **k):
             raise NotImplementedError("population_outputs module not found")
 
         def write_product(*a, **k):
@@ -1100,7 +1100,11 @@ def _build_loaded_project_summary(df: pd.DataFrame, project_name: str, meta: dic
         info_lines.append(html.Div([html.Strong("Processed at: "), processed_at]))
     saved_crs = (meta.get("input_crs") or "").strip()
     if saved_crs:
-        info_lines.append(html.Div([html.Strong("Input CRS: "), html.Code(saved_crs)]))
+        proj_name = _crs_to_projection_name(saved_crs)
+        info_lines.append(html.Div([
+            html.Strong("Projection: "), proj_name,
+            html.Small(f" ({saved_crs})", className="text-muted ms-1"),
+        ]))
     if enrichment_cols:
         info_lines.append(html.Div([html.Strong("Enrichment present: "), ", ".join(enrichment_cols)]))
 
@@ -1237,6 +1241,32 @@ navbar = dbc.Navbar(
 # Component IDs are the contracts with the callback layer further down.
 # Search for an ID (e.g. "param-herd-id-override") to find both its layout
 # definition here and the callback that reads it.
+_CRS_NAMES = {
+    "EPSG:4326": "WGS84 (Geographic)",
+    "EPSG:32613": "WGS84 UTM Zone 13N",
+    "EPSG:32612": "WGS84 UTM Zone 12N",
+    "EPSG:32614": "WGS84 UTM Zone 14N",
+    "EPSG:26913": "NAD83 UTM Zone 13N",
+    "EPSG:26912": "NAD83 UTM Zone 12N",
+    "EPSG:26914": "NAD83 UTM Zone 14N",
+    "EPSG:3857": "Web Mercator",
+}
+
+
+def _crs_to_projection_name(crs_str: str) -> str:
+    if not crs_str:
+        return "Unknown"
+    name = _CRS_NAMES.get(crs_str)
+    if name:
+        return name
+    try:
+        from pyproj import CRS
+        c = CRS.from_user_input(crs_str)
+        return c.name or crs_str
+    except Exception:
+        return crs_str
+
+
 def _col_map_row(label, dropdown_id, options=None, multi=False):
     return dbc.Row(
         [
@@ -1255,6 +1285,34 @@ def _col_map_row(label, dropdown_id, options=None, multi=False):
         ],
         className="mb-2",
     )
+
+
+_INFO_LABEL_COUNTER = [0]
+
+def _info_label(label_text, description, recommended=None):
+    _INFO_LABEL_COUNTER[0] += 1
+    btn_id = f"info-btn-{_INFO_LABEL_COUNTER[0]}"
+    body = description
+    if recommended is not None:
+        body += f"\n\nRecommended: {recommended}"
+    return html.Div([
+        dbc.Label(label_text, style={"fontSize": "0.85rem", "display": "inline"}),
+        html.Button(
+            "ⓘ",
+            id=btn_id,
+            style={
+                "background": "none", "border": "none", "color": "#6c9bd2",
+                "cursor": "pointer", "fontSize": "0.95rem", "padding": "0 0 0 5px",
+                "verticalAlign": "middle", "lineHeight": "1",
+            },
+        ),
+        dbc.Popover(
+            dbc.PopoverBody(body, style={"fontSize": "0.78rem", "whiteSpace": "pre-line"}),
+            target=btn_id,
+            trigger="click",
+            placement="right",
+        ),
+    ], style={"marginBottom": "2px"})
 
 
 tab1_layout = dbc.Container(
@@ -1323,6 +1381,12 @@ tab1_layout = dbc.Container(
                                 dbc.CardHeader("Project"),
                                 dbc.CardBody(
                                     [
+                                        html.Small(
+                                            "Load a project you have already created, or enter a name for the "
+                                            "current project so you can come back to it later and quickly re-load it.",
+                                            className="text-muted d-block mb-2",
+                                            style={"fontSize": "0.75rem"},
+                                        ),
                                         dbc.Row([
                                             dbc.Col(
                                                 dcc.Dropdown(
@@ -1415,6 +1479,13 @@ tab1_layout = dbc.Container(
                                 dbc.CardHeader("Column Mapping"),
                                 dbc.CardBody(
                                     [
+                                        html.Small(
+                                            "Select the names of the fields in your dataset that represent "
+                                            "animal ID, timestamp, longitude, latitude, DOP (precision), "
+                                            "number of satellites, and age class.",
+                                            className="text-muted d-block mb-2",
+                                            style={"fontSize": "0.75rem"},
+                                        ),
                                         _col_map_row("Animal ID column", "col-animal-id"),
                                         _col_map_row("Timestamp column(s)", "col-timestamp", multi=True),
                                         html.Div(
@@ -1468,8 +1539,8 @@ tab1_layout = dbc.Container(
                                         html.Div(
                                             [
                                                 html.Small(
-                                                    "Which age classes should be included in your analysis? "
-                                                    "Calves/fawns are typically excluded, but you can choose below.",
+                                                    "Select which age classes you would like to include in the analysis. "
+                                                    "Calves/Fawns are typically excluded from movement models due to collars dropping.",
                                                     className="text-muted d-block mb-1",
                                                 ),
                                                 dbc.Checklist(
@@ -1497,6 +1568,27 @@ tab1_layout = dbc.Container(
                                 dbc.CardHeader("Processing Parameters"),
                                 dbc.CardBody(
                                     [
+                                        html.Small(
+                                            "These thresholds control automatic data cleaning. Points that exceed "
+                                            "the max speed, DOP cutoff, or fall below the minimum satellites will be "
+                                            "flagged as problem points. Animals whose fixes remain within the "
+                                            "mortality distance for longer than the mortality time will be "
+                                            "automatically flagged as mortalities. Flagged points will appear in "
+                                            "Tab 2, but will be removed from the analysis unless you select and unflag them.",
+                                            className="text-muted d-block mb-2",
+                                            style={"fontSize": "0.75rem"},
+                                        ),
+                                        dbc.Checkbox(
+                                            id="auto-flagging-toggle",
+                                            label="Enable automatic flagging",
+                                            value=True,
+                                            style={"fontSize": "0.85rem"},
+                                            className="mb-2",
+                                        ),
+                                        dbc.Collapse(
+                                            id="auto-flagging-collapse",
+                                            is_open=True,
+                                            children=[
                                         dbc.Row(
                                             [
                                                 dbc.Col(
@@ -1543,6 +1635,42 @@ tab1_layout = dbc.Container(
                                                 ),
                                                 dbc.Col(
                                                     [
+                                                        dbc.Label("DOP (Dilution of Precision) Cutoff", style={"fontSize": "0.85rem"}),
+                                                        dbc.Input(
+                                                            id="param-dop-cutoff",
+                                                            type="number",
+                                                            value=10,
+                                                            min=0,
+                                                        ),
+                                                    ],
+                                                    width=6,
+                                                ),
+                                            ],
+                                            className="mb-2",
+                                        ),
+                                        dbc.Row(
+                                            [
+                                                dbc.Col(
+                                                    [
+                                                        dbc.Label("Minimum Satellites", style={"fontSize": "0.85rem"}),
+                                                        dbc.Input(
+                                                            id="param-sat-cutoff",
+                                                            type="number",
+                                                            value=6,
+                                                            min=0,
+                                                        ),
+                                                    ],
+                                                    width=6,
+                                                ),
+                                            ],
+                                            className="mb-2",
+                                        ),
+                                            ],
+                                        ),
+                                        dbc.Row(
+                                            [
+                                                dbc.Col(
+                                                    [
                                                         dbc.Label("Bio Year Start (M/D)", style={"fontSize": "0.85rem"}),
                                                         dbc.InputGroup(
                                                             [
@@ -1572,11 +1700,6 @@ tab1_layout = dbc.Container(
                                                     ],
                                                     width=6,
                                                 ),
-                                            ],
-                                            className="mb-2",
-                                        ),
-                                        dbc.Row(
-                                            [
                                                 dbc.Col(
                                                     [
                                                         dbc.Label(
@@ -1588,35 +1711,6 @@ tab1_layout = dbc.Container(
                                                             type="text",
                                                             value="",
                                                             placeholder="e.g. E18_E22 (leave blank to auto-derive from DAU column)",
-                                                        ),
-                                                    ],
-                                                    width=12,
-                                                ),
-                                            ],
-                                            className="mb-2",
-                                        ),
-                                        dbc.Row(
-                                            [
-                                                dbc.Col(
-                                                    [
-                                                        dbc.Label("DOP Cutoff", style={"fontSize": "0.85rem"}),
-                                                        dbc.Input(
-                                                            id="param-dop-cutoff",
-                                                            type="number",
-                                                            value=10,
-                                                            min=0,
-                                                        ),
-                                                    ],
-                                                    width=6,
-                                                ),
-                                                dbc.Col(
-                                                    [
-                                                        dbc.Label("Min Satellites", style={"fontSize": "0.85rem"}),
-                                                        dbc.Input(
-                                                            id="param-sat-cutoff",
-                                                            type="number",
-                                                            value=6,
-                                                            min=0,
                                                         ),
                                                     ],
                                                     width=6,
@@ -1693,6 +1787,12 @@ tab1_layout = dbc.Container(
                                         label=".wld File Upload (optional)",
                                         style={"fontSize": "0.85rem"},
                                     ),
+                                ),
+                                html.Small(
+                                    "This checkbox can be ignored — wait for updates coming soon to "
+                                    "learn more about .wld files.",
+                                    className="text-muted d-block",
+                                    style={"fontSize": "0.75rem", "padding": "0 12px 4px 12px"},
                                 ),
                                 dbc.Collapse(
                                     dbc.CardBody(
@@ -1777,12 +1877,19 @@ tab1_layout = dbc.Container(
                             ],
                             className="mb-3",
                         ),
-                        dbc.Button(
-                            "Process Data",
-                            id="btn-process",
-                            color="primary",
-                            className="w-100 mt-2",
-                        ),
+                        html.Div([
+                            dbc.Button(
+                                "Process Data",
+                                id="btn-process",
+                                color="primary",
+                                className="w-100",
+                            ),
+                            dcc.Loading(
+                                html.Div(id="process-loading-indicator"),
+                                type="circle",
+                                style={"display": "inline-block", "marginLeft": "8px"},
+                            ),
+                        ], style={"display": "flex", "alignItems": "center", "marginTop": "8px"}),
                         # ===== Import an existing migtime table =====
                         # For users who already defined migration sequences
                         # elsewhere (e.g. the WMI Migration Mapper export, or a
@@ -1861,7 +1968,7 @@ tab1_layout = dbc.Container(
                                             className="g-2 mb-2",
                                         ),
                                         html.Small(
-                                            "Must match the bio-year start used for your GPS data so "
+                                            "Must match the bio-year start defined in the Processing Parameters so "
                                             "the animal-year keys align (auto-filled from the file when present). "
                                             "Recommended: Mule Deer Feb. 1; Elk Feb. 15",
                                             className="text-muted d-block mb-2",
@@ -2006,14 +2113,19 @@ tab2_layout = dbc.Container(
                                             className="w-100 mb-2",
                                         ),
                                         html.Div(id="seq-progress", className="text-center text-muted small mb-2"),
-                                        dbc.Button("Auto-detect All", id="btn-autodetect-all", color="info", className="w-100 mb-1", size="sm"),
-                                        dbc.Button("Clear Sequences", id="btn-clear-sequences", color="secondary", outline=True, className="w-100 mb-2", size="sm"),
-                                        dbc.ButtonGroup(
+                                        html.Div(
                                             [
-                                                dbc.Button("Accept", id="btn-accept-animal", color="success", size="sm"),
-                                                dbc.Button("Reject", id="btn-reject-animal", color="danger", size="sm"),
+                                                dbc.Button("Auto-detect All", id="btn-autodetect-all", color="info", className="w-100 mb-1", size="sm"),
+                                                dbc.Button("Clear Sequences", id="btn-clear-sequences", color="secondary", outline=True, className="w-100 mb-2", size="sm"),
+                                                dbc.ButtonGroup(
+                                                    [
+                                                        dbc.Button("Accept", id="btn-accept-animal", color="success", size="sm"),
+                                                        dbc.Button("Reject", id="btn-reject-animal", color="danger", size="sm"),
+                                                    ],
+                                                    className="w-100",
+                                                ),
                                             ],
-                                            className="w-100",
+                                            style={"display": "none"},
                                         ),
                                     ]
                                 ),
@@ -2101,33 +2213,91 @@ tab2_layout = dbc.Container(
                             className="small mb-1",
                             style={"fontSize": "0.8rem"},
                         ),
-                        html.Div(
-                            dcc.Graph(
-                                id="nsd-plot",
-                                style={"height": "100%", "width": "100%"},
-                                config={
-                                    "displayModeBar": False,
-                                    "scrollZoom": True,  # mouse wheel zooms NSD plot
-                                    "responsive": True,
-                                },
-                                responsive=True,
-                            ),
-                            style={
-                                "height": "280px",
-                                "minHeight": "120px",
-                                "maxHeight": "900px",
-                                "resize": "vertical",
-                                "overflow": "hidden",
-                            },
-                        ),
-                        # Smaller secondary charts — non-resizable.
-                        dcc.Loading(
-                            type="circle",
-                            children=[
-                                dcc.Graph(id="displacement-plot", style={"height": "180px"}, config={"displayModeBar": False}),
-                                dcc.Graph(id="speed-plot", style={"height": "140px"}, config={"displayModeBar": False}),
-                                dcc.Graph(id="elevation-plot", style={"height": "140px"}, config={"displayModeBar": False}),
+                        dbc.Tabs(
+                            [
+                                dbc.Tab(
+                                    html.Div(
+                                        dcc.Graph(
+                                            id="nsd-plot",
+                                            style={"height": "100%", "width": "100%"},
+                                            config={
+                                                "displayModeBar": False,
+                                                "scrollZoom": True,
+                                                "responsive": True,
+                                            },
+                                            responsive=True,
+                                        ),
+                                        style={
+                                            "height": "400px",
+                                            "minHeight": "200px",
+                                            "maxHeight": "900px",
+                                            "resize": "vertical",
+                                            "overflow": "hidden",
+                                        },
+                                    ),
+                                    label="NSD",
+                                    tab_id="chart-nsd",
+                                ),
+                                dbc.Tab(
+                                    html.Div(
+                                        dcc.Graph(
+                                            id="displacement-plot",
+                                            style={"height": "100%", "width": "100%"},
+                                            config={"displayModeBar": False, "scrollZoom": True, "responsive": True},
+                                            responsive=True,
+                                        ),
+                                        style={
+                                            "height": "400px",
+                                            "minHeight": "200px",
+                                            "maxHeight": "900px",
+                                            "resize": "vertical",
+                                            "overflow": "hidden",
+                                        },
+                                    ),
+                                    label="Displacement",
+                                    tab_id="chart-displacement",
+                                ),
+                                dbc.Tab(
+                                    html.Div(
+                                        dcc.Graph(
+                                            id="speed-plot",
+                                            style={"height": "100%", "width": "100%"},
+                                            config={"displayModeBar": False, "scrollZoom": True, "responsive": True},
+                                            responsive=True,
+                                        ),
+                                        style={
+                                            "height": "400px",
+                                            "minHeight": "200px",
+                                            "maxHeight": "900px",
+                                            "resize": "vertical",
+                                            "overflow": "hidden",
+                                        },
+                                    ),
+                                    label="Speed",
+                                    tab_id="chart-speed",
+                                ),
+                                dbc.Tab(
+                                    html.Div(
+                                        dcc.Graph(
+                                            id="elevation-plot",
+                                            style={"height": "100%", "width": "100%"},
+                                            config={"displayModeBar": False, "scrollZoom": True, "responsive": True},
+                                            responsive=True,
+                                        ),
+                                        style={
+                                            "height": "400px",
+                                            "minHeight": "200px",
+                                            "maxHeight": "900px",
+                                            "resize": "vertical",
+                                            "overflow": "hidden",
+                                        },
+                                    ),
+                                    label="Elevation",
+                                    tab_id="chart-elevation",
+                                ),
                             ],
+                            active_tab="chart-nsd",
+                            className="mb-1",
                         ),
                     ],
                     # Grow to fill whatever horizontal space the (resizable)
@@ -2460,7 +2630,15 @@ tab3_layout = dbc.Container(
                                             className="mb-3",
                                         ),
                                         html.Div(id="model-param-panel"),
-                                        dbc.Label("Number of Cores", className="mt-3", style={"fontSize": "0.85rem"}),
+                                        html.Div([
+                                            _info_label("Number of Cores",
+                                                       "The number of cores in this slider changes based on the number of "
+                                                       "cores available on your device. This slider sets how many sequences "
+                                                       "are modeled in parallel. More cores = faster total modeling time, but "
+                                                       "uses more CPU and RAM. The default is half your available CPU cores "
+                                                       "to leave headroom for the OS and the app itself.",
+                                                       "4–5"),
+                                        ], className="mt-3"),
                                         dcc.Slider(
                                             id="model-cores",
                                             min=1,
@@ -2476,7 +2654,7 @@ tab3_layout = dbc.Container(
                                         dbc.Label("Output grid cell size (m)", className="mt-3", style={"fontSize": "0.85rem"}),
                                         dbc.Input(id="model-cell-size", type="number", value=250, min=10, step=10),
                                         html.Small(
-                                            "Resolution of the UD / footprint / population rasters. Default 250 m. "
+                                            "Resolution of the UD (utilization distribution) / footprint / population rasters. Default 250 m. "
                                             "Larger = coarser & faster.",
                                             className="text-muted d-block mb-1", style={"fontSize": "0.7rem"},
                                         ),
@@ -2577,7 +2755,11 @@ tab4_layout = dbc.Container(
                                 dbc.CardHeader("Population Output Settings"),
                                 dbc.CardBody(
                                     [
-                                        dbc.Label("Seasons to Merge", style={"fontSize": "0.85rem"}),
+                                        _info_label("Seasons to Merge",
+                                                   "Select which migration seasons to include when building "
+                                                   "the population-level surface. Sequences from checked seasons "
+                                                   "are stacked together.",
+                                                   "Spring + Fall (both checked)"),
                                         dbc.Checklist(
                                             id="pop-seasons",
                                             options=[
@@ -2588,7 +2770,13 @@ tab4_layout = dbc.Container(
                                             className="mb-2",
                                             inline=True,
                                         ),
-                                        dbc.Label("Merge Order", style={"fontSize": "0.85rem"}),
+                                        _info_label("Merge Order",
+                                                   "Controls the order in which individual sequences are "
+                                                   "stacked onto the population grid. 'ID first' groups all "
+                                                   "years for each animal, then moves to the next animal. "
+                                                   "'Year first' groups all animals within a year, then moves "
+                                                   "to the next year.",
+                                                   "ID first, then Year"),
                                         dcc.Dropdown(
                                             id="pop-merge-order",
                                             options=[
@@ -2599,7 +2787,12 @@ tab4_layout = dbc.Container(
                                             clearable=False,
                                             className="mb-2",
                                         ),
-                                        dbc.Label("Contour Type", style={"fontSize": "0.85rem"}),
+                                        _info_label("Contour Type",
+                                                   "Area: each contour level is the percentage of sequences "
+                                                   "whose UDs (utilization distributions) overlap a cell. "
+                                                   "Volume: each level is based on the cumulative UD volume rank "
+                                                   "(isopleth), similar to home-range contours.",
+                                                   "Area"),
                                         dcc.RadioItems(
                                             id="pop-contour-type",
                                             options=[
@@ -2611,7 +2804,12 @@ tab4_layout = dbc.Container(
                                             inline=True,
                                             labelStyle={"color": "white"},
                                         ),
-                                        dbc.Label("Contour Levels (%)", style={"fontSize": "0.85rem"}),
+                                        _info_label("Contour Levels (%)",
+                                                   "Comma-separated list of percentage thresholds for generating "
+                                                   "population corridor polygons. Each level produces a separate "
+                                                   "shapefile. Lower values capture broader use areas; higher values "
+                                                   "capture only the most heavily used corridors.",
+                                                   "5, 10, 15, 20, 30, 50"),
                                         dbc.Input(
                                             id="pop-contour-levels",
                                             type="text",
@@ -2620,7 +2818,7 @@ tab4_layout = dbc.Container(
                                             className="mb-1",
                                         ),
                                         html.Small(
-                                            "Each level is the percentage of sequences whose UDs overlap a cell. "
+                                            "Each level is the percentage of sequences whose UDs (utilization distributions) overlap a cell. "
                                             "For migration corridors, 5-30% gives broad-use polygons; >50% would "
                                             "require majority overlap and is rare except at bottlenecks.",
                                             className="text-muted d-block mb-2",
@@ -2630,14 +2828,22 @@ tab4_layout = dbc.Container(
                                             [
                                                 dbc.Col(
                                                     [
-                                                        dbc.Label("Min Area Drop (m²)", style={"fontSize": "0.85rem"}),
+                                                        _info_label("Min Area Drop (m²)",
+                                                                   "Polygon fragments smaller than this area are removed "
+                                                                   "from the contour output. Eliminates tiny isolated "
+                                                                   "patches that are too small to be ecologically meaningful.",
+                                                                   "10,000 m²"),
                                                         dbc.Input(id="pop-min-drop", type="number", value=10000, min=0),
                                                     ],
                                                     width=6,
                                                 ),
                                                 dbc.Col(
                                                     [
-                                                        dbc.Label("Min Area Fill (m²)", style={"fontSize": "0.85rem"}),
+                                                        _info_label("Min Area Fill (m²)",
+                                                                   "Interior holes in contour polygons smaller than this "
+                                                                   "area are filled in. Prevents small donut holes from "
+                                                                   "fragmenting otherwise continuous corridors.",
+                                                                   "5,000 m²"),
                                                         dbc.Input(id="pop-min-fill", type="number", value=5000, min=0),
                                                     ],
                                                     width=6,
@@ -2649,28 +2855,30 @@ tab4_layout = dbc.Container(
                                             [
                                                 dbc.Col(
                                                     [
-                                                        dbc.Label("Smoothing", style={"fontSize": "0.85rem"}),
+                                                        _info_label("Smoothing",
+                                                                   "When enabled, contour polygon outlines are smoothed "
+                                                                   "after generation. This rounds jagged pixel-staircase "
+                                                                   "edges without changing the underlying raster surface.",
+                                                                   "On"),
                                                         dbc.Switch(id="pop-smooth-toggle", value=True, label=""),
                                                     ],
                                                     width=4,
                                                 ),
                                                 dbc.Col(
                                                     [
-                                                        dbc.Label("Smoothness (ksmooth)", style={"fontSize": "0.85rem"}),
+                                                        _info_label("Smoothness — ksmooth",
+                                                                   "Controls how aggressively the contour outlines are "
+                                                                   "smoothed. A port of R's smoothr::smooth ksmooth — same "
+                                                                   "parameter as Migration Mapper's ksmooth_smoothness. "
+                                                                   "Higher values produce rounder edges; polygon areas are "
+                                                                   "preserved.",
+                                                                   "2"),
                                                         dbc.Input(id="pop-smooth-bw", type="number", value=2, min=0, step=0.5),
                                                     ],
                                                     width=8,
                                                 ),
                                             ],
                                             className="mb-1",
-                                        ),
-                                        html.Small(
-                                            "Smooths the contour outlines after they're drawn (a port of R's "
-                                            "smoothr::smooth ksmooth) — same as Migration Mapper's "
-                                            "ksmooth_smoothness. Default 2. Higher = rounder edges; areas are "
-                                            "preserved (it does not blur the underlying surface).",
-                                            className="text-muted d-block mb-2",
-                                            style={"fontSize": "0.7rem"},
                                         ),
                                         dbc.Checkbox(
                                             id="pop-stopover-toggle",
@@ -2681,7 +2889,12 @@ tab4_layout = dbc.Container(
                                         ),
                                         dbc.Collapse(
                                             [
-                                                dbc.Label("Stopover Density (%)", style={"fontSize": "0.85rem"}),
+                                                _info_label("Stopover Density (%)",
+                                                           "The top X% of the population-level UD (Utilization Distribution; "
+                                                           "probability density) surface is classified as stopover habitat — "
+                                                           "areas where animals concentrate during migration. Consistent with "
+                                                           "WMI's Migration Mapper methodology.",
+                                                           "10%"),
                                                 dbc.Input(
                                                     id="pop-stopover-pct",
                                                     type="number",
@@ -2691,7 +2904,7 @@ tab4_layout = dbc.Container(
                                                     step=1,
                                                 ),
                                                 html.Small(
-                                                    "Recommended: 10 — the top 10% of the population-level UD "
+                                                    "Recommended: 10 — the top 10% of the population-level UD (utilization distribution) "
                                                     "considered as stopovers, consistent with WMI's Migration Mapper.",
                                                     className="text-muted d-block mb-2",
                                                     style={"fontSize": "0.72rem"},
@@ -2707,21 +2920,15 @@ tab4_layout = dbc.Container(
                                             style={"fontSize": "0.85rem"},
                                             className="mt-2 mb-1",
                                         ),
-                                        html.Small(
-                                            "The app outputs layers with at least 2 and at least 3 animals "
-                                            "that have used an area. This option lets you define a custom X — "
-                                            "the output is a clipped raster showing cells where at least X "
-                                            "animals used the area.",
-                                            className="text-muted d-block mb-1",
-                                            style={"fontSize": "0.7rem"},
-                                        ),
                                         dbc.Collapse(
                                             [
-                                                dbc.Label(
-                                                    id="pop-minimumx-label",
-                                                    children="Minimum number of animals",
-                                                    style={"fontSize": "0.85rem"},
-                                                ),
+                                                _info_label("Minimum number of animals — MinimumX",
+                                                           "The app automatically outputs layers showing cells used by "
+                                                           "at least 2 and at least 3 animals. This option lets you define "
+                                                           "a custom X — the output is a clipped raster and smoothed polygon "
+                                                           "showing cells where at least X animals used the area.",
+                                                           "4"),
+                                                html.Span(id="pop-minimumx-label", style={"display": "none"}),
                                                 dbc.Input(
                                                     id="pop-minimumx-value",
                                                     type="number",
@@ -2860,100 +3067,101 @@ tab5_layout = dbc.Container(
                             ],
                             className="mb-3",
                         ),
-                        # Raster (.tif) overlay — ArcGIS-style collapsible
-                        # contents tree. Groups are version+category; each
-                        # group expands to show checkboxes for individual files.
+                        # Output overlays — raster and vector in one card,
+                        # each in its own accordion item.
                         dbc.Card(
                             [
-                                dbc.CardHeader("Raster Overlay (.tif)"),
+                                dbc.CardHeader("Output Overlays"),
                                 dbc.CardBody(
-                                    [
-                                        html.Div(
-                                            id="raster-tree-container",
-                                            style={
-                                                "maxHeight": "360px",
-                                                "overflowY": "auto",
-                                                "fontSize": "0.8rem",
-                                            },
-                                        ),
-                                        dcc.Store(id="raster-overlay-file", data=[]),
-                                        dcc.Store(id="raster-overlay-category", data=""),
-                                        dbc.Button(
-                                            "Clear overlay",
-                                            id="btn-clear-raster-overlay",
-                                            color="secondary", outline=True, size="sm",
-                                            className="w-100 mt-2",
-                                        ),
-                                        dbc.Button(
-                                            "Select all",
-                                            id="btn-select-all-rasters",
-                                            color="secondary", outline=True, size="sm",
-                                            className="w-100 mt-1",
-                                            style={"display": "none"},
-                                        ),
-                                        html.Hr(className="my-2"),
-                                        dbc.Label("Colour scale", style={"fontSize": "0.85rem"}),
-                                        dcc.Dropdown(
-                                            id="raster-overlay-cmap",
-                                            options=[
-                                                {"label": "Viridis", "value": "viridis"},
-                                                {"label": "Black & white", "value": "gray"},
-                                            ],
-                                            value="viridis",
-                                            clearable=False,
-                                            style={"fontSize": "0.82rem", "marginBottom": "8px"},
-                                            className="dash-dark-dropdown",
-                                        ),
-                                        dbc.Label("Opacity", style={"fontSize": "0.85rem"}),
-                                        dcc.Slider(
-                                            id="raster-overlay-opacity",
-                                            min=0, max=1, step=0.05, value=1,
-                                            marks={i: {"label": str(i), "style": {"color": "white"}} for i in [0, 0.5, 1]},
-                                        ),
-                                        html.Div(id="raster-overlay-info", className="mt-2 small text-muted"),
-                                    ]
-                                ),
-                            ],
-                            className="mb-3",
-                        ),
-                        # Vector overlay — ArcGIS-style collapsible contents
-                        # tree, grouped by subfolder under ModelOutputs/.
-                        dbc.Card(
-                            [
-                                dbc.CardHeader("Vector Overlays (.shp / .geojson)"),
-                                dbc.CardBody(
-                                    [
-                                        html.Div(
-                                            id="vector-tree-container",
-                                            style={
-                                                "maxHeight": "300px",
-                                                "overflowY": "auto",
-                                                "fontSize": "0.8rem",
-                                            },
-                                        ),
-                                        dcc.Store(id="vector-overlay-files", data=[]),
-                                        dbc.Button(
-                                            "Select all",
-                                            id="btn-select-all-vectors",
-                                            color="secondary", outline=True, size="sm",
-                                            className="w-100 mt-1",
-                                            style={"display": "none"},
-                                        ),
-                                        dbc.Button(
-                                            "Refresh list",
-                                            id="btn-refresh-vectors",
-                                            color="secondary", outline=True, size="sm",
-                                            className="w-100 mt-1",
-                                        ),
-                                        html.Hr(className="my-2"),
-                                        dbc.Label("Fill opacity", style={"fontSize": "0.85rem"}),
-                                        dcc.Slider(
-                                            id="vector-overlay-opacity",
-                                            min=0, max=1, step=0.05, value=0.35,
-                                            marks={i: {"label": str(i), "style": {"color": "white"}} for i in [0, 0.5, 1]},
-                                        ),
-                                        html.Div(id="vector-overlay-info", className="mt-2 small text-muted"),
-                                    ]
+                                    dbc.Accordion(
+                                        [
+                                            dbc.AccordionItem(
+                                                [
+                                                    html.Div(
+                                                        id="raster-tree-container",
+                                                        style={
+                                                            "maxHeight": "360px",
+                                                            "overflowY": "auto",
+                                                            "fontSize": "0.8rem",
+                                                        },
+                                                    ),
+                                                    dcc.Store(id="raster-overlay-file", data=[]),
+                                                    dcc.Store(id="raster-overlay-category", data=""),
+                                                    dbc.Button(
+                                                        "Clear overlay",
+                                                        id="btn-clear-raster-overlay",
+                                                        color="secondary", outline=True, size="sm",
+                                                        className="w-100 mt-2",
+                                                    ),
+                                                    dbc.Button(
+                                                        "Select all",
+                                                        id="btn-select-all-rasters",
+                                                        color="secondary", outline=True, size="sm",
+                                                        className="w-100 mt-1",
+                                                        style={"display": "none"},
+                                                    ),
+                                                    html.Hr(className="my-2"),
+                                                    dbc.Label("Colour scale", style={"fontSize": "0.85rem"}),
+                                                    dcc.Dropdown(
+                                                        id="raster-overlay-cmap",
+                                                        options=[
+                                                            {"label": "Viridis", "value": "viridis"},
+                                                            {"label": "Black & white", "value": "gray"},
+                                                        ],
+                                                        value="viridis",
+                                                        clearable=False,
+                                                        style={"fontSize": "0.82rem", "marginBottom": "8px"},
+                                                        className="dash-dark-dropdown",
+                                                    ),
+                                                    dbc.Label("Opacity", style={"fontSize": "0.85rem"}),
+                                                    dcc.Slider(
+                                                        id="raster-overlay-opacity",
+                                                        min=0, max=1, step=0.05, value=1,
+                                                        marks={i: {"label": str(i), "style": {"color": "white"}} for i in [0, 0.5, 1]},
+                                                    ),
+                                                    html.Div(id="raster-overlay-info", className="mt-2 small text-muted"),
+                                                ],
+                                                title="Raster (.tif)",
+                                            ),
+                                            dbc.AccordionItem(
+                                                [
+                                                    html.Div(
+                                                        id="vector-tree-container",
+                                                        style={
+                                                            "maxHeight": "300px",
+                                                            "overflowY": "auto",
+                                                            "fontSize": "0.8rem",
+                                                        },
+                                                    ),
+                                                    dcc.Store(id="vector-overlay-files", data=[]),
+                                                    dbc.Button(
+                                                        "Select all",
+                                                        id="btn-select-all-vectors",
+                                                        color="secondary", outline=True, size="sm",
+                                                        className="w-100 mt-1",
+                                                        style={"display": "none"},
+                                                    ),
+                                                    dbc.Button(
+                                                        "Refresh list",
+                                                        id="btn-refresh-vectors",
+                                                        color="secondary", outline=True, size="sm",
+                                                        className="w-100 mt-1",
+                                                    ),
+                                                    html.Hr(className="my-2"),
+                                                    dbc.Label("Fill opacity", style={"fontSize": "0.85rem"}),
+                                                    dcc.Slider(
+                                                        id="vector-overlay-opacity",
+                                                        min=0, max=1, step=0.05, value=0.35,
+                                                        marks={i: {"label": str(i), "style": {"color": "white"}} for i in [0, 0.5, 1]},
+                                                    ),
+                                                    html.Div(id="vector-overlay-info", className="mt-2 small text-muted"),
+                                                ],
+                                                title="Vector (.shp / .geojson)",
+                                            ),
+                                        ],
+                                        start_collapsed=True,
+                                        always_open=True,
+                                    ),
                                 ),
                             ],
                             className="mb-3",
@@ -2975,55 +3183,51 @@ tab5_layout = dbc.Container(
                                         # by populate_export_checklist from the
                                         # store-pop-outputs manifest; empty until
                                         # Tab 4 has generated outputs this session.
-                                        dbc.Label(
-                                            "Outputs to export",
-                                            style={"fontSize": "0.85rem"},
-                                        ),
-                                        dbc.Row(
+                                        dbc.Accordion(
                                             [
-                                                dbc.Col(
-                                                    dbc.Button(
-                                                        "Select all",
-                                                        id="btn-export-select-all",
-                                                        color="secondary", outline=True, size="sm",
-                                                        className="w-100",
-                                                    ),
-                                                    width=6,
-                                                ),
-                                                dbc.Col(
-                                                    dbc.Button(
-                                                        "Clear",
-                                                        id="btn-export-clear",
-                                                        color="secondary", outline=True, size="sm",
-                                                        className="w-100",
-                                                    ),
-                                                    width=6,
+                                                dbc.AccordionItem(
+                                                    [
+                                                        dbc.Row(
+                                                            [
+                                                                dbc.Col(
+                                                                    dbc.Button(
+                                                                        "Select all",
+                                                                        id="btn-export-select-all",
+                                                                        color="secondary", outline=True, size="sm",
+                                                                        className="w-100",
+                                                                    ),
+                                                                    width=6,
+                                                                ),
+                                                                dbc.Col(
+                                                                    dbc.Button(
+                                                                        "Clear",
+                                                                        id="btn-export-clear",
+                                                                        color="secondary", outline=True, size="sm",
+                                                                        className="w-100",
+                                                                    ),
+                                                                    width=6,
+                                                                ),
+                                                            ],
+                                                            className="g-1 mb-2",
+                                                        ),
+                                                        html.Div(
+                                                            id="export-checklist-wrap",
+                                                            style={
+                                                                "maxHeight": "280px",
+                                                                "overflowY": "auto",
+                                                                "border": "1px solid #444",
+                                                                "borderRadius": "6px",
+                                                                "padding": "8px",
+                                                                "marginBottom": "8px",
+                                                            },
+                                                        ),
+                                                    ],
+                                                    title="Outputs",
+                                                    item_id="outputs-accordion",
                                                 ),
                                             ],
-                                            className="g-1 mb-2",
-                                        ),
-                                        html.Div(
-                                            dcc.Checklist(
-                                                id="export-checklist",
-                                                options=[],
-                                                value=[],
-                                                inputClassName="me-2",
-                                                labelStyle={
-                                                    "display": "block",
-                                                    "fontSize": "0.78rem",
-                                                    "marginBottom": "2px",
-                                                    "color": "white",
-                                                },
-                                            ),
-                                            id="export-checklist-wrap",
-                                            style={
-                                                "maxHeight": "220px",
-                                                "overflowY": "auto",
-                                                "border": "1px solid #444",
-                                                "borderRadius": "6px",
-                                                "padding": "8px",
-                                                "marginBottom": "8px",
-                                            },
+                                            start_collapsed=True,
+                                            className="mb-2",
                                         ),
                                         html.Div(
                                             "Generate population outputs in Tab 4 first — "
@@ -3548,9 +3752,10 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
 
     crs_note = ""
     if detected_crs and detected_crs.to_epsg():
-        crs_note = f" · CRS: EPSG:{detected_crs.to_epsg()}"
+        epsg = f"EPSG:{detected_crs.to_epsg()}"
+        crs_note = f" · {_crs_to_projection_name(epsg)} ({epsg})"
     elif detected_crs:
-        crs_note = f" · CRS: {detected_crs.name}"
+        crs_note = f" · {detected_crs.name}"
 
     fname_display = html.Span(
         f"Loaded: {display_name}{crs_note}",
@@ -3657,11 +3862,28 @@ def handle_upload(contents, filename, workdir_path):
         # ModelInputs/ (permanent); without one, fall back to a temp file.
         if workdir_path and Path(workdir_path).is_dir():
             inputs_dir = _workdir_inputs(Path(workdir_path))
-            dest = inputs_dir / Path(filename).name
-            dest.write_bytes(decoded)
-            _log_action("UPLOAD_CSV", filename=Path(filename).name, bytes=len(decoded))
-            saved_path = dest
-            _create_companion_file(dest)
+            if suffix == ".zip":
+                import zipfile as _zf
+                tmp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+                tmp_zip.write(decoded)
+                tmp_zip.close()
+                with _zf.ZipFile(tmp_zip.name) as z:
+                    z.extractall(str(inputs_dir))
+                Path(tmp_zip.name).unlink(missing_ok=True)
+                shp_hits = list(inputs_dir.rglob("*.shp"))
+                if shp_hits:
+                    saved_path = shp_hits[0]
+                    _create_companion_file(saved_path)
+                    _log_action("UPLOAD_SHP_ZIP", filename=filename, extracted=saved_path.name)
+                else:
+                    saved_path = inputs_dir / Path(filename).name
+                    saved_path.write_bytes(decoded)
+            else:
+                dest = inputs_dir / Path(filename).name
+                dest.write_bytes(decoded)
+                _log_action("UPLOAD_CSV", filename=Path(filename).name, bytes=len(decoded))
+                saved_path = dest
+                _create_companion_file(dest)
         else:
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
             tmp.write(decoded)
@@ -3972,6 +4194,7 @@ def toggle_minimumx(checked):
     Output("store-config", "data"),
     Output("store-road-crossings", "data", allow_duplicate=True),
     Output("store-wld-env-labels", "data"),
+    Output("process-loading-indicator", "children"),
     Input("btn-process", "n_clicks"),
     State("store-upload-path", "data"),
     State("col-animal-id", "value"),
@@ -4001,6 +4224,7 @@ def toggle_minimumx(checked):
     State("col-sats", "value"),
     State("age-class-include", "value"),
     State("col-age-class", "value"),
+    State("auto-flagging-toggle", "value"),
     prevent_initial_call=True,
 )
 def process_uploaded_data(
@@ -4011,6 +4235,7 @@ def process_uploaded_data(
     existing_processed_json, workdir_path, detect_roads,
     herd_id_override, use_utm, utm_easting_col, utm_northing_col,
     dop_col, sat_col, age_class_include, age_class_col,
+    auto_flagging_enabled,
 ):
     """Run the full data processing pipeline.
 
@@ -4051,10 +4276,10 @@ def process_uploaded_data(
                     f"Project '{(project_name or _ACTIVE_PROJECT).replace('_', ' ')}' "
                     f"is already loaded ({len(existing_df):,} points). Re-upload a file to reprocess."
                 )
-                return msg, summary, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+                return msg, summary, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
             except Exception as exc:
-                return _err_alert(f"Loaded project found but could not be summarised: {exc}"), "", dash.no_update, dash.no_update, dash.no_update, dash.no_update
-        return _err_alert("Please upload a file first."), "", None, None, dash.no_update, dash.no_update
+                return _err_alert(f"Loaded project found but could not be summarised: {exc}"), "", dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+        return _err_alert("Please upload a file first."), "", None, None, dash.no_update, dash.no_update, ""
 
     # ---- Stage 2: cache reset + config assembly ----
     # Wipe both caches so the new dataset can't see stale entries from a
@@ -4084,21 +4309,22 @@ def process_uploaded_data(
         _lat_col = lat_col or "Lat"
         _input_crs = "EPSG:4326"
 
+    _flagging = bool(auto_flagging_enabled)
     config = {
         "animal_id_col": animal_col or "LoclAID",
         "timestamp_col": ts_col if ts_col else "DT_MST",
         "lon_col": _lon_col,
         "lat_col": _lat_col,
         "input_crs": _input_crs,
-        "max_speed_kmh": _num_or_none(max_speed),
-        "mort_distance_m": _num_or_none(mort_dist),
-        "mort_time_hours": _num_or_none(mort_time),
+        "max_speed_kmh": _num_or_none(max_speed) if _flagging else None,
+        "mort_distance_m": _num_or_none(mort_dist) if _flagging else None,
+        "mort_time_hours": _num_or_none(mort_time) if _flagging else None,
         # Bio-year start is structural (drives year grouping, not a filter), so
         # it keeps a sensible default when blank rather than being disabled.
         "bio_year_start_month": int(bio_month) if bio_month not in (None, "") else 2,
         "bio_year_start_day": int(bio_day) if bio_day not in (None, "") else 1,
-        "dop_cutoff": _num_or_none(dop_cutoff),
-        "sat_cutoff": _num_or_none(sat_cutoff),
+        "dop_cutoff": _num_or_none(dop_cutoff) if _flagging else None,
+        "sat_cutoff": _num_or_none(sat_cutoff) if _flagging else None,
         "dop_col": dop_col or "DOP",
         "sat_col": sat_col or "NumSats",
     }
@@ -4112,7 +4338,7 @@ def process_uploaded_data(
     try:
         gdf, final_config, processing_log = process_data(tmp_path, config=config)
     except Exception as exc:
-        return _err_alert(f"Processing failed: {exc}\n{traceback.format_exc()}"), "", None, None, dash.no_update, dash.no_update
+        return _err_alert(f"Processing failed: {exc}\n{traceback.format_exc()}"), "", None, None, dash.no_update, dash.no_update, ""
 
     # ---- Stage 3b: filter by age class ----
     _age_col = age_class_col or "captureAgeClass"
@@ -4131,12 +4357,17 @@ def process_uploaded_data(
                     f"Age-class filter: {n_excluded:,} fixes removed ({excluded_df[_aid].nunique()} animals) "
                     f"— excluded classes: {', '.join(sorted(excluded_vals))}"
                 )
-                exports_dir = _migtime_exports_dir(workdir_path)
-                if exports_dir is not None:
-                    exports_dir.mkdir(parents=True, exist_ok=True)
-                    excluded_df.drop(columns=["geometry"], errors="ignore").to_csv(
-                        exports_dir / "excluded_age_classes.csv", index=False,
-                    )
+                excluded_out = excluded_df.drop(columns=["geometry"], errors="ignore").copy()
+                excluded_out["removal_reason"] = "Age class excluded: " + excluded_df[_age_col].astype(str).str.strip()
+                if workdir_path:
+                    try:
+                        removed_dir = _workdir_version(Path(workdir_path)) / "RemovedPoints"
+                        removed_dir.mkdir(parents=True, exist_ok=True)
+                        excluded_out.to_csv(
+                            removed_dir / "AgeClassRemoved.csv", index=False,
+                        )
+                    except Exception:
+                        pass
             else:
                 processing_log.append("Age-class filter: no fixes matched excluded classes")
         else:
@@ -4290,12 +4521,13 @@ def process_uploaded_data(
                     dbc.Row(
                         [
                             dbc.Col(html.Div([
-                                html.Strong("Input CRS: "),
-                                html.Code(final_config.get("input_crs", "EPSG:4326")),
+                                html.Strong("Projection: "),
+                                _crs_to_projection_name(final_config.get("input_crs", "EPSG:4326")),
                                 html.Small(
-                                    " → reprojected to WGS84 (EPSG:4326)"
-                                    if final_config.get("input_crs", "EPSG:4326") != "EPSG:4326"
-                                    else "",
+                                    f" ({final_config.get('input_crs', 'EPSG:4326')})"
+                                    + (" → reprojected to WGS84"
+                                       if final_config.get("input_crs", "EPSG:4326") != "EPSG:4326"
+                                       else ""),
                                     className="text-muted ms-1",
                                 ),
                             ]), width=8),
@@ -4359,18 +4591,27 @@ def process_uploaded_data(
     )
 
     # Detect road/highway crossings for all animals — opt-in via the
-    # "Detect road crossings" checkbox in Tab 1. Off by default because it
-    # dominates processing time on big datasets.
+    # "Detect road crossings" checkbox in Tab 1. Runs in a background thread
+    # so the UI returns immediately; results are written to disk and picked
+    # up by Tab 2 lazily.
     road_results: dict = {}
     if detect_roads:
-        try:
-            road_results = detect_crossings_batch(df_out)
-            rc_path = _project_dir(proj) / "road_crossings.json"
-            rc_path.write_text(json.dumps(road_results, default=str))
-            processing_log.append(f"Road crossings detected for {len(road_results):,} animal-years.")
-        except Exception as rd_exc:
-            processing_log.append(f"WARNING: Road-crossing detection failed: {rd_exc}")
-            road_results = {}
+        import threading as _th_roads
+
+        def _road_worker():
+            try:
+                res = detect_crossings_batch(df_out)
+                rc_path = _project_dir(proj) / "road_crossings.json"
+                rc_path.write_text(json.dumps(res, default=str))
+                if workdir_path and Path(workdir_path).is_dir():
+                    (_workdir_outputs(Path(workdir_path)) / "road_crossings.json").write_text(
+                        json.dumps(res, default=str)
+                    )
+            except Exception:
+                pass
+
+        _th_roads.Thread(target=_road_worker, daemon=True).start()
+        processing_log.append("Road-crossing detection running in background...")
     else:
         processing_log.append("Road-crossing detection skipped (checkbox off).")
 
@@ -4381,9 +4622,6 @@ def process_uploaded_data(
             outputs_dir = _workdir_outputs(Path(workdir_path))
             df_out.to_parquet(str(outputs_dir / "processed_data.parquet"), index=False)
             (outputs_dir / "road_crossings.json").write_text(json.dumps(road_results, default=str))
-            # Stamp the data-processed time at the top; later workflow steps
-            # (migtime export, modelling, population outputs) append their own
-            # dated sections to this same file via _append_processing_log.
             import datetime as _dt_proc
             _proc_ts = _dt_proc.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             _header = [f"DATA PROCESSED   [{_proc_ts}]", "=" * 60, ""]
@@ -4398,27 +4636,32 @@ def process_uploaded_data(
                 mortality=n_mort,
                 wld_vars=len(wld_env_labels),
             )
-            # Write the cleaned GeoPackage:
-            # <Herd>_<Project>_FlagsRemoved_<DDMMMYYYY>.gpkg
-            # — same naming as the reference EXPORTS/ folder but in .gpkg
-            # instead of .shp so long field names survive intact.
-            try:
-                herd_id = str(final_config.get("herd_id", "Herd"))
-                project_name_token = str(final_config.get("project_name", "Project"))
-                fr_path = write_flags_removed_shapefile(
-                    processed_df=df_out,
-                    out_dir=outputs_dir,
-                    herd_id=herd_id,
-                    project_name=project_name_token,
-                )
-                if fr_path is not None:
-                    _log_action(
-                        "FLAGS_REMOVED_EXPORT",
-                        path=str(fr_path.relative_to(outputs_dir)),
-                        kept=int(((df_out.get("problem", 0) == 0) & (df_out.get("mortality_flag", 0) == 0)).sum()),
+            # Write the cleaned GeoPackage in background — it's the slowest
+            # disk operation and not needed until export.
+            import threading as _th_gpkg
+            _gpkg_df = df_out.copy()
+            _gpkg_dir = outputs_dir
+
+            def _gpkg_worker():
+                try:
+                    herd_id = str(final_config.get("herd_id", "Herd"))
+                    project_name_token = str(final_config.get("project_name", "Project"))
+                    fr_path = write_flags_removed_shapefile(
+                        processed_df=_gpkg_df,
+                        out_dir=_gpkg_dir,
+                        herd_id=herd_id,
+                        project_name=project_name_token,
                     )
-            except Exception as fr_exc:
-                processing_log.append(f"WARNING: FlagsRemoved shapefile write failed: {fr_exc}")
+                    if fr_path is not None:
+                        _log_action(
+                            "FLAGS_REMOVED_EXPORT",
+                            path=str(fr_path.relative_to(_gpkg_dir)),
+                            kept=int(((_gpkg_df.get("problem", 0) == 0) & (_gpkg_df.get("mortality_flag", 0) == 0)).sum()),
+                        )
+                except Exception:
+                    pass
+
+            _th_gpkg.Thread(target=_gpkg_worker, daemon=True).start()
         except Exception as wd_exc:
             processing_log.append(f"WARNING: Failed to write to ModelOutputs/: {wd_exc}")
 
@@ -4427,12 +4670,16 @@ def process_uploaded_data(
         df_out[col] = df_out[col].astype(str)
 
     return (
-        _ok_alert(f"Processing complete. {n_points:,} points across {n_animals} animals."),
+        _ok_alert(
+            f"Processing complete. {n_points:,} points across {n_animals} animals. "
+            "Next step: import a previous migtime table, or move to Tab 2 to set migration sequences."
+        ),
         summary,
         _df_to_json(df_out, "processed"),
         json.dumps(final_config),
         road_results,
         wld_env_labels,
+        "",
     )
 
 
@@ -4559,7 +4806,7 @@ def _seq_working_df(processed_json, bio_month, bio_day):
 # Shared sequence-band palette — one entry per slot (mig1..mig8). The NSD chart
 # bands, the slider-card headers, and the map points (_build_point_geojson) all
 # index into the SAME list so a sequence's colour is identical everywhere.
-SEQ_COLORS = ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#D55E00", "#CC79A7", "#0072B2", "#FFFFFF"]
+SEQ_COLORS = ["#FF6B6B", "#4D96FF", "#FFD93D", "#CE6DBD", "#4ECDC4", "#FFA94D", "#A5F3FC", "#B5E550"]
 
 
 @app.callback(
@@ -4700,152 +4947,153 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_over
             mask = pd.Series(True, index=df.index)
     animal_df = df[mask].sort_values("timestamp") if "timestamp" in df.columns else df[mask]
 
-    # ---- NSD plot (top) ----
-    # Light-grey line for all four time-series plots so they read as a
-    # neutral backdrop; the per-sequence colored markers on Tab 2's map are
-    # the visual focal point, not these charts. NSD also gets individual
-    # fix markers overlaid so the user can see fix density / gaps.
-    nsd_fig = go.Figure()
-    if nsd_col and nsd_col in animal_df.columns:
-        _overlays = nsd_overlays or []
-        marker_colors = pd.Series("#000000", index=animal_df.index)
-        has_mort = "mortality_flag" in animal_df.columns
-        has_prob = "problem" in animal_df.columns
-        if has_prob and "problem" in _overlays:
-            marker_colors[animal_df["problem"].astype(bool)] = "#B57EDC"
-        if has_mort and "mortality" in _overlays:
-            marker_colors[animal_df["mortality_flag"].astype(bool)] = "#FF0000"
+    # ---- Shared overlay data for all charts ----
+    _overlays = nsd_overlays or []
+    has_prob = "problem" in animal_df.columns
+    has_mort = "mortality_flag" in animal_df.columns
+    marker_colors = pd.Series("#FFFFFF", index=animal_df.index)
+    if has_prob and "problem" in _overlays:
+        marker_colors[animal_df["problem"].astype(bool)] = "#FFB000"
+    if has_mort and "mortality" in _overlays:
+        marker_colors[animal_df["mortality_flag"].astype(bool)] = "#DC3220"
+    marker_colors_list = marker_colors.tolist()
 
-        nsd_fig.add_trace(
-            go.Scatter(
-                x=animal_df["timestamp"],
-                y=animal_df[nsd_col],
-                mode="lines+markers",
-                name="NSD",
-                line={"color": "#cfcfcf", "width": 1.2},
-                marker={"color": marker_colors.tolist(), "size": 5, "line": {"color": "#cfcfcf", "width": 1}},
-            )
-        )
+    gap_traces = []
+    if "gaps" in _overlays and "timestamp" in animal_df.columns and len(animal_df) > 1:
+        ts = animal_df["timestamp"].reset_index(drop=True)
+        dt_hours = ts.diff().dt.total_seconds() / 3600
+        gap_mask = dt_hours > 26
+        gap_idxs = gap_mask[gap_mask].index
+        if len(gap_idxs):
+            gap_x, gap_text = [], []
+            for idx in gap_idxs:
+                t0, t1 = ts.iloc[idx - 1], ts.iloc[idx]
+                gap_x.append(t0 + (t1 - t0) / 2)
+                gap_text.append(
+                    f"⚠ {dt_hours.iloc[idx]:.0f}h gap<br>"
+                    f"{t0.strftime('%b %d %H:%M')} → {t1.strftime('%b %d %H:%M')}"
+                )
+            gap_traces = (gap_x, gap_text)
+
+    def _add_overlays(fig, y_series):
+        """Add flag markers and gap diamonds to any chart figure."""
         if "problem" in _overlays and has_prob and animal_df["problem"].any():
-            nsd_fig.add_trace(go.Scatter(
+            fig.add_trace(go.Scatter(
                 x=[None], y=[None], mode="markers", name="Problem",
-                marker={"color": "#B57EDC", "size": 7},
-                showlegend=True,
+                marker={"color": "#FFB000", "size": 7}, showlegend=True,
             ))
         if "mortality" in _overlays and has_mort and animal_df["mortality_flag"].any():
-            nsd_fig.add_trace(go.Scatter(
+            fig.add_trace(go.Scatter(
                 x=[None], y=[None], mode="markers", name="Mortality",
-                marker={"color": "#FF0000", "size": 7},
-                showlegend=True,
+                marker={"color": "#DC3220", "size": 7}, showlegend=True,
             ))
-        if "gaps" in _overlays and "timestamp" in animal_df.columns and len(animal_df) > 1:
-            ts = animal_df["timestamp"].reset_index(drop=True)
-            nsd_vals = animal_df[nsd_col].reset_index(drop=True)
-            dt_hours = ts.diff().dt.total_seconds() / 3600
-            gap_mask = dt_hours > 26
-            gap_idxs = gap_mask[gap_mask].index
-            if len(gap_idxs):
-                gap_x, gap_y, gap_text = [], [], []
-                for idx in gap_idxs:
-                    t0, t1 = ts.iloc[idx - 1], ts.iloc[idx]
-                    mid_t = t0 + (t1 - t0) / 2
-                    y_val = max(nsd_vals.iloc[idx - 1], nsd_vals.iloc[idx])
-                    hrs = dt_hours.iloc[idx]
-                    gap_x.append(mid_t)
-                    gap_y.append(y_val)
-                    gap_text.append(
-                        f"⚠ {hrs:.0f}h gap<br>{t0.strftime('%b %d %H:%M')} → {t1.strftime('%b %d %H:%M')}"
-                    )
-                nsd_fig.add_trace(go.Scatter(
-                    x=gap_x, y=gap_y,
-                    mode="markers",
-                    name="Fix gap (>26h)",
-                    marker={"symbol": "diamond", "color": "#FCA5A5", "size": 10,
-                            "line": {"color": "#FF0000", "width": 1}},
-                    hovertext=gap_text,
-                    hoverinfo="text",
-                ))
+        if gap_traces and y_series is not None:
+            gap_x, gap_text = gap_traces
+            ts_reset = animal_df["timestamp"].reset_index(drop=True)
+            y_reset = y_series.reset_index(drop=True)
+            dt_hours_l = ts_reset.diff().dt.total_seconds() / 3600
+            gap_idxs_l = (dt_hours_l > 26)
+            gap_idxs_l = gap_idxs_l[gap_idxs_l].index
+            gap_y = []
+            for idx in gap_idxs_l:
+                gap_y.append(max(y_reset.iloc[idx - 1], y_reset.iloc[idx]))
+            fig.add_trace(go.Scatter(
+                x=gap_x, y=gap_y, mode="markers", name="Fix gap (>26h)",
+                marker={"symbol": "diamond", "color": "#785EF0", "size": 10,
+                        "line": {"color": "#5A3FD4", "width": 1}},
+                hovertext=gap_text, hoverinfo="text",
+            ))
 
+    # ---- NSD plot ----
+    nsd_fig = go.Figure()
+    nsd_y = None
+    if nsd_col and nsd_col in animal_df.columns:
+        nsd_y = animal_df[nsd_col]
+        nsd_fig.add_trace(go.Scatter(
+            x=animal_df["timestamp"], y=nsd_y,
+            mode="lines+markers", name="NSD",
+            line={"color": "#cfcfcf", "width": 1.2},
+            marker={"color": marker_colors_list, "size": 3.5},
+        ))
+        _add_overlays(nsd_fig, nsd_y)
     nsd_fig.update_layout(
         template="plotly_dark",
+        uirevision=selected_animal,
         title=f"NSD — {selected_animal}",
-        xaxis_title="Date",
-        yaxis_title="NSD (km²)",
-        # NSD is squared displacement, so it is non-negative by definition.
-        # rangemode='nonnegative' keeps zoom from dipping below zero.
+        xaxis_title="", yaxis_title="NSD (km²)",
         yaxis={"rangemode": "nonnegative"},
-        # Drag = pan (cursor becomes a grabbing hand), not box-zoom. Wheel
-        # still zooms via scrollZoom on the dcc.Graph config.
         dragmode="pan",
         margin={"l": 50, "r": 20, "t": 40, "b": 40},
         legend={"orientation": "h"},
     )
 
-    # ---- Displacement plot (middle) ----
+    # ---- Displacement plot ----
     disp_fig = go.Figure()
+    disp_y = None
     if disp_col and disp_col in animal_df.columns:
-        disp_fig.add_trace(
-            go.Scatter(
-                x=animal_df["timestamp"],
-                y=animal_df[disp_col],
-                mode="lines",
-                name="Displacement",
-                line={"color": "#cfcfcf", "width": 1.2},
-            )
-        )
+        disp_y = animal_df[disp_col]
+        disp_fig.add_trace(go.Scatter(
+            x=animal_df["timestamp"], y=disp_y,
+            mode="lines+markers", name="Displacement",
+            line={"color": "#cfcfcf", "width": 1.2},
+            marker={"color": marker_colors_list, "size": 3.5},
+        ))
+        _add_overlays(disp_fig, disp_y)
     disp_fig.update_layout(
         template="plotly_dark",
+        uirevision=selected_animal,
         title="Displacement (km)",
-        xaxis_title="",
-        yaxis_title="km",
+        xaxis_title="", yaxis_title="km",
         dragmode="pan",
         margin={"l": 50, "r": 20, "t": 30, "b": 30},
+        legend={"orientation": "h"},
     )
 
     # ---- Speed plot ----
     speed_fig = go.Figure()
+    speed_y = None
     if "speed" in animal_df.columns:
-        speed_kmh = animal_df["speed"] * 3.6
-        speed_fig.add_trace(
-            go.Scatter(
-                x=animal_df["timestamp"],
-                y=speed_kmh,
-                mode="lines",
-                name="Speed",
-                line={"color": "#cfcfcf", "width": 1},
-            )
-        )
+        speed_y = animal_df["speed"] * 3.6
+        speed_fig.add_trace(go.Scatter(
+            x=animal_df["timestamp"], y=speed_y,
+            mode="lines+markers", name="Speed",
+            line={"color": "#cfcfcf", "width": 1},
+            marker={"color": marker_colors_list, "size": 3.5},
+        ))
+        _add_overlays(speed_fig, speed_y)
     speed_fig.update_layout(
         template="plotly_dark",
+        uirevision=selected_animal,
         title="Speed (km/h)",
-        xaxis_title="Date",
-        yaxis_title="km/h",
+        xaxis_title="", yaxis_title="km/h",
         dragmode="pan",
         margin={"l": 50, "r": 20, "t": 30, "b": 30},
+        legend={"orientation": "h"},
     )
 
     # ---- Elevation plot ----
     elev_fig = go.Figure()
+    elev_y = None
     if "elevation_m" in animal_df.columns and animal_df["elevation_m"].notna().any():
-        elev_fig.add_trace(
-            go.Scatter(
-                x=animal_df["timestamp"],
-                y=animal_df["elevation_m"],
-                mode="lines",
-                name="Elevation",
-                line={"color": "#cfcfcf", "width": 1},
-            )
-        )
+        elev_y = animal_df["elevation_m"]
+        elev_fig.add_trace(go.Scatter(
+            x=animal_df["timestamp"], y=elev_y,
+            mode="lines+markers", name="Elevation",
+            line={"color": "#cfcfcf", "width": 1},
+            marker={"color": marker_colors_list, "size": 3.5},
+        ))
+        _add_overlays(elev_fig, elev_y)
         elev_title = "Elevation (m)"
     else:
         elev_title = "Elevation — not sampled (enable in Tab 1 raster variables)"
     elev_fig.update_layout(
         template="plotly_dark",
+        uirevision=selected_animal,
         title=elev_title,
-        xaxis_title="Date",
-        yaxis_title="m",
+        xaxis_title="", yaxis_title="m",
         dragmode="pan",
         margin={"l": 50, "r": 20, "t": 30, "b": 30},
+        legend={"orientation": "h"},
     )
 
     # Set x-axis range to bio-year window on all charts. Also stash the exact
@@ -4917,18 +5165,19 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_over
         # Defensive — never let a malformed migtime row break the render path.
         active_by_slot = {}
 
-    # Shade the bands from the migtime windows, labelled with the friendly name.
+    # Shade the bands from the migtime windows on ALL charts.
     for slot0, win in sorted(active_by_slot.items()):
-        nsd_fig.add_vrect(
-            x0=win["start"],
-            x1=win["end"],
-            fillcolor=SEQ_COLORS[slot0 % len(SEQ_COLORS)],
-            opacity=0.15,
-            layer="below",
-            line_width=0,
-            annotation_text=_label(slot0),
-            annotation_position="top left",
-        )
+        for _fig in (nsd_fig, disp_fig, speed_fig, elev_fig):
+            _fig.add_vrect(
+                x0=win["start"],
+                x1=win["end"],
+                fillcolor=SEQ_COLORS[slot0 % len(SEQ_COLORS)],
+                opacity=0.45,
+                layer="below",
+                line_width=0,
+                annotation_text=_label(slot0),
+                annotation_position="top left",
+            )
 
     if seq_cleared:
         confidence_text = (
@@ -5874,7 +6123,13 @@ def navigate_animals(prev_clicks, next_clicks, options, current_value):
         idx = min(len(values) - 1, idx + 1)
 
     value = values[idx]
-    progress_text = f"Reviewed {idx + 1} of {len(values)} animals"
+    if idx + 1 == len(values):
+        progress_text = (
+            f"Reviewed {idx + 1} of {len(values)} animals — all animals reviewed. "
+            "Export the updated migtime table, then move to Tab 3 to run models."
+        )
+    else:
+        progress_text = f"Reviewed {idx + 1} of {len(values)} animals"
     return value, idx, progress_text
 
 
@@ -6067,6 +6322,14 @@ def _build_animal_map_entry(grp: pd.DataFrame) -> dict | None:
         grp["mortality_flag"].fillna(0).astype(int).to_numpy()
         if "mortality_flag" in grp.columns else np.zeros(n, dtype=int)
     )
+    problem_reason_arr = (
+        grp["problem_reason"].fillna("").astype(str).tolist()
+        if "problem_reason" in grp.columns else [""] * n
+    )
+    mortality_reason_arr = (
+        grp["mortality_reason"].fillna("").astype(str).tolist()
+        if "mortality_reason" in grp.columns else [""] * n
+    )
 
     return {
         "center": ctr,
@@ -6079,6 +6342,8 @@ def _build_animal_map_entry(grp: pd.DataFrame) -> dict | None:
         "env_vars": env_vars,
         "problem": problem_arr,
         "mortality": mortality_arr,
+        "problem_reason": problem_reason_arr,
+        "mortality_reason": mortality_reason_arr,
     }
 
 
@@ -6156,6 +6421,8 @@ def _build_point_geojson(cache_entry, migtime_json=None, animal_key=None):
     env_vars = cache_entry.get("env_vars", {})
     problem_arr = cache_entry.get("problem", np.zeros(n, dtype=int))
     mortality_arr = cache_entry.get("mortality", np.zeros(n, dtype=int))
+    problem_reason = cache_entry.get("problem_reason", [""] * n)
+    mortality_reason = cache_entry.get("mortality_reason", [""] * n)
 
     # Subsample points for the browser
     step = max(1, n // 3000)
@@ -6163,19 +6430,17 @@ def _build_point_geojson(cache_entry, migtime_json=None, animal_key=None):
 
     features = []
     for i in idx:
-        # Decide a flag label so the iframe can draw the appropriate outline.
-        # mortality takes priority over problem since it's a stronger marker.
         if int(mortality_arr[i]) == 1:
             flag = "mortality"
         elif int(problem_arr[i]) == 1:
             flag = "problem"
         else:
             flag = ""
-        # Property keys are abbreviated ("c"=color, "d"=date, "f"=flag) to
-        # keep the GeoJSON payload small — multiply by tens of thousands of
-        # features and the difference between "color" and "c" matters. The
-        # MapLibre layer in assets/maplibre_map.html reads these short keys.
         props = {"c": colors[i], "d": ts_iso[i], "f": flag}
+        if problem_reason[i]:
+            props["pr"] = problem_reason[i]
+        if mortality_reason[i]:
+            props["mr"] = mortality_reason[i]
         for vk, varr in env_vars.items():
             v = varr[i]
             if np.isfinite(v):
@@ -6748,20 +7013,7 @@ app.clientside_callback(
     prevent_initial_call=False,
 )
 def render_model_params(model, processed_json):
-    """Render dynamic parameter panel based on selected model.
-
-    Every method has its own slug of dbc.Input/Dropdown widgets with
-    pattern-matching ids ``{"type": "model-param", "key": "bbmm_bmvar"}`` etc.
-    When the user switches methods, the entire `model-param-panel` is replaced —
-    the old widgets cease to exist. run_modeling reads them with an
-    ``ALL``-matched State, which matches only the inputs currently present (a
-    plain string State on an absent id raises "nonexistent object").
-
-    The auto-logic line surfaces *implicit* parameter overrides decided by
-    modeling.get_model_config — currently just "BMVar auto-set to 1000 at
-    coarse fix rates" — so the user knows when a defaulted value isn't the
-    nominal default.
-    """
+    """Render dynamic parameter panel based on selected model."""
     auto_logic = ""
 
     # Check fix rate from data for auto-logic hints
@@ -6779,7 +7031,11 @@ def render_model_params(model, processed_json):
     if model == "BBMM":
         auto_logic = fix_rate_msg or "Fix rate ≤ 12h: BMVar will be estimated automatically"
         panel = [
-            dbc.Label("Brownian Motion Variance (BMVar)", style={"fontSize": "0.85rem"}),
+            _info_label("Brownian Motion Variance (BMVar)",
+                       "Controls the expected movement variance of the animal. "
+                       "When left blank, it is estimated from the data (recommended for most datasets). "
+                       "Set manually for coarse fix-rate data.",
+                       "Auto (leave blank)"),
             dbc.InputGroup(
                 [
                     dbc.Input(id={"type": "model-param", "key": "bbmm_bmvar"}, type="number", placeholder="Auto (estimate)", min=0),
@@ -6817,38 +7073,51 @@ def render_model_params(model, processed_json):
                 "Has no effect unless a BMVar number is entered above.",
                 className="text-muted d-block mb-2", style={"fontSize": "0.7rem"},
             ),
-            dbc.Label("Location Error (m)", style={"fontSize": "0.85rem"}),
+            _info_label("Location Error (m)",
+                       "GPS measurement error in meters. Accounts for positional inaccuracy of the collar.",
+                       "20 m"),
             dbc.Input(id={"type": "model-param", "key": "bbmm_loc_error"}, type="number", value=20, min=0, className="mb-2"),
-            dbc.Label("Max Lag (hours)", style={"fontSize": "0.85rem"}),
+            _info_label("Max Lag (hours)",
+                       "Maximum time gap (in hours) between consecutive fixes before the segment is treated "
+                       "as a break. Gaps larger than this are excluded from variance estimation.",
+                       "27 hours"),
             dbc.Input(id={"type": "model-param", "key": "bbmm_max_lag"}, type="number", value=27, min=0, className="mb-2"),
-            dbc.Label("Time Step (min)", style={"fontSize": "0.85rem"}),
+            _info_label("Time Step (min)",
+                       "Interval (in minutes) at which the movement path is interpolated between fixes. "
+                       "Smaller values produce smoother UDs (Utilization Distributions; probability density) but increase computation time.",
+                       "5 min"),
             dbc.Input(id={"type": "model-param", "key": "bbmm_timestep"}, type="number", value=5, min=1, className="mb-2"),
-            dbc.Label("Contour (%)", style={"fontSize": "0.85rem"}),
+            _info_label("Contour (%)",
+                       "Percentage of the UD (Utilization Distribution; probability density) volume to retain. Defines the boundary of the utilization "
+                       "distribution — e.g., 99% captures nearly all estimated use.",
+                       "99%"),
             dbc.Input(id={"type": "model-param", "key": "bbmm_contour"}, type="number", value=99, min=50, max=100, step=0.001, className="mb-2"),
-            dbc.Label("Grid buffer (mult4buff)", style={"fontSize": "0.85rem"}),
-            dbc.Input(id={"type": "model-param", "key": "bbmm_mult4buff"}, type="number", value=0.2, min=0, max=2, step=0.05, className="mb-1"),
-            html.Small(
-                "Fraction of the sequence's extent added as a margin when carving the analysis "
-                "subgrid.",
-                className="text-muted d-block mb-2", style={"fontSize": "0.7rem"},
-            ),
+            _info_label("Grid buffer — mult4buff",
+                       "Fraction of the sequence's spatial extent added as a margin when carving the "
+                       "analysis subgrid. Prevents edge effects by ensuring the UD (Utilization Distribution; probability density) grid extends beyond "
+                       "the outermost fixes.\n\n"
+                       "Simply, mult4buff is the amount of buffer added around each sequence during "
+                       "modeling, so with a buffer of 0.2, the subgrid extends 20% of the sequence's "
+                       "spatial range.",
+                       "0.2"),
+            dbc.Input(id={"type": "model-param", "key": "bbmm_mult4buff"}, type="number", value=0.2, min=0, max=2, step=0.05, className="mb-2"),
             html.Hr(className="my-2"),
             dbc.Label("Extra BBMM outputs", style={"fontSize": "0.85rem", "fontWeight": "bold"}),
             dbc.Checkbox(
                 id={"type": "model-param", "key": "bbmm_individual"},
-                label="Per-individual UDs (per season + combined)",
+                label="Per-individual UDs (utilization distributions) (per season + combined)",
                 value=True,
                 style={"fontSize": "0.8rem"},
             ),
             dbc.Checkbox(
                 id={"type": "model-param", "key": "bbmm_ranges"},
-                label="Intermediate range UDs (mean-UD density, e.g., Summer and Winter range UDs)",
+                label="Intermediate range UDs (mean-UD density, e.g., Summer and Winter range utilization distributions)",
                 value=True,
                 style={"fontSize": "0.8rem"},
             ),
             dbc.Checkbox(
                 id={"type": "model-param", "key": "bbmm_year_summaries"},
-                label="Per-year summaries (banded outputs by bio-year — extends processing time)",
+                label="Per-year summaries (stacked outputs by bio-year — extends processing time)",
                 value=False,
                 style={"fontSize": "0.8rem"},
             ),
@@ -6920,20 +7189,40 @@ def render_model_params(model, processed_json):
                 className="text-muted d-block mb-2",
                 style={"fontSize": "0.7rem"},
             ),
-            dbc.Label("Window Size (fixes)", style={"fontSize": "0.85rem"}),
+            _info_label("Window Size (fixes)",
+                       "Number of consecutive fixes used in each sliding window to estimate local "
+                       "Brownian motion variance. Must be odd. Larger windows smooth out short-term "
+                       "variation; smaller windows capture behavioral changes more quickly.",
+                       "31 fixes"),
             dbc.Input(id={"type": "model-param", "key": "dbbmm_window"}, type="number", value=31, min=3, step=2, className="mb-2"),
-            dbc.Label("Margin (fixes)", style={"fontSize": "0.85rem"}),
+            _info_label("Margin (fixes)",
+                       "Number of fixes on each side of the window center that are excluded from "
+                       "the variance estimate but still used for interpolation. Helps avoid edge "
+                       "effects within the sliding window.",
+                       "11 fixes"),
             dbc.Input(id={"type": "model-param", "key": "dbbmm_margin"}, type="number", value=11, min=1, className="mb-2"),
-            dbc.Label("Location Error (m)", style={"fontSize": "0.85rem"}),
+            _info_label("Location Error (m)",
+                       "GPS measurement error in meters. Accounts for positional inaccuracy of the collar.",
+                       "20 m"),
             dbc.Input(id={"type": "model-param", "key": "dbbmm_loc_error"}, type="number", value=20, min=0, className="mb-2"),
-            dbc.Label("Contour (%)", style={"fontSize": "0.85rem"}),
+            _info_label("Contour (%)",
+                       "Percentage of the UD (Utilization Distribution; probability density) volume to retain. Defines the boundary of the utilization "
+                       "distribution.",
+                       "99%"),
             dbc.Input(id={"type": "model-param", "key": "dbbmm_contour"}, type="number", value=99, min=50, max=100, className="mb-2"),
         ]
     elif model == "Kernel":
         panel = [
-            dbc.Label("Bandwidth (auto = Scott's rule)", style={"fontSize": "0.85rem"}),
+            _info_label("Bandwidth (auto = Scott's rule)",
+                       "Smoothing bandwidth for the kernel density estimate. Controls how spread out "
+                       "each point's contribution is. When left blank, Scott's rule is used to choose "
+                       "an optimal bandwidth from the data.",
+                       "Auto (leave blank)"),
             dbc.Input(id={"type": "model-param", "key": "kernel_bw"}, type="number", placeholder="Auto", min=0, className="mb-2"),
-            dbc.Label("Contour (%)", style={"fontSize": "0.85rem"}),
+            _info_label("Contour (%)",
+                       "Percentage of the UD (Utilization Distribution; probability density) volume to retain. Defines the boundary of the utilization "
+                       "distribution.",
+                       "99%"),
             dbc.Input(id={"type": "model-param", "key": "kernel_contour"}, type="number", value=99, min=50, max=100, className="mb-2"),
         ]
     elif model == "CTMM":
@@ -6975,7 +7264,11 @@ def render_model_params(model, processed_json):
                 className="text-muted d-block mb-2",
                 style={"fontSize": "0.7rem"},
             ),
-            dbc.Label("Info Criterion", style={"fontSize": "0.85rem"}),
+            _info_label("Info Criterion",
+                       "Information criterion used for model selection. CTMM fits multiple movement "
+                       "models and picks the best one using this criterion. AICc is recommended for "
+                       "smaller sample sizes; AIC and BIC are standard alternatives.",
+                       "AIC"),
             dcc.Dropdown(
                 id={"type": "model-param", "key": "ctmm_criterion"},
                 options=[
@@ -6987,18 +7280,34 @@ def render_model_params(model, processed_json):
                 clearable=False,
                 className="mb-2",
             ),
-            dbc.Label("Contour (%)", style={"fontSize": "0.85rem"}),
+            _info_label("Contour (%)",
+                       "Percentage of the UD (Utilization Distribution; probability density) volume to retain. Defines the boundary of the utilization "
+                       "distribution.",
+                       "99%"),
             dbc.Input(id={"type": "model-param", "key": "ctmm_contour"}, type="number", value=99, min=50, max=100, className="mb-2"),
         ]
     elif model == "LineBuffer":
         panel = [
-            dbc.Label("Buffer Distance (m)", style={"fontSize": "0.85rem"}),
+            _info_label("Buffer Distance (m)",
+                       "Total width of the buffer applied around each migration line segment. "
+                       "Half the distance is applied on each side of the line. Buffers are stacked "
+                       "across individuals to create a corridor density surface.",
+                       "300 m"),
             dbc.Input(id={"type": "model-param", "key": "linebuf_dist"}, type="number", value=300, min=10, className="mb-2"),
         ]
     else:
         panel = [html.Span("Select a model to see parameters.", className="text-muted small")]
 
     return panel, auto_logic
+
+
+@app.callback(
+    Output("auto-flagging-collapse", "is_open"),
+    Input("auto-flagging-toggle", "value"),
+    prevent_initial_call=True,
+)
+def toggle_auto_flagging(checked):
+    return bool(checked)
 
 
 @app.callback(
@@ -7527,7 +7836,7 @@ def _run_modeling_impl(
                     )
 
         # MigLines / MigPoints / MigLines_Dist shapefiles — written next to
-        # the BBMM tifs under BBMM_Output/. Schema mirrors the WMI canonical.
+        # the BBMM tifs under {herd}_Primary_Outputs/. Schema mirrors the WMI canonical.
         if _ACTIVE_WORKDIR is not None:
             try:
                 herd_id = "Herd"
@@ -7541,13 +7850,13 @@ def _run_modeling_impl(
                         bio_day = int(cfg_obj.get("bio_year_start_day", 1) or 1)
                 import datetime as _dt
                 date_stamp = _dt.datetime.now().strftime("%m%d%y")
-                bbmm_dir = _workdir_version() / "BBMM_Output"
-                bbmm_dir.mkdir(parents=True, exist_ok=True)
+                prim_dir = _workdir_version() / f"{herd_id}_Primary_Outputs"
+                prim_dir.mkdir(parents=True, exist_ok=True)
                 mig_written = write_mig_outputs(
                     processed_df=df,
                     migtime_df=migtime,
                     sequences_dict=sequences_dict,
-                    out_dir=bbmm_dir,
+                    out_dir=prim_dir,
                     herd_id=herd_id,
                     date_stamp=date_stamp,
                     seq_labels=seq_labels,
@@ -7672,7 +7981,7 @@ def _run_modeling_impl(
             _vdir = _workdir_version()
             log_lines.append(
                 f"Outputs: ModelOutputs/{_vdir.name}/UDs, /Footprints  "
-                "(+ BBMM_Output/ after population step)"
+                f"(+ {herd_id}_Primary_Outputs/ after population step)"
             )
         _append_processing_log(log_lines, header="MODEL RUN")
 
@@ -8171,13 +8480,13 @@ def generate_pop_outputs(
 
         # ----- Build every population product IN MEMORY (fully deferred) -------
         # Nothing is written to disk here. We compute the merged contours and the
-        # per-season banded set, stash them in _POP_OUTPUT_CACHE, and let Tab 5
+        # per-season stacked set, stash them in _POP_OUTPUT_CACHE, and let Tab 5
         # flush the user-selected subset to ModelOutputs/ on demand. wrote_lines /
-        # banded_summary now describe what's READY to export, not what was saved.
+        # stacked_summary now describe what's READY to export, not what was saved.
         wrote_lines: list[str] = []
-        banded_summary: list[str] = []
+        stacked_summary: list[str] = []
 
-        # Pull herd_id (DAU / Project) from the processing config so banded
+        # Pull herd_id (DAU / Project) from the processing config so stacked
         # filenames follow <herd>_BBMM_<season>_<date>.<...>.
         herd_id = "Herd"
         try:
@@ -8224,10 +8533,10 @@ def generate_pop_outputs(
             })
             wrote_lines.append(f"Contours/Footprint_contours.shp  ({len(pop_foot_gdf)} polygons)")
 
-        # Per-season banded products + one combined "All" pass.
-        def _collect_banded(season_label: str, season_ud: dict[str, np.ndarray]) -> None:
+        # Per-season stacked products + one combined "All" pass.
+        def _collect_stacked(season_label: str, season_ud: dict[str, np.ndarray]) -> None:
             try:
-                prods = compute_season_banded_products(
+                prods = compute_season_stacked_products(
                     ud_dict=season_ud, grid_meta=pop_grid,
                     herd_id=herd_id, season_label=season_label, date_stamp=date_stamp,
                     min_individuals=min_ind_tuple,
@@ -8238,25 +8547,25 @@ def generate_pop_outputs(
                     smooth_bandwidth=pop_config["smooth_bandwidth"],
                 )
             except Exception as e:
-                banded_summary.append(f"⚠ {season_label} banded compute failed: {e}")
+                stacked_summary.append(f"⚠ {season_label} stacked compute failed: {e}")
                 return
             for p in prods:
                 cache_products.append({
-                    "id": f"banded::{season_label}::{p['key']}",
+                    "id": f"stacked::{season_label}::{p['key']}",
                     "label": p["label"],
-                    "category": f"Banded outputs — {season_label}",
-                    "rel_dir": "BBMM_Output", "filename": p["filename"],
+                    "category": f"Stacked outputs — {season_label}",
+                    "rel_dir": f"{herd_id}_Primary_Outputs", "filename": p["filename"],
                     "kind": p["kind"],
                     "array": p.get("array"), "gdf": p.get("gdf"),
                 })
-            banded_summary.append(
+            stacked_summary.append(
                 f"{season_label}: {len(prods)} products ({len(season_ud)} individuals)"
             )
 
         for season_label, season_ud_dict in ud_by_season.items():
-            _collect_banded(season_label, season_ud_dict)
+            _collect_stacked(season_label, season_ud_dict)
         if len(ud_by_season) > 1:
-            _collect_banded("All", ud_dict)
+            _collect_stacked("All", ud_dict)
 
         # ---- Year summaries (by bio-year) ----
         year_summary_lines: list[str] = []
@@ -8275,7 +8584,7 @@ def generate_pop_outputs(
                         season_yr_ud[aid] = np.mean(np.stack(ud_list, axis=0), axis=0) if len(ud_list) > 1 else ud_list[0]
                     if season_yr_ud:
                         try:
-                            prods = compute_season_banded_products(
+                            prods = compute_season_stacked_products(
                                 ud_dict=season_yr_ud, grid_meta=pop_grid,
                                 herd_id=herd_id, season_label=slbl,
                                 date_stamp=by,
@@ -8310,7 +8619,7 @@ def generate_pop_outputs(
                             all_season_yr_ud[aid] = mean_ud
                 if all_season_yr_ud:
                     try:
-                        prods = compute_season_banded_products(
+                        prods = compute_season_stacked_products(
                             ud_dict=all_season_yr_ud, grid_meta=pop_grid,
                             herd_id=herd_id, season_label="All",
                             date_stamp=by,
@@ -8355,7 +8664,7 @@ def generate_pop_outputs(
                     f"Bio-year {by}: {n_seasons_yr} season(s), {n_animals_yr} individual(s)"
                 )
         if year_summary_lines:
-            banded_summary.append("Year summaries: " + "; ".join(year_summary_lines))
+            stacked_summary.append("Year summaries: " + "; ".join(year_summary_lines))
 
         # Stash payloads in the process-local cache; build a JSON-safe manifest
         # (no arrays/gdfs) for the Tab 5 store so it can render the checkboxes.
@@ -8423,11 +8732,11 @@ def generate_pop_outputs(
                 ),
             ]), className="mb-2")
 
-        banded_card = None
-        if banded_summary:
-            banded_card = dbc.Card(dbc.CardBody([
-                html.H6("Per-season banded outputs (BBMM_Output/) — ready to export", className="text-info"),
-                html.Ul([html.Li(line) for line in banded_summary]),
+        stacked_card = None
+        if stacked_summary:
+            stacked_card = dbc.Card(dbc.CardBody([
+                html.H6(f"Per-season stacked outputs ({herd_id}_Primary_Outputs/) — ready to export", className="text-info"),
+                html.Ul([html.Li(line) for line in stacked_summary]),
                 html.Small(
                     "For each season: mean UD .tif, _all isopleths .shp, "
                     "_minimum1/_minimum2/_minimum3 (overlap thresholds), _top10/_top20 (UD volume), "
@@ -8440,8 +8749,8 @@ def generate_pop_outputs(
         preview_children = []
         if wrote_card is not None:
             preview_children.append(wrote_card)
-        if banded_card is not None:
-            preview_children.append(banded_card)
+        if stacked_card is not None:
+            preview_children.append(stacked_card)
         preview_children.append(_contour_table(pop_use_gdf, "Population Use Contours"))
         preview_children.append(_contour_table(pop_foot_gdf, "Population Footprint Contours"))
         preview = html.Div(preview_children)
@@ -8485,8 +8794,8 @@ def generate_pop_outputs(
                 lines.append(f"Export target (on Tab 5): ModelOutputs/{_workdir_version().name}/")
                 for wl in wrote_lines:
                     lines.append(f"    {wl}")
-                for bs in banded_summary:
-                    lines.append(f"    BBMM_Output/{bs}")
+                for bs in stacked_summary:
+                    lines.append(f"    {herd_id}_Primary_Outputs/{bs}")
             _append_processing_log(lines, header="POPULATION OUTPUTS")
 
         if n_use == 0 and n_foot == 0:
@@ -8683,13 +8992,23 @@ def _raster_to_overlay(tif_path: "Path", cmap: str = "viridis"):
 
 # Raster-bearing output subfolders, in display order. category values are
 # version-qualified ("V{n}/<sub>") so the user can view any version's rasters.
-_RASTER_CATEGORIES = [
+_RASTER_CATEGORIES_STATIC = [
     ("UDs", "UD (per sequence)"),
-    ("BBMM_Output", "Population (banded)"),
     ("IndividualUDs", "Individual UD"),
     ("RangeUDs", "Range UD"),
     ("YearSummaries", "Year summary"),
 ]
+
+def _primary_output_dir(vdir: Path) -> tuple[Path, str] | None:
+    """Find the primary outputs folder — either {Herd}_Primary_Outputs (new)
+    or BBMM_Output (legacy). Returns (path, folder_name) or None."""
+    for d in sorted(vdir.iterdir()) if vdir.is_dir() else []:
+        if d.is_dir() and d.name.endswith("_Primary_Outputs"):
+            return d, d.name
+    legacy = vdir / "BBMM_Output"
+    if legacy.is_dir():
+        return legacy, "BBMM_Output"
+    return None
 
 
 @app.callback(
@@ -8717,7 +9036,8 @@ def build_raster_tree(active_tab, _model_results, _pop, _clear):
     groups = []
     for v in _list_versions():
         vdir = _resolve_version_dir(_ACTIVE_WORKDIR, v)
-        for sub, label in _RASTER_CATEGORIES:
+        # Static categories
+        for sub, label in _RASTER_CATEGORIES_STATIC:
             d = vdir / sub
             if not d.is_dir():
                 continue
@@ -8730,6 +9050,17 @@ def build_raster_tree(active_tab, _model_results, _pop, _clear):
                 {"label": t.stem, "value": str(t)} for t in tifs
             ]
             groups.append((group_key, group_label, options))
+        # Primary outputs folder (dynamic name or legacy BBMM_Output)
+        prim = _primary_output_dir(vdir)
+        if prim:
+            prim_dir, prim_name = prim
+            tifs = sorted(prim_dir.rglob("*.tif"), key=lambda p: p.name.lower())
+            if tifs:
+                groups.append((
+                    f"{vdir.name}/{prim_name}",
+                    f"{vdir.name} · Population (stacked)",
+                    [{"label": t.stem, "value": str(t)} for t in tifs],
+                ))
 
     if _POP_OUTPUT_CACHE.get("products"):
         mem_groups: dict[str, list] = {}
@@ -9352,18 +9683,16 @@ _REPORT_OPTION_ID = "report::processing_report"
 
 
 @app.callback(
-    Output("export-checklist", "options"),
-    Output("export-checklist", "value"),
+    Output("export-checklist-wrap", "children"),
     Output("export-checklist-empty", "style"),
     Input("store-pop-outputs", "data"),
     prevent_initial_call=False,
 )
 def populate_export_checklist(pop_json):
     """Rebuild the Tab 5 export checklist from the population-output manifest
-    stashed in store-pop-outputs by Tab 4. Options are grouped by category
-    (preserving first-seen order); the processing report is always offered.
-    Everything is ticked by default. The empty-state hint shows only when Tab 4
-    has produced no population products yet."""
+    stashed in store-pop-outputs by Tab 4. Items are grouped by kind
+    (Vector → Raster) then category. Everything is ticked by default.
+    The empty-state hint shows only when Tab 4 has produced no products yet."""
     manifest = []
     if pop_json:
         try:
@@ -9372,43 +9701,93 @@ def populate_export_checklist(pop_json):
         except Exception:
             manifest = []
 
-    options = []
-    by_cat: dict[str, list] = {}
-    cat_order: list[str] = []
+    # Group by kind, then by category (preserving first-seen order).
+    kind_order = ["vector", "raster"]
+    kind_labels = {"vector": "Vector", "raster": "Raster"}
+    by_kind: dict[str, dict[str, list]] = {k: {} for k in kind_order}
+    cat_order_by_kind: dict[str, list[str]] = {k: [] for k in kind_order}
     for m in manifest:
+        kind = m.get("kind", "vector")
         cat = m.get("category", "Outputs")
-        if cat not in by_cat:
-            by_cat[cat] = []
-            cat_order.append(cat)
-        by_cat[cat].append(m)
-    for cat in cat_order:
-        for m in by_cat[cat]:
-            options.append({"label": f"[{cat}] {m['label']}", "value": m["id"]})
+        if kind not in by_kind:
+            by_kind[kind] = {}
+            cat_order_by_kind[kind] = []
+            kind_order.append(kind)
+        if cat not in by_kind[kind]:
+            by_kind[kind][cat] = []
+            cat_order_by_kind[kind].append(cat)
+        by_kind[kind][cat].append(m)
 
-    # The processing report is independent of the population cache — always
-    # offered as long as processed data exists at export time.
-    options.append({
-        "label": "[Report] Processing report (processing_report.txt)",
-        "value": _REPORT_OPTION_ID,
-    })
+    all_options = []
+    group_idx = 0
+    children = []
+    for kind in kind_order:
+        cats = cat_order_by_kind.get(kind, [])
+        if not cats:
+            continue
+        children.append(html.Div(
+            kind_labels.get(kind, kind),
+            style={"fontSize": "0.82rem", "fontWeight": "bold",
+                    "color": "#9ecfff", "marginTop": "6px", "marginBottom": "2px"},
+        ))
+        for cat in cats:
+            children.append(html.Div(
+                cat,
+                style={"fontSize": "0.76rem", "fontWeight": "600",
+                        "color": "#aaa", "marginLeft": "6px",
+                        "marginTop": "4px", "marginBottom": "1px"},
+            ))
+            cat_options = []
+            for m in by_kind[kind][cat]:
+                opt = {"label": m["label"], "value": m["id"]}
+                cat_options.append(opt)
+                all_options.append(opt)
+            children.append(dcc.Checklist(
+                id={"type": "export-group", "index": group_idx},
+                options=cat_options,
+                value=[o["value"] for o in cat_options],
+                inputClassName="me-2",
+                labelStyle={"display": "block", "fontSize": "0.78rem",
+                            "marginBottom": "2px", "color": "white",
+                            "marginLeft": "12px"},
+            ))
+            group_idx += 1
 
-    value = [o["value"] for o in options]  # default: all ticked
+    # Processing report — always offered.
+    report_opt = {"label": "Processing report (processing_report.txt)",
+                  "value": _REPORT_OPTION_ID}
+    all_options.append(report_opt)
+    children.append(html.Div(
+        "Report",
+        style={"fontSize": "0.82rem", "fontWeight": "bold",
+                "color": "#9ecfff", "marginTop": "6px", "marginBottom": "2px"},
+    ))
+    children.append(dcc.Checklist(
+        id={"type": "export-group", "index": group_idx},
+        options=[report_opt],
+        value=[report_opt["value"]],
+        inputClassName="me-2",
+        labelStyle={"display": "block", "fontSize": "0.78rem",
+                    "marginBottom": "2px", "color": "white",
+                    "marginLeft": "12px"},
+    ))
+
     empty_style = {"display": "none"} if manifest else {"display": "block"}
-    return options, value, empty_style
+    return children, empty_style
 
 
 @app.callback(
-    Output("export-checklist", "value", allow_duplicate=True),
+    Output({"type": "export-group", "index": dash.ALL}, "value", allow_duplicate=True),
     Input("btn-export-select-all", "n_clicks"),
     Input("btn-export-clear", "n_clicks"),
-    State("export-checklist", "options"),
+    State({"type": "export-group", "index": dash.ALL}, "options"),
     prevent_initial_call=True,
 )
-def export_select_clear(_all_clicks, _clear_clicks, options):
+def export_select_clear(_all_clicks, _clear_clicks, all_options):
     """Select-all / Clear helpers for the export checklist."""
     if ctx.triggered_id == "btn-export-select-all":
-        return [o["value"] for o in (options or [])]
-    return []
+        return [[o["value"] for o in (grp or [])] for grp in all_options]
+    return [[] for _ in all_options]
 
 
 def _write_processing_report(df, out_path: Path) -> str:
@@ -9434,7 +9813,7 @@ def _write_processing_report(df, out_path: Path) -> str:
     Output("export-status", "children"),
     Input("btn-export-selected", "n_clicks"),
     Input("btn-export-all", "n_clicks"),
-    State("export-checklist", "value"),
+    State({"type": "export-group", "index": dash.ALL}, "value"),
     State("export-dir", "value"),
     State("store-processed-data", "data"),
     State("store-workdir", "data"),
@@ -9443,8 +9822,9 @@ def _write_processing_report(df, out_path: Path) -> str:
     State("store-seq-names", "data"),
     prevent_initial_call=True,
 )
-def handle_export(selected_clicks, all_clicks, checked_ids, out_dir, processed_json, workdir_path,
+def handle_export(selected_clicks, all_clicks, group_values, out_dir, processed_json, workdir_path,
                   migtime_json, config_json, seq_names):
+    checked_ids = [v for grp in (group_values or []) for v in (grp or [])]
     """Flush population outputs from the in-memory _POP_OUTPUT_CACHE to disk.
 
     "Export Selected" writes only the ticked checklist items; "Export All"
@@ -9574,13 +9954,13 @@ def handle_export(selected_clicks, all_clicks, checked_ids, out_dir, processed_j
                 s_labels = _MODEL_CACHE.get("seq_labels") or seq_names or []
                 utm_crs_str = _MODEL_CACHE.get("utm_crs")
                 target_crs = utm_crs_str
-                bbmm_dir = out_path / "BBMM_Output"
-                bbmm_dir.mkdir(parents=True, exist_ok=True)
+                prim_dir = out_path / f"{herd_id}_Primary_Outputs"
+                prim_dir.mkdir(parents=True, exist_ok=True)
                 mig_written = write_mig_outputs(
                     processed_df=proc_df,
                     migtime_df=mig_df,
                     sequences_dict=sequences_dict,
-                    out_dir=bbmm_dir,
+                    out_dir=prim_dir,
                     herd_id=herd_id,
                     date_stamp=date_stamp,
                     seq_labels=s_labels,
@@ -9589,7 +9969,7 @@ def handle_export(selected_clicks, all_clicks, checked_ids, out_dir, processed_j
                     target_crs=target_crs,
                 )
                 for label, p in mig_written.items():
-                    exported.append(f"BBMM_Output/{p.name}")
+                    exported.append(f"{herd_id}_Primary_Outputs/{p.name}")
         except Exception as e:
             failures.append(f"MigLines/MigPoints: {e}")
 
@@ -9663,4 +10043,4 @@ def handle_export(selected_clicks, all_clicks, checked_ids, out_dir, processed_j
 if __name__ == "__main__":
     if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
         threading.Timer(1.5, webbrowser.open, args=("http://127.0.0.1:8050",)).start()
-    app.run(debug=True, host="127.0.0.1", port=8050)
+    app.run(debug=False, host="127.0.0.1", port=8050)
