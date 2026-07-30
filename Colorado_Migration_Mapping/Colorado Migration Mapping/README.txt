@@ -34,7 +34,7 @@ Getting Started
 
 3. LAUNCH THE APP
 
-   Double-click  "Migration Corridor Mapper"  on your Desktop
+   Double-click the elk icon, "Migration Corridor Mapper", on your Desktop
    — or —
    Double-click  Start App.bat  in this folder
 

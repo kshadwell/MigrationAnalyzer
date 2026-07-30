@@ -116,9 +116,17 @@ echo [4/4] Creating desktop shortcut...
 
 set "SHORTCUT=%USERPROFILE%\Desktop\Migration Corridor Mapper.lnk"
 set "TARGET=%~dp0Start App.bat"
-set "ICONFILE=%SystemRoot%\System32\SHELL32.dll"
 
-powershell -NoProfile -Command "$ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut('%SHORTCUT%'); $s.TargetPath='%TARGET%'; $s.WorkingDirectory='%~dp0'; $s.IconLocation='%ICONFILE%,14'; $s.Description='Colorado Migration Corridor Mapper'; $s.Save()"
+:: Elk icon. Falls back to a generic Windows icon if the file is missing,
+:: so a stripped-down copy of the folder still gets a working shortcut.
+set "ICONFILE=%~dp0app\assets\favicon.ico"
+set "ICONIDX=0"
+if not exist "%ICONFILE%" (
+    set "ICONFILE=%SystemRoot%\System32\SHELL32.dll"
+    set "ICONIDX=14"
+)
+
+powershell -NoProfile -Command "$ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut('%SHORTCUT%'); $s.TargetPath='%TARGET%'; $s.WorkingDirectory='%~dp0'; $s.IconLocation='%ICONFILE%,%ICONIDX%'; $s.Description='Colorado Migration Corridor Mapper'; $s.Save()"
 
 if exist "%SHORTCUT%" (
     echo       Desktop shortcut created.
