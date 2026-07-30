@@ -70,7 +70,9 @@
     cursor: ew-resize;
     outline: none !important;
     box-shadow: none !important;
-    border: none !important;
+    border: 2px solid #555 !important;
+    width: 14px !important;
+    height: 14px !important;
 }
 
 .seq-range-slider .dash-slider-thumb:focus,

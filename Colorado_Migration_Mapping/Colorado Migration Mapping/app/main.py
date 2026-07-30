@@ -3687,7 +3687,10 @@ def _create_companion_file_sync(file_path: Path) -> None:
                 df["lat"] = gdf.geometry.y
             df.to_csv(companion, index=False)
     except Exception as exc:
-        logger.warning("Companion file creation failed for %s: %s", file_path, exc)
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "Companion file creation failed for %s: %s", file_path, exc
+        )
 
 
 def _create_companion_file(file_path: Path) -> None:
@@ -9190,6 +9193,7 @@ _RASTER_CATEGORIES_STATIC = [
     ("IndividualUDs", "Individual UD"),
     ("RangeUDs", "Range UD"),
     ("YearSummaries", "Year summary"),
+    ("LineBuffer", "Line Buffer"),
 ]
 
 def _primary_output_dir(vdir: Path) -> tuple[Path, str] | None:
@@ -10251,4 +10255,4 @@ if __name__ == "__main__":
     if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
         threading.Timer(1.5, webbrowser.open, args=("http://127.0.0.1:8050",)).start()
     print("Migration Corridor Mapper running at http://127.0.0.1:8050")
-    app.run(debug=False, host="127.0.0.1", port=8050)
+    app.run(debug=True, host="127.0.0.1", port=8050)
