@@ -7,8 +7,18 @@ corridors, and export shapefiles / GeoTIFFs — all in a browser tab
 on your own machine. No cloud, no account.
 
 
-Getting Started
----------------
+Which One Do I Run?
+-------------------
+
+  Never installed this before ......  Setup.bat    (see A below)
+  Already have it installed .......   Update.bat   (see B below)
+
+You can run this folder from anywhere — Downloads is fine. Update.bat
+finds your existing install and copies the new code into it.
+
+
+A. First-Time Install
+---------------------
 
 1. DOWNLOAD THE EXTERNAL DATA
 
@@ -34,17 +44,43 @@ Getting Started
 
 3. LAUNCH THE APP
 
-   Double-click the elk icon, "Migration Corridor Mapper", on your Desktop
+   Double-click the elk icon, "Migration Corridor Mapper", on your
+   Desktop
    — or —
    Double-click  Start App.bat  in this folder
 
    The app opens in your default browser at http://127.0.0.1:8050
 
 
+B. Updating an Existing Install
+-------------------------------
+
+1. Close the app if it is running.
+
+2. Double-click  Update.bat
+
+   It will:
+     - Find your current install (via your desktop shortcut, or it
+       will ask you for the folder)
+     - Show you what it is about to do and wait for you to confirm
+     - Back up your current app/ folder to _backup_<date>/
+     - Copy in the new code
+
+3. Launch as usual. Nothing else to do.
+
+   You do NOT need to re-download the 19 GB data, and you do NOT
+   need to re-run Setup.bat.
+
+Your environment_data/ folder and your saved sessions in
+app/session_data/ are never touched by an update. Once the new
+version looks good, you can delete the _backup_<date>/ folder.
+
+
 What's in This Folder
 ---------------------
 
-  Setup.bat             One-time setup (run this first)
+  Setup.bat             First-time setup
+  Update.bat            Update an install you already have
   Start App.bat         Launches the app
   README.txt            This file
   requirements.txt      Python package list
@@ -63,7 +99,8 @@ Notes
 - The app works without the environmental data — elevation, snow
   depth, and road-crossing features just won't be available.
 
-- If you move this folder, re-run Setup.bat to fix the desktop
-  shortcut. Everything else is portable (all paths are relative).
+- If you move your install folder, re-run Setup.bat to fix the
+  desktop shortcut. Everything else is portable (all paths are
+  relative).
 
 - Questions? Contact Bryan Leavelle (bryanleavelle@gmail.com).
