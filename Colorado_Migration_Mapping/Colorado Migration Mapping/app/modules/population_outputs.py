@@ -1010,8 +1010,12 @@ def compute_season_stacked_products(
         "array": mean_ud,
     })
 
+    # ---- 1b. Full extent polygon: all cells where any individual has UD > 0 ----
+    full_extent_mask = (count_grid >= 1)
+    if full_extent_mask.sum() > 0:
+        _add_mask_pair(full_extent_mask, "all", f"{season} full extent (≥1 individual)", value=1)
+
     # ---- 2. minN: cells used by ≥N individuals ----
-    # minimum1 is redundant with the "all" isopleth output, so skip it.
     # minimum2+ are rasters carrying the actual count values (not binary masks)
     # clipped to cells where count >= N, so the user sees overlap intensity.
     for n in min_individuals:
@@ -1071,19 +1075,8 @@ def compute_season_stacked_products(
                     value=int(round(stopover_pct)),
                 )
 
-    # ---- 4. "all" isopleths shapefile (% of individuals overlapping) ----
-    presence_pct = count_grid.astype(np.float64) / n_layers * 100.0
-    rows = _contours_from_grid(
-        presence_pct, transform, list(all_isopleths),
-        min_area_drop, min_area_fill, simplify, smooth_bandwidth,
-    )
-    all_gdf = _build_geodataframe(rows, src_crs, src_crs)
-    if len(all_gdf) > 0:
-        products.append({
-            "key": "all", "kind": "vector",
-            "filename": f"{prefix}_all.shp", "label": f"{season} isopleth contours",
-            "gdf": all_gdf,
-        })
+    # (The "all" polygon — full extent where ≥1 individual has UD > 0 — is
+    # produced above in step 1b via _add_mask_pair with key="all".)
 
     return products
 
@@ -1369,22 +1362,20 @@ def write_herd_metadata(
         rows.append((f"Seqs_{abbrev}", len(seqs)))
     rows.append(("Seqs_all", len(per_seq)))
 
-    # ----- Per-season median start / end dates --------------------------------
-    def _median_mmdd(dts):
+    # ----- Per-season mean start / end dates -----------------------------------
+    def _mean_mmdd(dts):
         dts = [t for t in dts if pd.notna(t)]
         if not dts:
             return "NA"
-        # Median by day-of-year, then format MM/DD.
-        ord_days = sorted(int(t.timetuple().tm_yday) for t in dts)
-        mid = ord_days[len(ord_days) // 2]
-        # Convert day-of-year back to a synthetic date (any non-leap year is fine).
-        d = _dt.date(2025, 1, 1) + _dt.timedelta(days=mid - 1)
+        ord_days = [int(t.timetuple().tm_yday) for t in dts]
+        avg = int(round(np.mean(ord_days)))
+        d = _dt.date(2025, 1, 1) + _dt.timedelta(days=avg - 1)
         return d.strftime("%m/%d")
 
     for label, abbrev in season_abbrevs:
         seqs = by_season.get(label, [])
-        rows.append((f"med_start_{abbrev}", _median_mmdd([r["start"] for r in seqs])))
-        rows.append((f"med_end_{abbrev}", _median_mmdd([r["end"] for r in seqs])))
+        rows.append((f"mean_start_{abbrev}", _mean_mmdd([r["start"] for r in seqs])))
+        rows.append((f"mean_end_{abbrev}", _mean_mmdd([r["end"] for r in seqs])))
 
     # ----- Per-season migration-day stats -------------------------------------
     for label, abbrev in season_abbrevs:
@@ -1565,11 +1556,40 @@ def write_herd_metadata(
                         row_data[f"median_end [{season}]"][yr] = "NA"
                         row_data[f"average_end [{season}]"][yr] = "NA"
 
+                # All_Years column: combine across all bio-years for this season
+                all_seqs = [r for r in per_seq if r["season"] == season]
+                n_all = len(all_seqs)
+                row_data[f"n_sequences [{season}]"]["All_Years"] = n_all
+                if n_all == 0:
+                    for label, _ in metrics[1:]:
+                        row_data[label]["All_Years"] = "NA"
+                else:
+                    starts_all = sorted([r["start"] for r in all_seqs if pd.notna(r["start"])])
+                    ends_all = sorted([r["end"] for r in all_seqs if pd.notna(r["end"])])
+                    row_data[f"earliest_start [{season}]"]["All_Years"] = _fmt_date(starts_all[0]) if starts_all else "NA"
+                    row_data[f"latest_start [{season}]"]["All_Years"] = _fmt_date(starts_all[-1]) if starts_all else "NA"
+                    if starts_all:
+                        med_s, avg_s = _median_avg_mmdd(starts_all)
+                        row_data[f"median_start [{season}]"]["All_Years"] = med_s
+                        row_data[f"average_start [{season}]"]["All_Years"] = avg_s
+                    else:
+                        row_data[f"median_start [{season}]"]["All_Years"] = "NA"
+                        row_data[f"average_start [{season}]"]["All_Years"] = "NA"
+                    row_data[f"earliest_end [{season}]"]["All_Years"] = _fmt_date(ends_all[0]) if ends_all else "NA"
+                    row_data[f"latest_end [{season}]"]["All_Years"] = _fmt_date(ends_all[-1]) if ends_all else "NA"
+                    if ends_all:
+                        med_e, avg_e = _median_avg_mmdd(ends_all)
+                        row_data[f"median_end [{season}]"]["All_Years"] = med_e
+                        row_data[f"average_end [{season}]"]["All_Years"] = avg_e
+                    else:
+                        row_data[f"median_end [{season}]"]["All_Years"] = "NA"
+                        row_data[f"average_end [{season}]"]["All_Years"] = "NA"
+
                 for label, _ in metrics:
                     summary_rows.append({"metric": label, **row_data[label]})
 
             df_seq = pd.DataFrame(summary_rows)
-            col_order = ["metric"] + bio_years
+            col_order = ["metric"] + bio_years + ["All_Years"]
             df_seq = df_seq.reindex(columns=col_order, fill_value="NA")
             seq_csv = meta_dir / f"{herd_token}_SequencesSummary_{date_stamp}.csv"
             df_seq.to_csv(seq_csv, index=False, encoding="utf-8")

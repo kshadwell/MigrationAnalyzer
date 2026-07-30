@@ -87,6 +87,7 @@ try:
         load_model_outputs_from_disk,
         build_range_sequences,
         write_individual_uds,
+        write_individual_footprints,
         write_range_density,
         run_model,
         run_all_sequences,
@@ -249,7 +250,7 @@ except ImportError:
 # certain tabs — Dash would otherwise refuse to register them at startup.
 app = dash.Dash(
     __name__,
-    external_stylesheets=[dbc.themes.CYBORG],
+    external_stylesheets=[dbc.themes.CYBORG, dbc.icons.BOOTSTRAP],
     suppress_callback_exceptions=True,
     title="Colorado Migration Corridor Mapper",
 )
@@ -541,15 +542,24 @@ def _workdir_version(workdir: Path | None = None, version: int | None = None) ->
 def _start_new_version(workdir: Path | None = None) -> int:
     """Begin a new output version (max existing + 1) and make it active. Called
     at the start of a model run so each run's outputs land in their own folder.
-    Folder name includes the creation date, e.g. V3_072126."""
+    Folder name includes the creation date, e.g. V3_072126.
+
+    Copies all contents from the previous version so the new folder is
+    self-contained — the model run then overwrites whatever it regenerates."""
     import datetime as _dt
+    import shutil
     global _ACTIVE_VERSION
     base = workdir or _ACTIVE_WORKDIR
     existing = _list_versions(base)
     v = (existing[-1] + 1) if existing else 1
     _ACTIVE_VERSION = v
     date_stamp = _dt.datetime.now().strftime("%m%d%y")
-    (base / "ModelOutputs" / f"V{v}_{date_stamp}").mkdir(parents=True, exist_ok=True)
+    new_dir = base / "ModelOutputs" / f"V{v}_{date_stamp}"
+    if existing:
+        prev_dir = _resolve_version_dir(base, existing[-1])
+        shutil.copytree(str(prev_dir), str(new_dir), dirs_exist_ok=True)
+    else:
+        new_dir.mkdir(parents=True, exist_ok=True)
     return v
 
 
@@ -1580,7 +1590,7 @@ tab1_layout = dbc.Container(
                                         ),
                                         dbc.Checkbox(
                                             id="auto-flagging-toggle",
-                                            label="Enable automatic flagging",
+                                            label="Flag problem points and mortalities based on movement and GPS parameters",
                                             value=True,
                                             style={"fontSize": "0.85rem"},
                                             className="mb-2",
@@ -1593,7 +1603,10 @@ tab1_layout = dbc.Container(
                                             [
                                                 dbc.Col(
                                                     [
-                                                        dbc.Label("Max Speed (km/h)", style={"fontSize": "0.85rem"}),
+                                                        _info_label("Max Speed (km/h)",
+                                                                    "Consecutive GPS fixes that imply travel above this speed are flagged as problem points. "
+                                                                    "Both the origin and destination fixes of the impossible movement are flagged.",
+                                                                    "10.8 km/h for mule deer / elk"),
                                                         dbc.Input(
                                                             id="param-max-speed",
                                                             type="number",
@@ -1606,7 +1619,10 @@ tab1_layout = dbc.Container(
                                                 ),
                                                 dbc.Col(
                                                     [
-                                                        dbc.Label("Mortality Distance (m)", style={"fontSize": "0.85rem"}),
+                                                        _info_label("Mortality Distance (m)",
+                                                                    "If all of an animal's GPS fixes in its last Mortality Time window fall within this radius "
+                                                                    "of their centroid, those fixes are flagged as a mortality event.",
+                                                                    "50 m"),
                                                         dbc.Input(
                                                             id="param-mort-dist",
                                                             type="number",
@@ -1623,7 +1639,10 @@ tab1_layout = dbc.Container(
                                             [
                                                 dbc.Col(
                                                     [
-                                                        dbc.Label("Mortality Time (hrs)", style={"fontSize": "0.85rem"}),
+                                                        _info_label("Mortality Time (hrs)",
+                                                                    "The trailing time window used to evaluate mortality. If an animal stays within the "
+                                                                    "Mortality Distance for this duration at the end of its track, it is flagged as a mortality.",
+                                                                    "48 hours"),
                                                         dbc.Input(
                                                             id="param-mort-time",
                                                             type="number",
@@ -1635,7 +1654,10 @@ tab1_layout = dbc.Container(
                                                 ),
                                                 dbc.Col(
                                                     [
-                                                        dbc.Label("DOP (Dilution of Precision) Cutoff", style={"fontSize": "0.85rem"}),
+                                                        _info_label("DOP (Dilution of Precision) Cutoff",
+                                                                    "GPS fixes with a Dilution of Precision value above this threshold are flagged as problem points. "
+                                                                    "Higher DOP means lower positional accuracy.",
+                                                                    "10"),
                                                         dbc.Input(
                                                             id="param-dop-cutoff",
                                                             type="number",
@@ -1652,11 +1674,14 @@ tab1_layout = dbc.Container(
                                             [
                                                 dbc.Col(
                                                     [
-                                                        dbc.Label("Minimum Satellites", style={"fontSize": "0.85rem"}),
+                                                        _info_label("Minimum Satellites",
+                                                                    "GPS fixes acquired with fewer satellites than this threshold are flagged as problem points. "
+                                                                    "Fewer satellites generally means less accurate positioning.",
+                                                                    "5"),
                                                         dbc.Input(
                                                             id="param-sat-cutoff",
                                                             type="number",
-                                                            value=6,
+                                                            value=5,
                                                             min=0,
                                                         ),
                                                     ],
@@ -1667,11 +1692,12 @@ tab1_layout = dbc.Container(
                                         ),
                                             ],
                                         ),
+                                        html.Hr(className="my-3"),
                                         dbc.Row(
                                             [
                                                 dbc.Col(
                                                     [
-                                                        dbc.Label("Bio Year Start (M/D)", style={"fontSize": "0.85rem"}),
+                                                        dbc.Label("Bio Year Start (M/D)", style={"fontSize": "0.85rem", "fontWeight": "bold"}),
                                                         dbc.InputGroup(
                                                             [
                                                                 dbc.Input(
@@ -1704,7 +1730,7 @@ tab1_layout = dbc.Container(
                                                     [
                                                         dbc.Label(
                                                             "Herd ID (optional override)",
-                                                            style={"fontSize": "0.85rem"},
+                                                            style={"fontSize": "0.85rem", "fontWeight": "bold"},
                                                         ),
                                                         dbc.Input(
                                                             id="param-herd-id-override",
@@ -3246,6 +3272,13 @@ tab5_layout = dbc.Container(
                                             "Export All",
                                             id="btn-export-all",
                                             color="secondary",
+                                            className="w-100 mb-2",
+                                            size="sm",
+                                        ),
+                                        dbc.Button(
+                                            "Export Recommended for Bios",
+                                            id="btn-export-bios",
+                                            color="info",
                                             className="w-100",
                                             size="sm",
                                         ),
@@ -3600,18 +3633,42 @@ def _create_companion_file_sync(file_path: Path) -> None:
             if _shp_sidecars_complete(companion):
                 return
             df = pd.read_csv(str(file_path), low_memory=False)
-            lon_col = lat_col = None
+            lon_col = lat_col = utm_e_col = utm_n_col = utm_zone_col = None
             for c in df.columns:
                 cl = c.lower()
                 if cl in ("long", "lon", "longitude", "x"):
                     lon_col = c
                 elif cl in ("lat", "latitude", "y"):
                     lat_col = c
+                elif cl in ("utm_e", "utme", "easting", "utm_easting"):
+                    utm_e_col = c
+                elif cl in ("utm_n", "utmn", "northing", "utm_northing"):
+                    utm_n_col = c
+                elif cl in ("utm_zone", "utmzone", "zone"):
+                    utm_zone_col = c
+            gdf = None
             if lon_col and lat_col:
                 gdf = gpd.GeoDataFrame(
                     df, geometry=gpd.points_from_xy(df[lon_col], df[lat_col]),
                     crs="EPSG:4326",
                 )
+            elif utm_e_col and utm_n_col:
+                zone_num = None
+                if utm_zone_col:
+                    zone_num = int(pd.to_numeric(df[utm_zone_col], errors="coerce").dropna().mode().iloc[0])
+                else:
+                    for c in df.columns:
+                        if "zone" in c.lower():
+                            zone_num = int(pd.to_numeric(df[c], errors="coerce").dropna().mode().iloc[0])
+                            break
+                if zone_num:
+                    crs = f"EPSG:326{zone_num:02d}"
+                    gdf = gpd.GeoDataFrame(
+                        df, geometry=gpd.points_from_xy(df[utm_e_col], df[utm_n_col]),
+                        crs=crs,
+                    )
+                    gdf = gdf.to_crs("EPSG:4326")
+            if gdf is not None:
                 tmp_shp = file_path.with_suffix(".tmp.shp")
                 gdf.to_file(tmp_shp)
                 for s in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
@@ -3629,8 +3686,8 @@ def _create_companion_file_sync(file_path: Path) -> None:
                 df["lon"] = gdf.geometry.x
                 df["lat"] = gdf.geometry.y
             df.to_csv(companion, index=False)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Companion file creation failed for %s: %s", file_path, exc)
 
 
 def _create_companion_file(file_path: Path) -> None:
@@ -4806,7 +4863,7 @@ def _seq_working_df(processed_json, bio_month, bio_day):
 # Shared sequence-band palette — one entry per slot (mig1..mig8). The NSD chart
 # bands, the slider-card headers, and the map points (_build_point_geojson) all
 # index into the SAME list so a sequence's colour is identical everywhere.
-SEQ_COLORS = ["#FF6B6B", "#4D96FF", "#FFD93D", "#CE6DBD", "#4ECDC4", "#FFA94D", "#A5F3FC", "#B5E550"]
+SEQ_COLORS = ["#FF6B6B", "#2ECC71", "#FFD93D", "#4D96FF", "#4ECDC4", "#FFA94D", "#A5F3FC", "#B5E550"]
 
 
 @app.callback(
@@ -5179,6 +5236,15 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_over
                 annotation_position="top left",
             )
 
+    if active_by_slot and "timestamp" in animal_df.columns:
+        for slot0, win in active_by_slot.items():
+            ts_mask = (animal_df["timestamp"] >= win["start"]) & (animal_df["timestamp"] <= win["end"])
+            marker_colors[ts_mask] = SEQ_COLORS[slot0 % len(SEQ_COLORS)]
+        updated_colors = marker_colors.tolist()
+        for _fig in (nsd_fig, disp_fig, speed_fig, elev_fig):
+            if _fig.data:
+                _fig.data[0].marker.color = updated_colors
+
     if seq_cleared:
         confidence_text = (
             f"Sequences cleared for {selected_animal}. Drag any slider to start "
@@ -5274,7 +5340,8 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_over
                                     },
                                 },
                                 allowCross=False,
-                                className="seq-range-slider",
+                                pushable=1,
+                                className=f"seq-range-slider seq-slider-{slot_idx}",
                             ),
                             style={"padding": "5px 0 0 0"},
                         ),
@@ -6212,11 +6279,21 @@ def slider_to_migtime(slider_values, slider_ids, selected_animal, migtime_json, 
     if "id_bio_year" not in migtime.columns:
         raise PreventUpdate
     mask = migtime["id_bio_year"] == selected_animal
-    if not mask.any():
-        raise PreventUpdate
     sk, ek = f"mig{slot}_start", f"mig{slot}_end"
-    if sk not in migtime.columns or ek not in migtime.columns:
-        raise PreventUpdate
+    if sk not in migtime.columns:
+        migtime[sk] = ""
+    if ek not in migtime.columns:
+        migtime[ek] = ""
+    if not mask.any():
+        animal_id_part = "_".join(selected_animal.rsplit("_", 1)[:-1]) if "_" in selected_animal else selected_animal
+        bio_year_part = selected_animal.rsplit("_", 1)[-1] if "_" in selected_animal else ""
+        new_row = {c: "" for c in migtime.columns}
+        new_row["id_bio_year"] = selected_animal
+        new_row["animal_id"] = animal_id_part
+        new_row["bio_year"] = bio_year_part
+        new_row["bio_year_full"] = bio_year_part
+        migtime = pd.concat([migtime, pd.DataFrame([new_row])], ignore_index=True)
+        mask = migtime["id_bio_year"] == selected_animal
     # No-op short-circuit: avoid an unnecessary repaint when the slider value
     # already matches what's in the migtime (e.g. on initial render).
     current_start = str(migtime.loc[mask, sk].iloc[0])
@@ -6407,16 +6484,20 @@ def _build_point_geojson(cache_entry, migtime_json=None, animal_key=None):
             rows = mt.loc[mt["id_bio_year"] == animal_key]
             if not rows.empty:
                 r = rows.iloc[0]
+                ts_compare = ts_ns.astype("datetime64[ns]")
                 for i in range(1, 9):
                     sk, ek = f"mig{i}_start", f"mig{i}_end"
-                    if sk in r and ek in r and pd.notna(r[sk]) and str(r[sk]) not in ("", "NaT", "nan"):
+                    if sk in r and ek in r and pd.notna(r[sk]) and str(r[sk]) not in ("", "NaT", "nan", "None"):
                         s = pd.Timestamp(r[sk])
-                        e = pd.Timestamp(r[ek]) if pd.notna(r[ek]) and str(r[ek]) not in ("", "NaT", "nan") else s
+                        e = pd.Timestamp(r[ek]) if pd.notna(r[ek]) and str(r[ek]) not in ("", "NaT", "nan", "None") else s
                         if s != e:
-                            mask = (ts_ns >= np.datetime64(s)) & (ts_ns <= np.datetime64(e))
+                            s_ns = np.datetime64(s, "ns")
+                            e_ns = np.datetime64(e, "ns")
+                            mask = (ts_compare >= s_ns) & (ts_compare <= e_ns)
                             colors[mask] = seq_palette[(i - 1) % len(seq_palette)]
         except Exception:
-            pass
+            import traceback
+            print(f"[map-color] Error coloring points for {animal_key}: {traceback.format_exc()}")
 
     env_vars = cache_entry.get("env_vars", {})
     problem_arr = cache_entry.get("problem", np.zeros(n, dtype=int))
@@ -7031,11 +7112,20 @@ def render_model_params(model, processed_json):
     if model == "BBMM":
         auto_logic = fix_rate_msg or "Fix rate ≤ 12h: BMVar will be estimated automatically"
         panel = [
-            _info_label("Brownian Motion Variance (BMVar)",
-                       "Controls the expected movement variance of the animal. "
-                       "When left blank, it is estimated from the data (recommended for most datasets). "
-                       "Set manually for coarse fix-rate data.",
-                       "Auto (leave blank)"),
+            _info_label("Fixed Motion Variance (FMV, a.k.a. Brownian motion variance or BMVar)",
+                       "When FMV is left blank, the app uses Maximum Likelihood Estimation following "
+                       "Horne et al. (2007). This means that for each interior triplet of GPS fixes "
+                       "(i, i+1, i+2) where both segments fall within the max lag, it computes the "
+                       "residual of the middle point from the straight-line interpolation between the "
+                       "outer two. Under the Brownian bridge model, that residual is the bivariate "
+                       "normal with variance that depends on the motion variance, the time lags, and "
+                       "the location error. The function optimizes the motion variance by minimizing "
+                       "the negative log-likelihood across all valid triplets — this is the same "
+                       "approach as R's BBMM::brownian.motion.variance().\n\n"
+                       "For datasets with a median fix rate above 5–7 hours, estimated variance is "
+                       "not recommended. For coarse fix-rate datasets, it is recommended to input a "
+                       "FMV value of 1400 m² for elk and 1000 m² for deer.",
+                       "1400 elk; 1000 deer"),
             dbc.InputGroup(
                 [
                     dbc.Input(id={"type": "model-param", "key": "bbmm_bmvar"}, type="number", placeholder="Auto (estimate)", min=0),
@@ -7044,17 +7134,30 @@ def render_model_params(model, processed_json):
                 className="mb-1",
             ),
             html.Small(
-                "Leave blank to estimate it from the data (R's BMVar=NULL). Enter a number to "
-                "force a fixed motion variance (FMV). Often 1000 for Mule Deer/Bighorn, 1400 for elk.",
+                "Leave blank to estimate motion variance from the data. Enter a number to force a "
+                "specific fixed motion variance across the data; the latter is the more common option "
+                "among high fix-rate datasets (e.g., over 5 hours between fixes). "
+                "Recommended: 1000 for deer/bighorn, 1400 for elk.",
                 className="text-muted d-block mb-2", style={"fontSize": "0.7rem"},
             ),
-            dbc.Checkbox(
-                id={"type": "model-param", "key": "bbmm_bmvar_conditional"},
-                label="Conditional BMVar by fix-rate threshold",
-                value=False,
-                style={"fontSize": "0.8rem"},
-                className="mb-1",
-            ),
+            html.Div([
+                dbc.Checkbox(
+                    id={"type": "model-param", "key": "bbmm_bmvar_conditional"},
+                    label="Conditional FMV by fix-rate threshold",
+                    value=False,
+                    style={"fontSize": "0.8rem", "display": "inline-block"},
+                ),
+                _info_label("",
+                            "When this box is checked, the model will calculate the median time gap between "
+                            "consecutive fixes in each sequence and will either use the fixed motion variance "
+                            "entered above or estimate the variance for that sequence, based on whether the "
+                            "median gap is above or below the threshold (hours between points).\n\n"
+                            "For example, if a sequence has a median gap of 4 hours and the threshold is set "
+                            "to 5, the variance for that sequence will be estimated using maximum likelihood "
+                            "estimation. If a sequence has a median gap of 6 hours (above the threshold), it "
+                            "will use the fixed motion variance value entered above for that sequence.",
+                            "3 hours between points for elk, 5 hours between points for deer"),
+            ], className="d-flex align-items-center mb-1"),
             dbc.InputGroup(
                 [
                     dbc.Input(
@@ -7065,13 +7168,6 @@ def render_model_params(model, processed_json):
                     dbc.InputGroupText("hrs between points"),
                 ],
                 className="mb-1",
-            ),
-            html.Small(
-                "When checked, the BMVar entered above is only applied per sequence when the "
-                "median gap between fixes is GREATER than this threshold (coarse data → FMV). "
-                "Sequences with finer fixes (gaps ≤ threshold) estimate the variance instead (EB). "
-                "Has no effect unless a BMVar number is entered above.",
-                className="text-muted d-block mb-2", style={"fontSize": "0.7rem"},
             ),
             _info_label("Location Error (m)",
                        "GPS measurement error in meters. Accounts for positional inaccuracy of the collar.",
@@ -7117,7 +7213,7 @@ def render_model_params(model, processed_json):
             ),
             dbc.Checkbox(
                 id={"type": "model-param", "key": "bbmm_year_summaries"},
-                label="Per-year summaries (stacked outputs by bio-year — extends processing time)",
+                label="Per-year summaries (stacked outputs by migration year, e.g., 2/1/26-1/31/27 — extends processing time)",
                 value=False,
                 style={"fontSize": "0.8rem"},
             ),
@@ -7169,6 +7265,20 @@ def render_model_params(model, processed_json):
                 className="mb-2 py-2 px-3",
                 style={"fontSize": "0.8rem"},
             ),
+            _info_label("How dBBMM differs from BBMM",
+                       "BBMM (Brownian Bridge Movement Model) uses a single motion variance value "
+                       "for the entire sequence — either a fixed value you provide (FMV) or one "
+                       "estimated via maximum likelihood from all triplets in the sequence.\n\n"
+                       "dBBMM (Dynamic BBMM) estimates motion variance locally using a sliding window "
+                       "of consecutive fixes, so the variance changes along the path. This captures "
+                       "behavioral shifts (e.g., fast directed travel vs. slow foraging) that a single "
+                       "global variance cannot represent.\n\n"
+                       "For coarse fix-rate datasets (median gap > 5–7 hours), BBMM with a forced FMV "
+                       "is preferred. dBBMM requires enough fixes within each sliding window to estimate "
+                       "variance reliably, and coarse data often cannot meet this requirement — the "
+                       "window would span days or weeks of real time, washing out behavioral detail. "
+                       "dBBMM is best suited for fine fix-rate data (≤ 3–5 hours between fixes).",
+                       "BBMM for coarse data; dBBMM for fine data"),
             dbc.Label("Rscript Path (optional)", style={"fontSize": "0.85rem"}),
             dbc.Input(
                 id={"type": "model-param", "key": "dbbmm_rscript_path"},
@@ -7329,6 +7439,7 @@ def _build_linebuffer_output(
     """Buffer each sequence's migration line, union per animal, and write a
     stacked shapefile.  ``buffer_distance`` is the TOTAL width (applied as
     half on each side, cap_style=round)."""
+    import geopandas as gpd
     from shapely.geometry import LineString
     from shapely.ops import unary_union
 
@@ -7362,13 +7473,59 @@ def _build_linebuffer_output(
     gdf = gpd.GeoDataFrame(rows, crs=utm_crs)
     lb_dir = outputs / "LineBuffer"
     lb_dir.mkdir(parents=True, exist_ok=True)
-    out_path = lb_dir / "LineBuffer_perAnimal.shp"
-    gdf.to_file(out_path)
+
+    # 1. Raw per-animal line buffers (one polygon per animal, union of its sequences)
+    raw_path = lb_dir / "raw_linebuffer.shp"
+    gdf.to_file(raw_path)
+
+    # 2. Dissolved: collapse all animal buffers into a single polygon
+    dissolved_geom = unary_union(gdf.geometry.tolist())
+    dissolved_gdf = gpd.GeoDataFrame(
+        [{"type": "dissolved", "n_animals": len(animal_buffers), "buff_m": buffer_distance, "geometry": dissolved_geom}],
+        crs=utm_crs,
+    )
+    dissolved_path = lb_dir / "by_Animal_linebuffer_dissolved.shp"
+    dissolved_gdf.to_file(dissolved_path)
+
+    # 3. Heatmap raster: count of overlapping unique animal line buffers per cell
+    try:
+        from rasterio.features import rasterize as rio_rasterize
+        from rasterio.transform import from_bounds
+        import rasterio
+
+        bounds = dissolved_geom.bounds  # (minx, miny, maxx, maxy)
+        cell_size = 250.0  # metres, matching the population grid default
+        width = max(1, int(np.ceil((bounds[2] - bounds[0]) / cell_size)))
+        height = max(1, int(np.ceil((bounds[3] - bounds[1]) / cell_size)))
+        transform = from_bounds(bounds[0], bounds[1], bounds[2], bounds[3], width, height)
+
+        heatmap = np.zeros((height, width), dtype=np.uint16)
+        for _poly in gdf.geometry:
+            if _poly is None or _poly.is_empty:
+                continue
+            layer = rio_rasterize(
+                [(_poly, 1)],
+                out_shape=(height, width),
+                transform=transform,
+                fill=0,
+                dtype="uint8",
+            )
+            heatmap += layer.astype(np.uint16)
+
+        heatmap_path = lb_dir / "linebuffer_heatmap.tif"
+        with rasterio.open(
+            str(heatmap_path), "w", driver="GTiff",
+            height=height, width=width, count=1,
+            dtype="uint16", crs=utm_crs, transform=transform,
+        ) as dst:
+            dst.write(heatmap, 1)
+    except Exception as exc:
+        logger.warning("Line buffer heatmap failed: %s", exc)
 
     _append_processing_log(
         [f"Buffer distance: {buffer_distance} m ({half} m each side, round caps)",
          f"Animals: {len(animal_buffers)}, sequences buffered: {sum(len(v) for v in animal_buffers.values())}",
-         f"Output: {out_path.relative_to(outputs)}"],
+         f"Outputs: {raw_path.relative_to(outputs)}, {dissolved_path.relative_to(outputs)}, linebuffer_heatmap.tif"],
         header="LINE BUFFER",
     )
     _log_action("LINE_BUFFER", animals=len(animal_buffers), buffer_m=buffer_distance)
@@ -7751,6 +7908,7 @@ def _run_modeling_impl(
         _MODEL_CACHE["seq_label"] = seq_label
         _MODEL_CACHE["sequences_dict"] = sequences_dict
         _MODEL_CACHE["seq_labels"] = seq_labels
+        _MODEL_CACHE["want_year_summaries"] = want_year_summaries
         if want_linebuffer:
             _MODEL_CACHE["linebuffer_distance"] = linebuffer_distance
         if "timestamp" in df.columns:
@@ -7775,6 +7933,18 @@ def _run_modeling_impl(
                     _log_action("INDIVIDUAL_UDS", files=len(written_ind))
                 except Exception as exc:
                     _append_processing_log([f"Per-individual UD output FAILED: {exc}"], header="PER-INDIVIDUAL UDs")
+                try:
+                    fp_dir = outputs / "IndividualFootprints"
+                    written_fp = write_individual_footprints(
+                        results, pop_grid, fp_dir, seq_animal, seq_label, mode="both",
+                    )
+                    _append_processing_log(
+                        [f"Per-individual footprints (per-season + combined): {len(written_fp)} files -> ModelOutputs/IndividualFootprints/"],
+                        header="PER-INDIVIDUAL FOOTPRINTS",
+                    )
+                    _log_action("INDIVIDUAL_FOOTPRINTS", files=len(written_fp))
+                except Exception as exc:
+                    _append_processing_log([f"Per-individual footprint output FAILED: {exc}"], header="PER-INDIVIDUAL FOOTPRINTS")
 
             if want_ranges:
                 try:
@@ -7888,6 +8058,18 @@ def _run_modeling_impl(
                     sp_non_null = df["Species"].dropna()
                     if not sp_non_null.empty:
                         species = str(sp_non_null.iloc[0])
+                if not species and herd_id:
+                    _dau = herd_id.strip().upper().replace("-", "").replace("_", "")
+                    if _dau.startswith("D"):
+                        species = "Deer"
+                    elif _dau.startswith("E"):
+                        species = "Elk"
+                    elif _dau.startswith(("A", "P")):
+                        species = "Pronghorn"
+                    elif _dau.startswith(("RBS", "S")):
+                        species = "Sheep"
+                    elif _dau.startswith(("MG", "G")):
+                        species = "Goat"
                 v_label = _resolve_version_dir(_ACTIVE_WORKDIR, _ACTIVE_VERSION).name if _ACTIVE_VERSION else None
                 herd_meta = write_herd_metadata(
                     processed_df=df,
@@ -8565,9 +8747,20 @@ def generate_pop_outputs(
         for season_label, season_ud_dict in ud_by_season.items():
             _collect_stacked(season_label, season_ud_dict)
         if len(ud_by_season) > 1:
-            _collect_stacked("All", ud_dict)
+            # Merge across seasons per individual: average each animal's
+            # per-season UDs so the "All" raster has one layer per unique
+            # animal, not one per animal-season.
+            all_by_animal: dict[str, list[np.ndarray]] = {}
+            for _season_ud in ud_by_season.values():
+                for _aid, _arr in _season_ud.items():
+                    all_by_animal.setdefault(_aid, []).append(_arr)
+            ud_all: dict[str, np.ndarray] = {}
+            for _aid, _arrs in all_by_animal.items():
+                ud_all[_aid] = np.mean(np.stack(_arrs, axis=0), axis=0) if len(_arrs) > 1 else _arrs[0]
+            _collect_stacked("All", ud_all)
 
         # ---- Year summaries (by bio-year) ----
+        want_year_summaries = _MODEL_CACHE.get("want_year_summaries", False)
         year_summary_lines: list[str] = []
         if want_year_summaries:
             bio_years_sorted = sorted(
@@ -9813,6 +10006,7 @@ def _write_processing_report(df, out_path: Path) -> str:
     Output("export-status", "children"),
     Input("btn-export-selected", "n_clicks"),
     Input("btn-export-all", "n_clicks"),
+    Input("btn-export-bios", "n_clicks"),
     State({"type": "export-group", "index": dash.ALL}, "value"),
     State("export-dir", "value"),
     State("store-processed-data", "data"),
@@ -9822,7 +10016,7 @@ def _write_processing_report(df, out_path: Path) -> str:
     State("store-seq-names", "data"),
     prevent_initial_call=True,
 )
-def handle_export(selected_clicks, all_clicks, group_values, out_dir, processed_json, workdir_path,
+def handle_export(selected_clicks, all_clicks, bios_clicks, group_values, out_dir, processed_json, workdir_path,
                   migtime_json, config_json, seq_names):
     checked_ids = [v for grp in (group_values or []) for v in (grp or [])]
     """Flush population outputs from the in-memory _POP_OUTPUT_CACHE to disk.
@@ -9843,6 +10037,17 @@ def handle_export(selected_clicks, all_clicks, group_values, out_dir, processed_
     # Resolve which ids to write.
     if triggered == "btn-export-all":
         wanted = [p["id"] for p in products] + [_REPORT_OPTION_ID]
+    elif triggered == "btn-export-bios":
+        _BIOS_PATTERNS = (
+            "_All_", "_All.", "_min2", "_min3", "_top10", "_top20",
+            "_stopover", "MigLines", "MigPoints",
+            "migration_distance_info", "annualCollars", "MigMetadata",
+            "SequencesSummary",
+        )
+        wanted = [
+            p["id"] for p in products
+            if any(pat in p.get("filename", "") for pat in _BIOS_PATTERNS)
+        ] + [_REPORT_OPTION_ID]
     else:
         wanted = list(checked_ids or [])
 
@@ -9982,7 +10187,7 @@ def handle_export(selected_clicks, all_clicks, group_values, out_dir, processed_
                 _build_linebuffer_output(
                     sequences_dict, seq_animal, lb_dist, out_path, utm_crs_str,
                 )
-                exported.append("LineBuffer/LineBuffer_perAnimal.shp")
+                exported.append("LineBuffer/raw_linebuffer.shp")
         except Exception as e:
             failures.append(f"LineBuffer: {e}")
 
@@ -10041,6 +10246,9 @@ def handle_export(selected_clicks, all_clicks, group_values, out_dir, processed_
 # Entry point
 # ===========================================================================
 if __name__ == "__main__":
+    import logging as _logging
+    _logging.getLogger("werkzeug").setLevel(_logging.ERROR)
     if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
         threading.Timer(1.5, webbrowser.open, args=("http://127.0.0.1:8050",)).start()
+    print("Migration Corridor Mapper running at http://127.0.0.1:8050")
     app.run(debug=False, host="127.0.0.1", port=8050)

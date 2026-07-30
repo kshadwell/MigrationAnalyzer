@@ -2188,6 +2188,63 @@ def write_individual_uds(results, pop_grid, out_dir, key_to_animal, key_to_label
     return written
 
 
+def write_individual_footprints(results, pop_grid, out_dir, key_to_animal, key_to_label, mode="both"):
+    """Write per-individual footprint shapefiles. ``mode``: 'season' (one per
+    animal per label), 'combined' (one per animal across all its sequences),
+    or 'both'. Each individual's per-sequence footprint polygons are unioned.
+    Returns the list of written paths."""
+    from pathlib import Path
+    import geopandas as gpd
+    from shapely.ops import unary_union
+    from rasterio.crs import CRS
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    src_crs = CRS.from_user_input(pop_grid["crs"])
+
+    by_a: dict[str, list] = {}
+    by_al: dict[tuple, list] = {}
+    for key, res in results.items():
+        meta = res.get("metadata") or {}
+        err = meta.get("errors") or meta.get("error") or ""
+        fp = res.get("footprint_polygon")
+        if fp is None or (err and err != "None"):
+            continue
+        if fp.is_empty:
+            continue
+        animal = key_to_animal.get(key, str(key))
+        label = key_to_label.get(key, "mig")
+        by_a.setdefault(animal, []).append(fp)
+        by_al.setdefault((animal, label), []).append(fp)
+
+    written = []
+    if mode in ("season", "both"):
+        for (animal, label), fps in by_al.items():
+            merged = unary_union(fps)
+            if merged.is_empty:
+                continue
+            gdf = gpd.GeoDataFrame(
+                [{"animal_id": animal, "season": label}],
+                geometry=[merged], crs=str(src_crs),
+            )
+            p = out_dir / f"{_safe_token(animal)}_{_safe_token(label)}_FP.shp"
+            gdf.to_file(p)
+            written.append(p)
+    if mode in ("combined", "both"):
+        for animal, fps in by_a.items():
+            merged = unary_union(fps)
+            if merged.is_empty:
+                continue
+            gdf = gpd.GeoDataFrame(
+                [{"animal_id": animal, "season": "combined"}],
+                geometry=[merged], crs=str(src_crs),
+            )
+            p = out_dir / f"{_safe_token(animal)}_combined_FP.shp"
+            gdf.to_file(p)
+            written.append(p)
+    return written
+
+
 def write_range_density(results, pop_grid, out_path, key_to_animal):
     """Population mean-UD density for a range season (Chloe's averageUD_*):
     average each individual's UDs across years, then mean across individuals,
