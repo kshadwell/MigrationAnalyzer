@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="/assets/maplibre-gl.css">
+<script src="/assets/maplibre-gl.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#111; overflow:hidden; }
+  #map { width:100%; height:100vh; }
+  .maplibregl-popup-content {
+    background: rgba(20, 20, 30, 0.95);
+    color: #e0e0e0;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+    border: 1px solid #335;
+    max-width: 280px;
+  }
+  .maplibregl-popup-close-button {
+    color: #999;
+    font-size: 16px;
+    padding: 2px 6px;
+  }
+  .maplibregl-popup-close-button:hover { color: #fff; }
+  .popup-title { color: #8FCFFF; font-weight: bold; margin-bottom: 4px; font-size: 11px; }
+  .popup-row { display: flex; justify-content: space-between; padding: 1px 0; }
+  .popup-label { color: #B0B0B0; }
+  .popup-value { color: #fff; font-weight: bold; }
+  .popup-divider { border-top: 1px solid #334; margin: 4px 0; }
+  /* Box-select rectangle */
+  #box-select {
+    position: absolute;
+    border: 2px dashed #FFFF66;
+    background: rgba(255, 255, 102, 0.15);
+    pointer-events: none;
+    display: none;
+    z-index: 1000;
+  }
+  /* Small status banner top-right */
+  #sel-banner {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: rgba(20,20,30,0.85);
+    color: #FFFF66;
+    border: 1px solid #FFFF66;
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-family: 'Consolas', monospace;
+    font-size: 11px;
+    display: none;
+    z-index: 1000;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="box-select"></div>
+<div id="sel-banner"></div>
+<script>
+// Default labels for raster vars; merged at runtime with WLD labels pushed
+// from the Dash app via {type:'update-data', env_labels: {...}}.
+let LABELS = {
+  elevation_m: 'Elevation',
+  snow_depth_m: 'Snow Depth',
+  swe_m: 'SWE',
+  snow_density_kgm3: 'Snow Density',
+};
+const UNITS = {
+  elevation_m: 'm',
+  snow_depth_m: 'm',
+  swe_m: 'm',
+  snow_density_kgm3: 'kg/m³',
+};
+
+// Selection state: a Set of ISO-date keys (the `d` property on each feature).
+// Persists for the lifetime of the iframe; reset when the user navigates to
+// a new animal (parent sends type:'clear-selection').
+let selectedKeys = new Set();
+// Cached copy of the latest points GeoJSON so flash-point lookups can find
+// off-screen features (querySourceFeatures only returns viewport features).
+let pointsData = { type: 'FeatureCollection', features: [] };
+
+function formatVal(key, val) {
+  if (val == null || val === undefined) return '—';
+  if (typeof val !== 'number') return String(val);
+  if (key === 'elevation_m') return val.toFixed(0) + ' m';
+  if (key === 'snow_density_kgm3') return val.toFixed(0) + ' kg/m³';
+  if (UNITS[key]) return val.toFixed(3) + ' ' + UNITS[key];
+  // WLD vars or anything else: pick precision based on magnitude
+  if (Math.abs(val) >= 100) return val.toFixed(1);
+  if (Math.abs(val) >= 1) return val.toFixed(2);
+  return val.toFixed(3);
+}
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: {
+    version: 8,
+    sources: {
+      satellite: {
+        type: 'raster',
+        tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+        tileSize: 256, maxzoom: 18,
+        attribution: 'Esri',
+      },
+    },
+    layers: [{ id: 'satellite', type: 'raster', source: 'satellite' }],
+  },
+  center: [-106.5, 39.5],
+  zoom: 8, pitch: 0, bearing: 0, maxPitch: 85,
+  maxZoom: 16, minZoom: 4,
+});
+
+map.addControl(new maplibregl.NavigationControl(), 'top-left');
+
+let currentPopup = null;
+
+// Repaint the selection-halo + flag-outline layers using the current
+// `selectedKeys` set and whatever GeoJSON is in animal-points.
+function refreshSelectionStyling() {
+  const src = map.getSource('animal-points');
+  if (!src) return;
+  // Build halo source from the subset of features in selectedKeys.
+  const data = src._data;  // private but stable across maplibre versions we use
+  if (!data || !data.features) return;
+  const halos = {
+    type: 'FeatureCollection',
+    features: data.features.filter(f => selectedKeys.has(f.properties && f.properties.d)),
+  };
+  const haloSrc = map.getSource('selection-halos');
+  if (haloSrc) haloSrc.setData(halos);
+
+  // Update the banner counter
+  const banner = document.getElementById('sel-banner');
+  if (selectedKeys.size > 0) {
+    banner.textContent = selectedKeys.size + ' point' + (selectedKeys.size === 1 ? '' : 's') + ' selected (Shift+click adds, Shift+drag = box-select)';
+    banner.style.display = 'block';
+  } else {
+    banner.style.display = 'none';
+  }
+}
+
+function notifySelectionChanged() {
+  window.parent.postMessage({
+    type: 'selection-changed',
+    selected: Array.from(selectedKeys),
+  }, '*');
+}
+
+map.on('load', () => {
+  // 3D terrain
+  map.addSource('terrain-dem', {
+    type: 'raster-dem',
+    tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
+    encoding: 'terrarium', tileSize: 256, maxzoom: 15,
+  });
+  map.setTerrain({ source: 'terrain-dem', exaggeration: 1.5 });
+  map.addLayer({
+    id: 'hillshade', type: 'hillshade', source: 'terrain-dem',
+    paint: { 'hillshade-shadow-color': '#000', 'hillshade-exaggeration': 0.3 },
+  }, 'satellite');
+
+  // Empty sources for points and line
+  map.addSource('animal-line', {
+    type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] },
+  });
+  map.addSource('animal-points', {
+    type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] },
+  });
+  // Halo source for selected points (drawn ABOVE the points layer).
+  map.addSource('selection-halos', {
+    type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] },
+  });
+  // Flash source — short-lived halo for chart-click "find this point on the
+  // map" actions. One feature at a time, cleared after ~1.5 s.
+  map.addSource('flash-halo', {
+    type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] },
+  });
+
+  // Movement path line
+  map.addLayer({
+    id: 'animal-line-layer', type: 'line', source: 'animal-line',
+    paint: { 'line-color': '#FFE680', 'line-width': 1.8, 'line-opacity': 0.7 },
+    layout: { 'line-join': 'round', 'line-cap': 'round' },
+  });
+
+  // GPS points — flagged fixes render as "ghost points": hollow, faded,
+  // half-radius, dashed red/grey outline. They stay on the map for context
+  // but are visually demoted, signalling that they were excluded from the
+  // analysis. Unflagged points keep the standard solid fill + thin black
+  // border.
+  //   problem    -> red ghost
+  //   mortality  -> grey ghost
+  map.addLayer({
+    id: 'animal-points-layer', type: 'circle', source: 'animal-points',
+    // Draw order within the layer: higher circle-sort-key = drawn later = on
+    // top. Unassigned points carry c == '#000000' (the default in
+    // _build_point_geojson); points inside a migration window carry a palette
+    // colour. We prioritise the coloured (in-migration) points so a dense
+    // field of black dots can't bury the selection when zoomed out.
+    layout: {
+      'circle-sort-key': [
+        'case', ['==', ['coalesce', ['get', 'c'], '#000'], '#000000'], 0, 1,
+      ],
+    },
+    paint: {
+      // Same radius for flagged + unflagged so the ghost dots stay easy
+      // to click for unflagging — the opacity / stroke demotion below is
+      // what reads them as "ghost".
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 6, 2.5, 12, 5, 16, 8],
+      'circle-color': ['coalesce', ['get', 'c'], '#000'],
+      'circle-opacity': [
+        'match', ['coalesce', ['get', 'f'], ''],
+        'problem', 0.15,
+        'mortality', 0.15,
+        0.9,
+      ],
+      'circle-stroke-color': [
+        'match', ['coalesce', ['get', 'f'], ''],
+        'problem', '#FCA5A5',     // light vermillion
+        'mortality', '#B0B0B0',   // light grey
+        '#000'                    // default
+      ],
+      'circle-stroke-width': [
+        'match', ['coalesce', ['get', 'f'], ''],
+        'problem', 1.2,
+        'mortality', 1.2,
+        0.4
+      ],
+      'circle-stroke-opacity': [
+        'match', ['coalesce', ['get', 'f'], ''],
+        'problem', 0.85,
+        'mortality', 0.85,
+        1.0,
+      ],
+    },
+  });
+
+  // Selection halo layer — draws a yellow ring around selected points,
+  // sits ABOVE the main points layer so it's always visible.
+  map.addLayer({
+    id: 'selection-halos-layer', type: 'circle', source: 'selection-halos',
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 6, 6, 12, 10, 16, 14],
+      'circle-color': 'rgba(0,0,0,0)',     // transparent fill
+      'circle-stroke-color': '#FFFF66',    // bright yellow
+      'circle-stroke-width': 2.5,
+    },
+  });
+
+  // Flash halo — sits ABOVE selection halos. Cyan ring, pulses via opacity.
+  map.addLayer({
+    id: 'flash-halo-layer', type: 'circle', source: 'flash-halo',
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 6, 10, 12, 16, 16, 22],
+      'circle-color': 'rgba(0,0,0,0)',
+      'circle-stroke-color': '#00E5FF',    // bright cyan
+      'circle-stroke-width': 3.5,
+      'circle-stroke-opacity': 1.0,
+    },
+  });
+
+  // ----- Click handler ---------------------------------------------------
+  // Plain click on a point: replace selection (unless Shift was held, in which
+  // case toggle membership). Also open the popup.
+  // Plain click on empty map: clear selection.
+  map.on('click', (e) => {
+    const isShift = e.originalEvent && e.originalEvent.shiftKey;
+    const features = map.queryRenderedFeatures(e.point, {
+      layers: ['animal-points-layer'],
+    });
+    if (!features.length) {
+      // Clicked empty: clear selection (unless Shift — then keep it)
+      if (!isShift) {
+        selectedKeys.clear();
+        refreshSelectionStyling();
+        notifySelectionChanged();
+      }
+      if (currentPopup) { currentPopup.remove(); currentPopup = null; }
+      return;
+    }
+    const f = features[0];
+    const p = f.properties || {};
+    const key = p.d;
+    if (key === undefined || key === null) return;
+
+    if (isShift) {
+      // Toggle membership
+      if (selectedKeys.has(key)) selectedKeys.delete(key);
+      else selectedKeys.add(key);
+    } else {
+      // Replace selection with this one point
+      selectedKeys.clear();
+      selectedKeys.add(key);
+    }
+    refreshSelectionStyling();
+    notifySelectionChanged();
+
+    // Build the popup (same as before)
+    if (currentPopup) { currentPopup.remove(); currentPopup = null; }
+    const coords = f.geometry.coordinates.slice();
+    let html = '<div class="popup-title">GPS Fix</div>';
+    html += '<div class="popup-row"><span class="popup-label">Date</span><span class="popup-value">' + (p.d || '—') + '</span></div>';
+    html += '<div class="popup-row"><span class="popup-label">Lat</span><span class="popup-value">' + coords[1].toFixed(5) + '</span></div>';
+    html += '<div class="popup-row"><span class="popup-label">Lon</span><span class="popup-value">' + coords[0].toFixed(5) + '</span></div>';
+    if (p.f) {
+      html += '<div class="popup-row"><span class="popup-label">Flag</span><span class="popup-value">' + p.f + '</span></div>';
+      if (p.f === 'problem' && p.pr) {
+        html += '<div class="popup-row"><span class="popup-label">Reason</span><span class="popup-value" style="color:#FCA5A5">' + p.pr + '</span></div>';
+      }
+      if (p.f === 'mortality' && p.mr) {
+        html += '<div class="popup-row"><span class="popup-label">Reason</span><span class="popup-value" style="color:#B0B0B0">' + p.mr + '</span></div>';
+      }
+    }
+    const reservedProps = new Set(['c', 'd', 'f', 'pr', 'mr']);
+    const envKeys = [];
+    for (const k of Object.keys(p)) {
+      if (reservedProps.has(k)) continue;
+      if (p[k] === undefined || p[k] === null) continue;
+      envKeys.push(k);
+    }
+    if (envKeys.length > 0) {
+      html += '<div class="popup-divider"></div>';
+      for (const k of envKeys) {
+        const val = typeof p[k] === 'string' ? parseFloat(p[k]) : p[k];
+        const label = LABELS[k] || k;
+        html += '<div class="popup-row"><span class="popup-label">' + label + '</span><span class="popup-value">' + formatVal(k, val) + '</span></div>';
+      }
+    }
+    currentPopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '280px' })
+      .setLngLat(coords).setHTML(html).addTo(map);
+  });
+
+  // ----- Box-select (Shift+drag) ----------------------------------------
+  // Implementation: on mousedown with Shift, prevent map drag (preventDefault),
+  // track the rectangle in screen coords with a styled div, on mouseup query
+  // features inside the rectangle and add them to selection.
+  const boxEl = document.getElementById('box-select');
+  let boxStart = null;
+  const canvas = map.getCanvas();
+
+  canvas.addEventListener('mousedown', (e) => {
+    if (!e.shiftKey || e.button !== 0) return;
+    // Prevent default map drag while user holds Shift
+    e.preventDefault();
+    map.dragPan.disable();
+    boxStart = { x: e.clientX, y: e.clientY };
+    boxEl.style.left = boxStart.x + 'px';
+    boxEl.style.top = boxStart.y + 'px';
+    boxEl.style.width = '0px';
+    boxEl.style.height = '0px';
+    boxEl.style.display = 'block';
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!boxStart) return;
+    const x0 = Math.min(boxStart.x, e.clientX);
+    const y0 = Math.min(boxStart.y, e.clientY);
+    const w = Math.abs(e.clientX - boxStart.x);
+    const h = Math.abs(e.clientY - boxStart.y);
+    boxEl.style.left = x0 + 'px';
+    boxEl.style.top = y0 + 'px';
+    boxEl.style.width = w + 'px';
+    boxEl.style.height = h + 'px';
+  });
+  document.addEventListener('mouseup', (e) => {
+    if (!boxStart) return;
+    boxEl.style.display = 'none';
+    map.dragPan.enable();
+    const r = map.getContainer().getBoundingClientRect();
+    const p1 = [boxStart.x - r.left, boxStart.y - r.top];
+    const p2 = [e.clientX - r.left, e.clientY - r.top];
+    boxStart = null;
+    const dx = Math.abs(p2[0] - p1[0]);
+    const dy = Math.abs(p2[1] - p1[1]);
+    if (dx < 4 && dy < 4) return;  // ignore tiny boxes (real click)
+    const features = map.queryRenderedFeatures([p1, p2], {
+      layers: ['animal-points-layer'],
+    });
+    for (const f of features) {
+      const k = f.properties && f.properties.d;
+      if (k !== undefined && k !== null) selectedKeys.add(k);
+    }
+    refreshSelectionStyling();
+    notifySelectionChanged();
+  });
+
+  // Pointer cursor on hover
+  map.on('mouseenter', 'animal-points-layer', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'animal-points-layer', () => { map.getCanvas().style.cursor = ''; });
+
+  window._mapReady = true;
+  window.parent.postMessage({ type: 'map-ready' }, '*');
+});
+
+// Listen for data updates from parent Dash app
+window.addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || !d.type) return;
+
+  if (d.type === 'update-data') {
+    if (currentPopup) { currentPopup.remove(); currentPopup = null; }
+    if (d.env_labels) LABELS = Object.assign({}, LABELS, d.env_labels);
+    if (d.points) {
+      pointsData = d.points;
+      map.getSource('animal-points').setData(d.points);
+    }
+    if (d.line) map.getSource('animal-line').setData(d.line);
+    // Selection is animal-scoped; a new dataset implicitly clears it.
+    selectedKeys.clear();
+    refreshSelectionStyling();
+    notifySelectionChanged();
+    if (d.center && d.zoom != null) {
+      map.flyTo({ center: [d.center[1], d.center[0]], zoom: d.zoom, duration: 600 });
+    }
+  }
+
+  if (d.type === 'flash-point') {
+    // Find the feature whose 'd' (timestamp) matches and pulse a cyan
+    // halo around it for ~1.6 s. Pan the map so the point is on-screen.
+    if (!d.d) return;
+    // Exact-match first; if that misses (the map subsamples to ~3000 pts on
+    // large herds, so the click timestamp may not exist on the map), fall
+    // back to the feature closest in time.
+    const targetMs = Date.parse(d.d.replace(' ', 'T') + 'Z');
+    let match = (pointsData.features || []).find(f => f.properties && f.properties.d === d.d);
+    if (!match && !isNaN(targetMs)) {
+      let bestDelta = Infinity;
+      for (const f of (pointsData.features || [])) {
+        const fd = f.properties && f.properties.d;
+        if (!fd) continue;
+        const fMs = Date.parse(fd.replace(' ', 'T') + 'Z');
+        if (isNaN(fMs)) continue;
+        const delta = Math.abs(fMs - targetMs);
+        if (delta < bestDelta) { bestDelta = delta; match = f; }
+      }
+    }
+    if (!match) return;
+    const coords = match.geometry.coordinates;
+    const flashSrc = map.getSource('flash-halo');
+    flashSrc.setData({ type: 'FeatureCollection', features: [match] });
+    // Pulse: 4 fades over ~1.6 s, then clear.
+    const layer = 'flash-halo-layer';
+    let step = 0;
+    const tick = setInterval(() => {
+      step++;
+      const op = (step % 2 === 0) ? 1.0 : 0.25;
+      map.setPaintProperty(layer, 'circle-stroke-opacity', op);
+      if (step >= 8) {
+        clearInterval(tick);
+        map.setPaintProperty(layer, 'circle-stroke-opacity', 1.0);
+        flashSrc.setData({ type: 'FeatureCollection', features: [] });
+      }
+    }, 200);
+    // Gently pan if the point isn't already in view.
+    const bounds = map.getBounds();
+    if (!bounds.contains(coords)) {
+      map.easeTo({ center: coords, duration: 500 });
+    }
+  }
+
+  if (d.type === 'clear-selection') {
+    selectedKeys.clear();
+    refreshSelectionStyling();
+    notifySelectionChanged();
+  }
+
+  if (d.type === 'set-basemap') {
+    const src = map.getSource('satellite');
+    if (d.basemap === 'topo') {
+      src.setTiles(['https://tile.opentopomap.org/{z}/{x}/{y}.png']);
+    } else {
+      src.setTiles(['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}']);
+    }
+  }
+});
+</script>
+</body>
+</html>
