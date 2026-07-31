@@ -87,7 +87,7 @@ This tab runs movement models on each migration sequence to generate utilization
 
 1. **Choose a Model** — Select from the dropdown:  
    * **Kernel UD** — simple kernel density; fast, always available  
-   * **BBMM** (Brownian Bridge Movement Model) — accounts for movement between fixes; good general choice  
+   * **BBMM** (Brownian Bridge Movement Model) — RECOMMENDED. Accounts for movement between fixes; good general choice  
    * **dBBMM** (dynamic BBMM) — adapts to changing movement behavior; requires R  
    * **CTMM** (Continuous-Time Movement Model) — statistically rigorous; requires R  
 2. **Set Parameters** — The parameter panel updates based on your model choice. The app may auto-adjust some settings based on your data's fix rate (shown in the "Auto Logic" note).  
@@ -168,3 +168,23 @@ When you receive a new version of the app:
 | **dBBMM/CTMM falls back to simpler model** | R or required R packages aren't installed. The fallback model still produces valid results. |
 | **"App is already running"** | The app is already open in another browser tab. The terminal message will open a new tab to it. |
 | **App feels slow with many animals** | Reduce CPU cores on Tab 3 if your machine is struggling, or process fewer animal-years at a time. |
+
+---
+
+## Other Resources
+
+This app is primarily a Python translation of the Wyoming Migration Initiative's [Migration Mapper](https://migrationinitiative.org/projects/migration-mapper/). It was created by Keana Shadwell with lots of help and ideas from Bryan Leavelle and Michelle Cowardin, with many others at Colorado Parks & Wildlife contributing to testing, design, and development.
+
+Below are some extra ungulate migration modeling resources if you're interested:
+
+- [USGS Western Migrations](https://apps.usgs.gov/western-migrations/)
+- Gelzer et al. 2025, [How sampling design of GPS collar deployment influences consistency of mapped migration corridors over time](https://doi.org/10.1002/jwmg.70009)
+- Beaupre et al. 2025, [Sample size guidelines for mapping migration corridors and population distributions using tracking data](https://doi.org/10.1002/2688-8319.70073)
+- Horne et al. 2007, [Analyzing animal movement using Brownian bridges](https://doi.org/10.1890/06-0957.1)
+- McKee et al. 2024, [Estimating ungulate migration corridors from sparse movement data](https://doi.org/10.1002/ecs2.4983)
+- Paterson et al. 2023, [Hidden Markov movement models reveal diverse seasonal movement patterns in two North American ungulates](https://doi.org/10.1002/ece3.10282)
+- John et al. 2024, [Pursuit and escape drive fine-scale movement variation during migration in a temperate alpine ungulate](https://doi.org/10.1038/s41598-024-65948-8)
+- Nuñez et al. 2022, [A statistical framework for modelling migration corridors](https://doi.org/10.1111/2041-210X.13969)
+- Kauffman et al. 2026, [Ungulate Migrations of the Western United States, Volume 6](https://doi.org/10.3133/sir20265123)
+
+*This list should be updated over time.*
