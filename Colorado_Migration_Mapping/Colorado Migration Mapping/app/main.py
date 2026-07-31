@@ -1200,25 +1200,64 @@ def _make_preview_table(df: pd.DataFrame, max_rows: int = 20) -> dash_table.Data
 # ---------------------------------------------------------------------------
 # Navbar
 # ---------------------------------------------------------------------------
+def _load_user_guide() -> str:
+    guide_path = _HERE / "assets" / "user_guide.md"
+    try:
+        return guide_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "*User guide not found.*"
+
 navbar = dbc.Navbar(
     dbc.Container(
         [
-            html.Span(
-                "Colorado Migration Corridor Mapper",
-                className="navbar-brand fw-bold",
-                style={"fontSize": "1.25rem", "color": "#7ecfff"},
+            html.Div(
+                [
+                    html.Span(
+                        "Colorado Migration Corridor Mapper",
+                        className="navbar-brand fw-bold",
+                        style={"fontSize": "1.25rem", "color": "#7ecfff"},
+                    ),
+                    html.Span(
+                        "| Colorado Parks & Wildlife",
+                        style={"color": "#B0B0B0", "fontSize": "0.9rem", "marginLeft": "12px"},
+                    ),
+                ],
+                style={"display": "flex", "alignItems": "center"},
             ),
-            html.Span(
-                "| Colorado Parks & Wildlife",
-                style={"color": "#B0B0B0", "fontSize": "0.9rem", "marginLeft": "12px"},
+            html.Button(
+                "? Help",
+                id="help-guide-btn",
+                style={
+                    "background": "none", "border": "1px solid #7ecfff",
+                    "color": "#7ecfff", "borderRadius": "4px", "padding": "4px 12px",
+                    "cursor": "pointer", "fontSize": "0.85rem",
+                },
             ),
         ],
         fluid=True,
+        style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"},
     ),
     color="dark",
     dark=True,
     className="mb-3 px-3",
     style={"borderBottom": "2px solid #334"},
+)
+
+help_modal = dbc.Modal(
+    [
+        dbc.ModalHeader(dbc.ModalTitle("User Guide"), close_button=True),
+        dbc.ModalBody(
+            html.Div(
+                dcc.Markdown(_load_user_guide()),
+                className="help-guide-content",
+            ),
+            style={"backgroundColor": "#1a1a2e", "maxHeight": "75vh", "overflowY": "auto"},
+        ),
+    ],
+    id="help-guide-modal",
+    size="xl",
+    is_open=False,
+    centered=True,
 )
 
 
@@ -3346,6 +3385,7 @@ app.layout = dbc.Container(
     fluid=True,
     children=[
         navbar,
+        help_modal,
         # ---- Application state stores ----
         # Each dcc.Store is one slot of client-side state shared between
         # callbacks. Default storage_type is "memory" (lost on page reload);
@@ -3398,6 +3438,18 @@ app.layout = dbc.Container(
     ],
     style={"backgroundColor": "#111", "minHeight": "100vh", "paddingBottom": "40px"},
 )
+
+
+@app.callback(
+    Output("help-guide-modal", "is_open"),
+    Input("help-guide-btn", "n_clicks"),
+    State("help-guide-modal", "is_open"),
+    prevent_initial_call=True,
+)
+def toggle_help_modal(n_clicks, is_open):
+    if n_clicks:
+        return not is_open
+    return is_open
 
 
 # ===========================================================================

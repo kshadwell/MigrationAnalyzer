@@ -177,3 +177,23 @@
 #raster-tree-container .form-check-input:checked + .form-check-label {
     color: #fff;
 }
+
+/* Help guide modal */
+.help-guide-content {
+    color: #ddd;
+    font-size: 0.78rem;
+    line-height: 1.5;
+}
+.help-guide-content h1 { font-size: 1.1rem; margin-top: 0.8rem; }
+.help-guide-content h2 { font-size: 0.95rem; margin-top: 0.7rem; }
+.help-guide-content h3 { font-size: 0.85rem; margin-top: 0.5rem; }
+.help-guide-content h1,
+.help-guide-content h2,
+.help-guide-content h3 { color: #7ecfff; }
+.help-guide-content table { font-size: 0.75rem; }
+.help-guide-content blockquote {
+    border-left: 3px solid #7ecfff;
+    padding-left: 0.6rem;
+    color: #aac;
+    font-size: 0.76rem;
+}
