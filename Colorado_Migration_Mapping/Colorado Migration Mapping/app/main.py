@@ -248,22 +248,24 @@ except ImportError:
 # CYBORG = dark Bootstrap theme. suppress_callback_exceptions=True is
 # REQUIRED because many callbacks target component IDs that only exist in
 # certain tabs — Dash would otherwise refuse to register them at startup.
+_ASSETS_DIR = str(Path(__file__).resolve().parent / "assets")
+
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.CYBORG, dbc.icons.BOOTSTRAP],
     suppress_callback_exceptions=True,
     title="Colorado Migration Corridor Mapper",
+    assets_folder=_ASSETS_DIR,
 )
 server = app.server  # expose the underlying Flask server for WSGI deployment
 
-# Dash's assets/ folder does not auto-serve .html files. Add an explicit
-# Flask route so the Tab 2 MapLibre iframe can load maplibre_map.html.
+# Dash's built-in asset serving skips .html files. Add an explicit Flask
+# route so the Tab 2 MapLibre iframe can load maplibre_map.html.
 from flask import send_from_directory as _send_from_directory
-_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
 @server.route("/assets/<path:filename>")
 def _serve_asset(filename):
-    return _send_from_directory(str(_ASSETS_DIR), filename)
+    return _send_from_directory(_ASSETS_DIR, filename)
 
 # ---------------------------------------------------------------------------
 # Server-side caches. These are the workaround for the OOM-when-processing-
