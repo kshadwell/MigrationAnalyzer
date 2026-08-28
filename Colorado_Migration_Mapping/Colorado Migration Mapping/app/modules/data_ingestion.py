@@ -295,6 +295,38 @@ def validate_for_migration_mapper(
 
 
 # ---------------------------------------------------------------------------
+# Timestamp parsing
+# ---------------------------------------------------------------------------
+
+def _to_datetime_flexible(values, fmt: str) -> pd.Series:
+    """Parse a timestamp column, tolerant of format drift.
+
+    Wildlife Tracker / GPS-collar CSV exports are not consistent: some use ISO
+    ``YYYY-MM-DD HH:MM:SS`` (the configured default), others use US-style
+    ``M/D/YYYY H:MM``. Parsing US dates with the ISO strptime format coerces
+    EVERY row to ``NaT`` — which then cascades into a garbage ``bio_year`` and,
+    downstream, a Tab 2 ``OverflowError`` (and collapses the data on dedup).
+
+    Strategy: try the configured format first (fast, strict); if that leaves
+    more than half the rows unparsed, fall back to pandas' flexible parser and
+    keep whichever result parsed more rows.
+    """
+    parsed = pd.to_datetime(values, format=fmt, errors="coerce")
+    try:
+        nat_frac = float(pd.isna(parsed).mean())
+    except Exception:
+        nat_frac = 0.0
+    if nat_frac > 0.5:
+        try:
+            alt = pd.to_datetime(values, errors="coerce", format="mixed")
+        except Exception:
+            alt = pd.to_datetime(values, errors="coerce")
+        if int(alt.notna().sum()) > int(parsed.notna().sum()):
+            parsed = alt
+    return parsed
+
+
+# ---------------------------------------------------------------------------
 # 1. load_data
 # ---------------------------------------------------------------------------
 
@@ -419,7 +451,7 @@ def load_data(
         # Parse timestamp
         if "timestamp" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
             _fmt = "mixed" if len(_ts_col) > 1 else timestamp_format
-            df["timestamp"] = pd.to_datetime(df["timestamp"], format=_fmt, errors="coerce")
+            df["timestamp"] = _to_datetime_flexible(df["timestamp"], _fmt)
 
         gdf = gpd.GeoDataFrame(
             df,
@@ -463,7 +495,7 @@ def load_data(
 
         if "timestamp" in gdf.columns:
             _fmt = "mixed" if len(_ts_col) > 1 else timestamp_format
-            gdf["timestamp"] = pd.to_datetime(gdf["timestamp"], format=_fmt, errors="coerce")
+            gdf["timestamp"] = _to_datetime_flexible(gdf["timestamp"], _fmt)
 
         # Ensure lon/lat columns exist from geometry if missing
         if "lon" not in gdf.columns:
@@ -1106,6 +1138,35 @@ def process_data(
     if "lon" in gdf.columns:
         gdf = gdf[(gdf["lon"] < 0) & gdf["lon"].notna() & gdf["lat"].notna()]
     gdf = gdf.reset_index(drop=True)
+
+    # ---- 1b. Drop fixes whose timestamp could not be parsed ----
+    # A fix with no valid timestamp can't be ordered in time (it breaks bursts,
+    # NSD, and bio-year). Critically, if the WHOLE column failed to parse — e.g.
+    # the file uses a date layout even the flexible parser couldn't read — a
+    # garbage bio_year would otherwise cascade into a Tab 2 OverflowError and the
+    # data would silently collapse on the (animal_id, NaT) de-dup. Fail loudly
+    # instead so the user knows to check the Timestamp column / format.
+    if "timestamp" in gdf.columns:
+        bad_ts = gdf["timestamp"].isna()
+        n_bad = int(bad_ts.sum())
+        if n_bad:
+            if n_bad == len(gdf):
+                _example = ""
+                for _c in ts_col:
+                    if _c in raw_df.columns:
+                        _nz = raw_df[_c].dropna()
+                        if not _nz.empty:
+                            _example = str(_nz.iloc[0])
+                            break
+                raise ValueError(
+                    f"Could not parse any timestamps from column '{', '.join(ts_col)}'"
+                    + (f" (example value: '{_example}')" if _example else "")
+                    + ". The dates don't match a recognised date/time format. On Tab 1, "
+                    "check the Timestamp column selection and that the values look like a "
+                    "normal date/time (e.g. '2019-12-20 03:00:00' or '12/20/2019 3:00')."
+                )
+            gdf = gdf[~bad_ts].reset_index(drop=True)
+            log.append(f"Dropped {n_bad:,} fix(es) with unparseable timestamps.")
 
     # ---- 2. Deduplicate ----
     before = len(gdf)

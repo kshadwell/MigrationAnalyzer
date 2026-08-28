@@ -104,8 +104,17 @@ try:
         generate_metadata_summary,
         export_all,
     )
-    from app.modules.road_crossings import detect_crossings_batch
-    from app.modules.raster_sampler import sample_rasters, AVAILABLE_VARIABLES
+    from app.modules.road_crossings import (
+        detect_crossings_batch,
+        roads_file,
+        env_data_dir as roads_env_data_dir,
+    )
+    from app.modules.raster_sampler import (
+        sample_rasters,
+        AVAILABLE_VARIABLES,
+        dem_available,
+        env_data_dir as raster_env_data_dir,
+    )
     from app.modules.wld_reader import (
         WLD_COLUMNS,
         DEFAULT_SELECTED as WLD_DEFAULT_SELECTED,
@@ -150,8 +159,17 @@ except ImportError:
             generate_metadata_summary,
             export_all,
         )
-        from modules.road_crossings import detect_crossings_batch
-        from modules.raster_sampler import sample_rasters, AVAILABLE_VARIABLES
+        from modules.road_crossings import (
+            detect_crossings_batch,
+            roads_file,
+            env_data_dir as roads_env_data_dir,
+        )
+        from modules.raster_sampler import (
+            sample_rasters,
+            AVAILABLE_VARIABLES,
+            dem_available,
+            env_data_dir as raster_env_data_dir,
+        )
         from modules.wld_reader import (
             WLD_COLUMNS,
             DEFAULT_SELECTED as WLD_DEFAULT_SELECTED,
@@ -162,8 +180,16 @@ except ImportError:
     except ImportError:
         def detect_crossings_batch(*a, **k):
             return {}
+        def roads_file():
+            return None
+        def roads_env_data_dir():
+            return Path("environment_data")
         def sample_rasters(df, *a, **k):
             return df
+        def dem_available():
+            return False
+        def raster_env_data_dir():
+            return Path("environment_data")
         AVAILABLE_VARIABLES = {}
         WLD_COLUMNS = {}
         WLD_DEFAULT_SELECTED = []
@@ -4514,6 +4540,15 @@ def process_uploaded_data(
         try:
             processing_log.append("")
             processing_log.append(f"Sampling {len(raster_vars)} raster variable(s) at {len(gdf):,} GPS fixes...")
+            # Warn up front if elevation was requested but the DEM tiles aren't
+            # installed — otherwise elevation silently comes back all-blank and
+            # looks like a sampling bug rather than a missing-data problem.
+            if "elevation_m" in raster_vars and not dem_available():
+                processing_log.append(
+                    f"WARNING: Elevation requested but no DEM tiles were found in "
+                    f"{raster_env_data_dir() / 'elevation'}. Elevation will be blank. Install the "
+                    f"environment data (run Setup.bat, or place the 'elevation' folder there) and reprocess."
+                )
             gdf_flat = pd.DataFrame(gdf.drop(columns=["geometry"], errors="ignore"))
             gdf_flat = sample_rasters(gdf_flat, raster_vars, lat_col="lat", lon_col="lon", ts_col="timestamp")
             for vc in raster_vars:
@@ -4709,7 +4744,16 @@ def process_uploaded_data(
     # so the UI returns immediately; results are written to disk and picked
     # up by Tab 2 lazily.
     road_results: dict = {}
-    if detect_roads:
+    if detect_roads and roads_file() is None:
+        # Data isn't installed — say so plainly instead of spawning a worker
+        # that silently reports zero crossings for every animal.
+        processing_log.append(
+            f"WARNING: Road-crossing detection is ON but no roads layer was found "
+            f"(looked for all_roads_merged.gpkg / .shp in {roads_env_data_dir()}). "
+            f"No crossings can be computed. Install the environment data (run Setup.bat, or place "
+            f"the roads file there) and reprocess."
+        )
+    elif detect_roads:
         import threading as _th_roads
 
         def _road_worker():
@@ -5042,9 +5086,15 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_over
         bio_year_int = int(bio_year_str)
         if bio_year_int < 100:
             bio_year_int += 2000
+        # Guard against a corrupt bio-year (e.g. an id_bio_year built from fixes
+        # whose timestamps failed to parse — that yields an absurd year like
+        # 9223372036854775807, and pd.Timestamp(year=...) then raises
+        # OverflowError). Bounding the year keeps a bad key from crashing Tab 2.
+        if not (1900 <= bio_year_int <= 2100):
+            raise ValueError(f"bio_year {bio_year_int} out of range")
         bio_start = pd.Timestamp(year=bio_year_int, month=bio_month, day=bio_day)
         bio_end = pd.Timestamp(year=bio_year_int + 1, month=bio_month, day=bio_day) - pd.Timedelta(days=1)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         bio_start = None
         bio_end = None
 

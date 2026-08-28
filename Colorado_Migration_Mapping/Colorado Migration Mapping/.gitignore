@@ -13,6 +13,11 @@ CLAUDE.local.md
 WesternCorridorMappingTeam-main/
 # Rendered output of the .md docs — generated from the markdown sources.
 *.html
+# ...BUT the Tab 2 map is a real source file, not rendered doc output. Without
+# this exception the *.html rule above silently un-tracks it, so it never gets
+# committed and every fresh clone 404s on Tab 2 (the /assets/maplibre_map.html
+# iframe has nothing to serve). Keep it tracked.
+!app/assets/*.html
 # Bundled Python — Setup.bat downloads and installs this
 python-3.13/
 

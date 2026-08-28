@@ -23,8 +23,9 @@ def _resolve_env_data() -> Path:
     """Pick the first candidate that actually contains the env data."""
     here = Path(__file__).resolve()
     candidates = [
-        here.parent.parent.parent / "environment_data",           # canonical
-        here.parent.parent.parent.parent.parent,                  # MigrationFiles/MigrationAnalyzer/
+        here.parent.parent.parent / "environment_data",                # canonical (Setup.bat renames the zip to this)
+        here.parent.parent.parent / "Ext_FilesForMigrationAnalyzer",   # zip extracted but not renamed to environment_data
+        here.parent.parent.parent.parent.parent,                       # MigrationFiles/MigrationAnalyzer/
     ]
     for c in candidates:
         if (c / "elevation").is_dir() or (c / "snodas_colorado.pkl").exists():
@@ -34,6 +35,22 @@ def _resolve_env_data() -> Path:
 _ENV_DATA = _resolve_env_data()
 _DEM_DIR = _ENV_DATA / "elevation"
 _SNODAS_PKL = _ENV_DATA / "snodas_colorado.pkl"
+
+
+def dem_available() -> bool:
+    """True if at least one DEM tile (.tif) is present under the resolved
+    environment-data directory. Lets the UI warn up front (instead of silently
+    leaving elevation blank) when the data isn't installed."""
+    try:
+        return _DEM_DIR.is_dir() and any(_DEM_DIR.glob("*.tif"))
+    except Exception:
+        return False
+
+
+def env_data_dir() -> Path:
+    """The environment-data directory the samplers are pointed at, whether or not
+    it actually contains data. Used in the 'data not found' warning."""
+    return _ENV_DATA
 
 # SNODAS Colorado extraction window (must match download_snodas.py)
 _CO_LAT_MIN, _CO_LAT_MAX = 36.5, 41.5

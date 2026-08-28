@@ -26,8 +26,9 @@ def _resolve_env_data() -> Path:
     """Prefer environment_data/ next to app/; fall back to MigrationFiles/MigrationAnalyzer/."""
     here = Path(__file__).resolve()
     candidates = [
-        here.parent.parent.parent / "environment_data",           # canonical
-        here.parent.parent.parent.parent.parent,                  # MigrationFiles/MigrationAnalyzer/
+        here.parent.parent.parent / "environment_data",                # canonical (Setup.bat renames the zip to this)
+        here.parent.parent.parent / "Ext_FilesForMigrationAnalyzer",   # zip extracted but not renamed to environment_data
+        here.parent.parent.parent.parent.parent,                       # MigrationFiles/MigrationAnalyzer/
     ]
     for c in candidates:
         if any((c / fn).exists() for fn in _ROADS_FILENAMES):
@@ -46,6 +47,19 @@ def _resolve_roads_file() -> Optional[Path]:
 
 _ENV_DATA = _resolve_env_data()
 _MERGED_SHP = _resolve_roads_file()
+
+
+def roads_file() -> Optional[Path]:
+    """The resolved merged-roads layer, or None if no roads file was found under
+    the environment-data directory. Lets the UI warn up front (instead of
+    silently reporting zero crossings) when the data isn't installed."""
+    return _MERGED_SHP
+
+
+def env_data_dir() -> Path:
+    """The environment-data directory the roads loader is pointed at, whether or
+    not it actually contains a roads file. Used in the 'data not found' warning."""
+    return _ENV_DATA
 
 # MTFCC codes:
 #   S1100 = primary road (interstate / US highway, limited access)

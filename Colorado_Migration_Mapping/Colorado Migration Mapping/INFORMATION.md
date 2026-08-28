@@ -246,7 +246,6 @@ These are the in-flight tasks mirrored from the session task list.
   - **Population merging step**: our `calc_season_banded_outputs` normalises each individual to sum=1 then averages. R's `CalcPopUse` may do a weighted sum or volume-rank-based aggregation.
   - **Cell-size and CRS**: confirm both pipelines use the same projected CRS and 500 m cell size end-to-end (no implicit reprojection differences).
 - **Test CTMM and dBBMM end-to-end.** (Backburner) Implementation done (2026-07-09) via R subprocess but not yet verified. Plan is to translate the R scripts to native Python, so deferring testing of the R bridge.
-- **Investigate pop_use_contours.shp.** Not showing any data — determine what this file is and fix.
 - **CTMM season outputs.** Generate spring migration, fall migration, summer, and winter points and lines from CTMM.
 - **~50m offset in CTMM points.** Test data showed all points offset ~50 m from original CTMM points. **Audit (2026-07-14):** almost certainly **grid cell snapping** (`np.ceil` on 250m cells → up to ~125m shift), not a projection bug.
 - **Polygon shapefiles + smoothing.** Implement Flenner's smoothing method for polygon shapefiles.
@@ -259,12 +258,35 @@ These are the in-flight tasks mirrored from the session task list.
 - **Generate vector outputs as GeoJSON for faster Tab 5 display.** Currently the model writes shapefiles, and the first time Tab 5 loads one it goes through GeoPandas (~2.5s per file). A `.display.geojson` companion cache now avoids this on repeat loads, but if the model output steps wrote GeoJSON (EPSG:4326) directly, even first loads would be near-instant (`json.load` vs. GeoPandas/fiona).
 - **MigPoints/MigLines slow to load in Tab 5.** Even after trimming columns for display, these layers are sluggish to render on the map. Investigate further optimizations (e.g. simplifying geometries, limiting point count, or rendering as tile layers).
 - **FlagsRemoved layer symbology.** The FlagsRemoved shapefile looks wrong when loaded as a vector overlay in Tab 5 — investigate and fix the default styling/symbology.
-- **Calves/fawns filter — excluded age classes may need updating.** The "Filter out calves/fawns" checkbox (Tab 1, default on) currently removes animals whose age class column value is "calf" or "fawn" (case-insensitive). Yearlings and all other values are kept. If future datasets use different terminology (e.g. "juvenile", "neonate", "young-of-year") or if yearlings should sometimes be excluded, the hardcoded set `_EXCLUDED_AGE_CLASSES` in `process_uploaded_data` will need to be expanded or made user-configurable.
 - **Note in outputs: individuals are stacked, not sequences.** Add a note/label in the population output UI and exported metadata clarifying that individual UDs are stacked (averaged), not per-sequence UDs.
-- **Information popups (ℹ buttons).** Add small info buttons next to key parameters/UI elements that show a popup explaining what the parameter does, recommended values, and defaults. Will create a reference document specifying the content for each popup. Covers WLD file documentation (#9) and the "individuals not sequences" note (#13).
-- **User guide.** Create a step-by-step user guide explaining how to use the app for different purposes. Link or include in the repository.
 - **Slow working directory selection.** Selecting a working directory takes a very long time to finish updating. Investigate whether this is a machine/network issue or an app bottleneck (e.g., scanning large directories, loading cached data).
 
+
+### 2026-08-28 — US-format timestamps → Tab 2 OverflowError fixed (robust date parsing)
+
+**Symptom.** Processing a Wildlife Tracker CSV whose dates are US-style (`mtReadable = 12/20/2019 3:00`) succeeded on Tab 1 but crashed Tab 2 with `OverflowError: Python int too large to convert to C long` in `render_seq_panels` at `pd.Timestamp(year=bio_year_int, ...)`.
+
+**Root cause.** `load_data` parsed the timestamp column with the fixed `timestamp_format` (`%Y-%m-%d %H:%M:%S`). US `M/D/YYYY H:MM` values don't match, so `to_datetime(errors="coerce")` turned EVERY row to `NaT`. `calc_bio_year` then did `ts.dt.year.to_numpy(dtype=int)` → a `NaN`→int cast → `9223372036854775807` (INT64_MAX), which became the year token in `id_bio_year`; Tab 2's `pd.Timestamp(year=...)` overflowed (the `except (ValueError, TypeError)` didn't catch `OverflowError`). Secondary damage: all-`NaT` timestamps collapsed a 2,998-row file to 5 rows on de-dup.
+
+**Fix.** `data_ingestion._to_datetime_flexible` tries the configured format first, and if >50% of rows are `NaT`, falls back to pandas' flexible parser (used in both `load_data` branches). `process_data` now drops fixes with unparseable timestamps (logged) and raises a clear error if the WHOLE column fails. `main.py render_seq_panels` bounds the bio-year to 1900–2100 and catches `OverflowError`. Verified the E38 sample now parses all 2,998 rows (`bio_year` 2019/2020/2021), no overflow.
+
+**Files touched.** `app/modules/data_ingestion.py`, `app/main.py`, `INFORMATION.md`.
+
+### 2026-08-28 — Road/DEM data path resolver hardened + "data not found" warnings; roads layer now statewide
+
+**Why.** Road-crossing detection was silently reporting no crossings for every animal. Root cause was **not code**: the environment data had been extracted to `Ext_FilesForMigrationAnalyzer/` but never renamed to `environment_data/`, so `_resolve_env_data()` didn't find it, `_load_roads` returned `None`, and every animal came back `crosses_road=False`.
+
+**Changes.** `_resolve_env_data()` in both `road_crossings.py` and `raster_sampler.py` now also accepts `Ext_FilesForMigrationAnalyzer/` (the raw name the Setup zip extracts to). New accessors `roads_file()` / `dem_available()` / `env_data_dir()` let the UI check data availability. `main.py process_uploaded_data` now logs a clear WARNING when road detection is on but no roads layer is found, and when elevation is requested but no DEM tiles are found — instead of silently returning zero crossings / blank elevation.
+
+**Roads coverage correction.** The roads layer was re-downloaded from TIGER and is now **statewide — all 64 Colorado counties** (FIPS 08001–08125, 322,246 features). Supersedes the 2026-07-07 "only 19 counties" note.
+
+**Files touched.** `app/modules/road_crossings.py`, `app/modules/raster_sampler.py`, `app/main.py`, `INFORMATION.md`.
+
+### 2026-08-28 — Harden Tab 2 map-file tracking (`.gitignore` `*.html` exception)
+
+`app/assets/maplibre_map.html` (the Tab 2 MapLibre iframe, served via the explicit `/assets/<file>` Flask route) is force-added to the repo, but the `*.html` rule in `.gitignore` — added to skip *rendered markdown docs* — also matches it. That makes the file one `git rm --cached` / re-add away from silently un-tracking, which 404s Tab 2 on any copy that ends up without it (observed on a stale ZIP snapshot that predated the file being committed). Added `!app/assets/*.html` below the `*.html` rule so the map file stays tracked robustly.
+
+**Files touched.** `.gitignore`, `INFORMATION.md`.
 
 ### 2026-07-17 — Shapefile attribute table fix, MinimumX custom layer
 
@@ -401,7 +423,7 @@ Initialized git in `MigrationAnalyzer/`, added `.gitignore` for large data files
 - `detect_crossings_batch` now `sort_values("timestamp")` per animal before building the track LineString, so the connecting segments follow real movement order (groupby preserves input order, not necessarily chronological; ISO-string timestamps also sort chronologically).
 - **Verified on D4_Test6 (207 animal-years): crosses_road 43 → 164, crosses_highway → 43.** The roads layer used for matching grew 1,404 → 118,792 features. The first test animal (previously False) now correctly reports `crosses_road: True`. Wiring was already fine (results keyed by `id_bio_year`, stored in `road_crossings.json`, surfaced via `_crossing_phrase`/Tab 2). Detection is still opt-in via the Tab 1 "Detect road crossings" checkbox (off by default — it's slower now with 119k features, but sindex keeps it fine).
 
-**Coverage limitation (data, not code — flag for real runs):** `MigrationAnalyzer/all_roads_merged.shp` covers only **19 Colorado counties** (Boulder, Denver, Larimer, Weld, Grand, Routt, Moffat, Eagle, Garfield, Summit, Park, Pitkin, Rio Blanco, Lake, Clear Creek, Gilpin, Jackson, Logan, Morgan) + 3 southern-WY counties (Albany, Carbon, Laramie). Bounds lat **38.69–42.43**, lon −109.05 to −102.65. **The other 45 CO counties are NOT covered** (no El Paso, Pueblo, Mesa, Douglas, Jefferson, Arapahoe, Gunnison, Montrose, La Plata, etc.), so animals there report "no crossing" for lack of road data. The bundled file IS the merged product and the **source county files are gone** — you can't gain coverage by re-merging what's present; the missing counties must be downloaded.
+**Coverage limitation (data, not code — flag for real runs):** ~~*[SUPERSEDED 2026-08-28 — the roads layer was re-downloaded from TIGER and now covers all 64 Colorado counties statewide (`all_roads_merged.gpkg`, 322,246 features, bounds lat 36.99–41.00 / lon −109.06 to −102.04). The limitation below is historical.]*~~ `MigrationAnalyzer/all_roads_merged.shp` covers only **19 Colorado counties** (Boulder, Denver, Larimer, Weld, Grand, Routt, Moffat, Eagle, Garfield, Summit, Park, Pitkin, Rio Blanco, Lake, Clear Creek, Gilpin, Jackson, Logan, Morgan) + 3 southern-WY counties (Albany, Carbon, Laramie). Bounds lat **38.69–42.43**, lon −109.05 to −102.65. **The other 45 CO counties are NOT covered** (no El Paso, Pueblo, Mesa, Douglas, Jefferson, Arapahoe, Gunnison, Montrose, La Plata, etc.), so animals there report "no crossing" for lack of road data. The bundled file IS the merged product and the **source county files are gone** — you can't gain coverage by re-merging what's present; the missing counties must be downloaded.
 
 **Statewide roads plan (2026-07-07):** TIGER has no single statewide All-Roads file (per-county All-Roads includes S1400 local; the one statewide Primary/Secondary file omits local roads). Plan (per user): download the missing counties' All-Roads and merge.
 - **New utility `merge_tiger_roads.py`** (project root, next to `Start App.bat`): reads county `tl_*_roads.shp`/`.zip` from `--input`, folds in the existing merged layer by default (so only the missing 45 counties need downloading), dedupes on `LINEARID`, and writes **`all_roads_merged.gpkg`** (GeoPackage — a full-state all-roads merge is ~1M+ features, past shapefile's 2 GB / 10-char-field limits). Reports MTFCC counts + counties + bounds. County FIPS parsed from the TIGER filename → `county_fip`. Verified: folding the existing layer into a temp `.gpkg` round-trips (143,962 features, schema `LINEARID/FULLNAME/RTTYP/MTFCC/county_fip/geometry`, CRS EPSG:4269).
