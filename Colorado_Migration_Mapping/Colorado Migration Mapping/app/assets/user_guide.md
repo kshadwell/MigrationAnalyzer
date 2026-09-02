@@ -56,7 +56,7 @@ This is where you load your GPS collar data and set processing parameters.
    * **Minimum satellites** — minimum satellite count to keep a fix. Look into the specific collar vendor's recommended minimum satellites.  
    * **Mortality filter** — flags collars that stopped moving  
    * **Speed filter** — removes fixes that imply unrealistic travel speeds  
-   * **Bio-year start** — the month/day your biological year begins (e.g., February 1 for deer, February 15 for elk)  
+   * **Mig-year start** — the month/day your migration year begins (e.g., February 1 for deer, February 15 for elk)  
 6. **Environmental Variables (optional)** — Toggle on elevation and if you installed the environmental data during setup. You can also enable road crossing detection if you would like your data to flag when an animal crosses a road or highway.  
 7. **Process Data** — Click the blue "Process Data" button. The right side of the screen will show progress, then display a summary of your cleaned dataset and a preview table. Problem points (flagged by the filters) are noted but kept available — you can review and unflag them in Tab 2\. Once you see the green bar at the top of the screen telling you that the data has been successfully processed, move on to tab 2\. After you process the data for the first time, if you have defined a project name, then in later sessions you can quickly reload the same project without going through the steps above.
 

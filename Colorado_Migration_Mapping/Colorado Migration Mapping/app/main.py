@@ -444,11 +444,13 @@ def _save_classifications(data: dict, project_name: str = ""):
 _CLASSIFICATION_NOTE = {
     "resident": "Resident. No migration identified.",
     "nomadic": "Non-migratory, nomadic. Lots of movements but no migration identified.",
+    "insufficient": "Insufficient data to be included in the analysis.",
     "migratory": "Migration identified.",
 }
 
-# Classifications whose animal-years are dropped from the analysis on export.
-_REMOVED_CLASSIFICATIONS = ("resident", "nomadic")
+# Classifications whose animal-years are dropped from the analysis on export
+# (removed from the migtime table, archived to AnimalYearsRemoved.csv).
+_REMOVED_CLASSIFICATIONS = ("resident", "nomadic", "insufficient")
 
 
 def _classification_note(classification: str, crosses_road: bool, crosses_highway: bool) -> str:
@@ -1464,6 +1466,27 @@ tab1_layout = dbc.Container(
                                             className="text-muted d-block mb-2",
                                             style={"fontSize": "0.75rem"},
                                         ),
+                                        # New-project name FIRST — most users
+                                        # should be naming a fresh project so they
+                                        # can reload it later. The "— OR —" makes
+                                        # the two paths (name a new one vs. load an
+                                        # existing one) unmistakable.
+                                        dbc.Input(
+                                            id="project-name",
+                                            type="text",
+                                            placeholder="New project name (e.g. A37_Pronghorn_2026)",
+                                            size="sm",
+                                            className="mb-2",
+                                        ),
+                                        html.Div(
+                                            "— OR —",
+                                            className="text-muted text-center my-2",
+                                            style={
+                                                "fontSize": "0.75rem",
+                                                "fontWeight": "bold",
+                                                "letterSpacing": "0.08em",
+                                            },
+                                        ),
                                         dbc.Row([
                                             dbc.Col(
                                                 dcc.Dropdown(
@@ -1479,12 +1502,6 @@ tab1_layout = dbc.Container(
                                                 width=4,
                                             ),
                                         ], className="mb-2"),
-                                        dbc.Input(
-                                            id="project-name",
-                                            type="text",
-                                            placeholder="New project name (e.g. A37_Pronghorn_2026)",
-                                            size="sm",
-                                        ),
                                         html.Div(id="project-load-status", className="mt-1 small"),
                                     ]
                                 ),
@@ -1604,7 +1621,7 @@ tab1_layout = dbc.Container(
                                         html.Div(
                                             dbc.Checkbox(
                                                 id="utm-input-toggle",
-                                                label="Yes, my CSV data is in UTM Zone 13N (EPSG:32613)",
+                                                label="Do NOT check this box UNLESS your data is in UTM Zone 13N (EPSG:32613) rather than WGS84.",
                                                 value=False,
                                                 className="small",
                                             ),
@@ -1764,7 +1781,7 @@ tab1_layout = dbc.Container(
                                             [
                                                 dbc.Col(
                                                     [
-                                                        dbc.Label("Bio Year Start (M/D)", style={"fontSize": "0.85rem", "fontWeight": "bold"}),
+                                                        dbc.Label("Mig Year Start (M/D)", style={"fontSize": "0.85rem", "fontWeight": "bold"}),
                                                         dbc.InputGroup(
                                                             [
                                                                 dbc.Input(
@@ -2038,7 +2055,7 @@ tab1_layout = dbc.Container(
                                             style={"fontSize": "0.82rem", "marginBottom": "8px"},
                                             className="dash-dark-dropdown",
                                         ),
-                                        dbc.Label("Bio-year start (month / day)", style={"fontSize": "0.8rem"}),
+                                        dbc.Label("Mig-year start (month / day)", style={"fontSize": "0.8rem"}),
                                         dbc.Row(
                                             [
                                                 dbc.Col(
@@ -2061,7 +2078,7 @@ tab1_layout = dbc.Container(
                                             className="g-2 mb-2",
                                         ),
                                         html.Small(
-                                            "Must match the bio-year start defined in the Processing Parameters so "
+                                            "Must match the mig-year start defined in the Processing Parameters so "
                                             "the animal-year keys align (auto-filled from the file when present). "
                                             "Recommended: Mule Deer Feb. 1; Elk Feb. 15",
                                             className="text-muted d-block mb-2",
@@ -2159,12 +2176,39 @@ tab2_layout = dbc.Container(
                 # LEFT SIDEBAR: settings + navigation
                 dbc.Col(
                     [
+                        # Load a previously-saved migtime table — placed at the top
+                        # so returning users see it first (moved out of the Migtime
+                        # Table card below). The explanation lives in a small 'ⓘ'
+                        # click-popup next to the button so it doesn't crowd the
+                        # sidebar.
+                        html.Div(
+                            [
+                                dbc.Button(
+                                    "Load Previous Table",
+                                    id="btn-load-migtime",
+                                    color="secondary",
+                                    size="sm",
+                                    className="flex-grow-1",
+                                ),
+                                _info_label(
+                                    "",
+                                    "Load Previous Table loads in the most recently saved migtime "
+                                    "table in the working directory's Migtime_Exports folder. This "
+                                    "is helpful when you are coming back to a previously created "
+                                    "project to check on the status and update migrations. If you "
+                                    "are working in a newly created project, this button can be "
+                                    "ignored.",
+                                ),
+                            ],
+                            className="d-flex align-items-center mb-1",
+                        ),
+                        html.Div(id="load-migtime-status", className="mb-2 small"),
                         dbc.Card(
                             [
-                                dbc.CardHeader("Biological Year & Sequence Settings"),
+                                dbc.CardHeader("Migration Year & Sequence Settings"),
                                 dbc.CardBody(
                                     [
-                                        dbc.Label("Bio Year Start Date", style={"fontSize": "0.85rem"}),
+                                        dbc.Label("Mig Year Start Date", style={"fontSize": "0.85rem"}),
                                         dbc.Row(
                                             [
                                                 dbc.Col(
@@ -2238,20 +2282,6 @@ tab2_layout = dbc.Container(
                                             color="primary",
                                             size="sm",
                                             className="w-100 mb-1",
-                                        ),
-                                        dbc.Button(
-                                            "Load Previous Table",
-                                            id="btn-load-migtime",
-                                            color="secondary",
-                                            size="sm",
-                                            className="w-100 mb-1",
-                                        ),
-                                        dbc.Button(
-                                            "Overwrite Table",
-                                            id="btn-overwrite-migtime",
-                                            color="warning",
-                                            size="sm",
-                                            className="w-100",
                                         ),
                                         html.Div(id="migtime-status", className="mt-2 small"),
                                     ]
@@ -2503,9 +2533,10 @@ tab2_layout = dbc.Container(
                                                             dbc.RadioItems(
                                                                 id="animal-classification",
                                                                 options=[
+                                                                    {"label": "Migratory", "value": "migratory"},
                                                                     {"label": "Resident", "value": "resident"},
                                                                     {"label": "Nomadic", "value": "nomadic"},
-                                                                    {"label": "Migratory", "value": "migratory"},
+                                                                    {"label": "Insufficient Data", "value": "insufficient"},
                                                                 ],
                                                                 value=None,
                                                                 inline=True,
@@ -2547,34 +2578,23 @@ tab2_layout = dbc.Container(
                                                 ),
                                                 dbc.Col(
                                                     [
-                                                        dbc.Label("Road Crossings", style={"fontSize": "0.8rem"}),
-                                                        html.Div(
-                                                            [
-                                                                html.Div(
-                                                                    [html.Strong("Crosses Road: ", style={"fontSize": "0.8rem"}),
-                                                                     html.Span(id="crosses-road-badge", children="—",
-                                                                               className="badge", style={"fontSize": "0.8rem"})],
-                                                                    className="mb-1",
-                                                                ),
-                                                                html.Div(
-                                                                    [html.Strong("Crosses Highway: ", style={"fontSize": "0.8rem"}),
-                                                                     html.Span(id="crosses-highway-badge", children="—",
-                                                                               className="badge", style={"fontSize": "0.8rem"})],
-                                                                ),
-                                                            ],
+                                                        # Replaces the old Crosses Road/Highway badges — crossings
+                                                        # aren't shown per-animal anymore; they're appended to each
+                                                        # animal's note at export (migtime + AnimalYearsRemoved).
+                                                        html.Small(
+                                                            "Note that animal-years that have no migrations identified "
+                                                            "(i.e., residents, nomads, and insufficient data) are removed "
+                                                            "from the migtime table and are instead documented in the "
+                                                            "AnimalYearsRemoved.csv.",
+                                                            className="text-muted d-block",
+                                                            style={"fontSize": "0.72rem", "lineHeight": "1.3"},
                                                         ),
-                                                    ],
-                                                    width=3,
-                                                ),
-                                                dbc.Col(
-                                                    [
-                                                        dbc.Label("Notes save automatically", style={"fontSize": "0.7rem"}, className="text-muted"),
                                                         # Notes auto-save (textarea debounce=800 →
-                                                        # autosave_animal_notes). This div just surfaces the
+                                                        # autosave_animal_notes). This div surfaces the
                                                         # "✓ Saved" indicator; there's no manual save button.
-                                                        html.Div(id="notes-save-status", className="mt-1 small"),
+                                                        html.Div(id="notes-save-status", className="mt-2 small"),
                                                     ],
-                                                    width=3,
+                                                    width=6,
                                                 ),
                                             ],
                                         ),
@@ -5035,6 +5055,24 @@ def build_migtime_store(selected_animal, autodetect_clicks, n_seqs, processed_js
         raise PreventUpdate
 
 
+# Mig-year start entered on Tab 1 (param-bio-month/day) flows to Tab 2's
+# mig-year start (seq-bio-year-month/day), so the sequencing charts open on the
+# same date the user set during processing — they don't have to re-enter it.
+# Tab 1 is the source of truth; a later manual edit on Tab 2 still sticks and is
+# only overridden if the user goes back and changes Tab 1 again.
+@app.callback(
+    Output("seq-bio-year-month", "value", allow_duplicate=True),
+    Output("seq-bio-year-day", "value", allow_duplicate=True),
+    Input("param-bio-month", "value"),
+    Input("param-bio-day", "value"),
+    prevent_initial_call=True,
+)
+def sync_migyear_start_to_tab2(month, day):
+    m = int(month) if month not in (None, "") else 2
+    d = int(day) if day not in (None, "") else 1
+    return m, d
+
+
 @app.callback(
     Output("nsd-plot", "figure"),
     Output("displacement-plot", "figure"),
@@ -5048,12 +5086,14 @@ def build_migtime_store(selected_animal, autodetect_clicks, n_seqs, processed_js
     Input("store-seq-names", "data"),
     Input("seq-num-sequences", "value"),
     Input("nsd-overlay-toggles", "value"),
+    # Mig-year start as Inputs (not State): the charts redraw + re-anchor their
+    # x-range the moment it changes, including when it's synced from Tab 1.
+    Input("seq-bio-year-month", "value"),
+    Input("seq-bio-year-day", "value"),
     State("store-processed-data", "data"),
-    State("seq-bio-year-month", "value"),
-    State("seq-bio-year-day", "value"),
     prevent_initial_call=True,
 )
-def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_overlays, processed_json, bio_month, bio_day):
+def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_overlays, bio_month, bio_day, processed_json):
     """Tab-2 RENDERER: rebuild the four plots + the slider cards from the
     migtime table, which is the single source of truth for which sequences
     exist for this animal.
@@ -5880,6 +5920,23 @@ def _compose_notes(user_note: str, crosses_road: bool, crosses_highway: bool) ->
     return f"{note} {phrase}".strip()
 
 
+def _fix_removal_note(is_problem: bool, is_mortality: bool,
+                      problem_reason: str, mortality_reason: str) -> str:
+    """One-line note for a removed (flagged) fix in Problems_Morts_Removed.
+
+    Uses the recorded auto-flag reason (speed/DOP/satellite math for problems,
+    the residence-time math for mortalities); falls back to a "manually flagged"
+    label when no reason was stored (hand-flagged on Tab 2). A fix can be both."""
+    parts = []
+    if is_problem:
+        r = (problem_reason or "").strip()
+        parts.append(f"Problem point: {r}" if r else "Manually flagged problem point.")
+    if is_mortality:
+        r = (mortality_reason or "").strip()
+        parts.append(f"Mortality point: {r}" if r else "Manually flagged mortality point.")
+    return "  ".join(parts)
+
+
 @app.callback(
     Output("migtime-status", "children", allow_duplicate=True),
     Input("btn-export-migtime", "n_clicks"),
@@ -5910,11 +5967,12 @@ def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store
     migtime = _json_to_df(migtime_json, "migtime")
     _populate_migtime_notes(migtime, notes_store, road_store)
 
-    # Animal-years classified Resident or Nomadic are kept out of the analysis:
-    # excluded from the exported migtime table (so no migration sequences are
-    # built for them), flagged in-place in the processed data via a
-    # `classification` column, and archived to ResidentsNomadsRemoved.{csv,shp}
-    # alongside FlagsRemoved.gpkg.
+    # Animal-years classified Resident / Nomadic / Insufficient data are kept out
+    # of the analysis: excluded from the exported migtime table (so no migration
+    # sequences are built for them), flagged in-place in the processed data via a
+    # `classification` column, and archived (one row per animal-year) to
+    # AnimalYearsRemoved.csv. Per-fix problem/mortality removals from the animals
+    # that were KEPT go to Problems_Morts_Removed.csv/.shp.
     class_store = class_store or {}
     removed_keys = {
         str(k) for k, v in class_store.items() if v in _REMOVED_CLASSIFICATIONS
@@ -5953,41 +6011,107 @@ def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store
             try:
                 df = _json_to_df(processed_json, "processed")
 
-                removed_df = pd.DataFrame()
+                # Stamp the classification onto the removed animal-years' fixes
+                # in the processed data (persisted in the parquet, used downstream).
                 if removed_keys and "id_bio_year" in df.columns:
-                    key_str = df["id_bio_year"].astype(str)
-                    mask = key_str.isin(removed_keys)
+                    _key_all = df["id_bio_year"].astype(str)
                     if "classification" not in df.columns:
                         df["classification"] = ""
-                    df.loc[mask, "classification"] = key_str[mask].map(class_store)
-                    removed_df = df[mask].copy()
+                    _ay_all = _key_all.isin(removed_keys)
+                    df.loc[_ay_all, "classification"] = _key_all[_ay_all].map(class_store)
 
                 _save_processed_to_disk(df.copy())
                 if _ACTIVE_WORKDIR is not None:
                     outputs = _workdir_outputs()
                     removed_dir = outputs / "RemovedPoints"
                     removed_dir.mkdir(parents=True, exist_ok=True)
-                    if not removed_df.empty:
-                        removed_df["classification"] = (
-                            removed_df["id_bio_year"].astype(str).map(class_store)
+
+                    # AnimalYearsRemoved.csv — ONE row per removed animal-year
+                    # (resident / nomadic / insufficient). Notes = classification
+                    # sentence + road/highway crossing phrase.
+                    if removed_keys and "id_bio_year" in df.columns:
+                        _key = df["id_bio_year"].astype(str)
+                        ay_rows = []
+                        for _k in sorted(removed_keys):
+                            sub = df[_key == _k]
+                            if sub.empty:
+                                continue
+                            rc = (road_store or {}).get(str(_k), {}) or {}
+                            _ts = (
+                                pd.to_datetime(sub["timestamp"], errors="coerce")
+                                if "timestamp" in sub.columns else None
+                            )
+                            ay_rows.append({
+                                "id_bio_year": _k,
+                                "animal_id": str(sub["animal_id"].iloc[0]) if "animal_id" in sub.columns else "",
+                                "bio_year": str(sub["bio_year"].iloc[0]) if "bio_year" in sub.columns else "",
+                                "classification": str(class_store.get(str(_k), "")),
+                                "notes": _compose_notes(
+                                    (notes_store or {}).get(str(_k), ""),
+                                    bool(rc.get("crosses_road", False)),
+                                    bool(rc.get("crosses_highway", False)),
+                                ),
+                                "n_fixes": int(len(sub)),
+                                "first_fix": _ts.min().isoformat() if _ts is not None and _ts.notna().any() else "",
+                                "last_fix": _ts.max().isoformat() if _ts is not None and _ts.notna().any() else "",
+                            })
+                        if ay_rows:
+                            ay_df = pd.DataFrame(ay_rows, columns=[
+                                "id_bio_year", "animal_id", "bio_year", "classification",
+                                "notes", "n_fixes", "first_fix", "last_fix",
+                            ])
+                            ay_df.to_csv(removed_dir / "AnimalYearsRemoved.csv", index=False)
+                            _log_action("ANIMAL_YEARS_REMOVED", animal_years=len(ay_df))
+
+                    # Problems_Morts_Removed.csv/.shp — ONE row per flagged fix
+                    # (problem OR mortality) from animals KEPT in the analysis.
+                    # Fixes inside removed animal-years are excluded so there's no
+                    # overlap with AnimalYearsRemoved.
+                    _prob = df["problem"].fillna(0).astype(int) if "problem" in df.columns else pd.Series(0, index=df.index)
+                    _mort = df["mortality_flag"].fillna(0).astype(int) if "mortality_flag" in df.columns else pd.Series(0, index=df.index)
+                    _in_removed = (
+                        df["id_bio_year"].astype(str).isin(removed_keys)
+                        if (removed_keys and "id_bio_year" in df.columns)
+                        else pd.Series(False, index=df.index)
+                    )
+                    pm_mask = ((_prob == 1) | (_mort == 1)) & (~_in_removed)
+                    pm_df = df[pm_mask].copy()
+                    if not pm_df.empty:
+                        _p = pm_df["problem"].fillna(0).astype(int) if "problem" in pm_df.columns else pd.Series(0, index=pm_df.index)
+                        _m = pm_df["mortality_flag"].fillna(0).astype(int) if "mortality_flag" in pm_df.columns else pd.Series(0, index=pm_df.index)
+                        _pr = pm_df["problem_reason"].fillna("").astype(str) if "problem_reason" in pm_df.columns else pd.Series("", index=pm_df.index)
+                        _mr = pm_df["mortality_reason"].fillna("").astype(str) if "mortality_reason" in pm_df.columns else pd.Series("", index=pm_df.index)
+                        pm_df["flag_type"] = np.where(
+                            (_p == 1) & (_m == 1), "problem+mortality",
+                            np.where(_p == 1, "problem", "mortality"),
                         )
-                        removed_df.to_csv(removed_dir / "ResidentsNomadsRemoved.csv", index=False)
+                        pm_df["notes"] = [
+                            _fix_removal_note(bool(p == 1), bool(m == 1), pr, mr)
+                            for p, m, pr, mr in zip(_p, _m, _pr, _mr)
+                        ]
+                        pm_df.to_csv(removed_dir / "Problems_Morts_Removed.csv", index=False)
                         try:
                             import geopandas as gpd
-                            if {"lon", "lat"}.issubset(removed_df.columns):
-                                grn = gpd.GeoDataFrame(
-                                    removed_df,
-                                    geometry=gpd.points_from_xy(removed_df["lon"], removed_df["lat"]),
+                            if {"lon", "lat"}.issubset(pm_df.columns):
+                                # Curated, clean-named subset so the shapefile
+                                # .dbf 10-char field limit doesn't launder names.
+                                shp_cols = [c for c in ("animal_id", "id_bio_year", "timestamp", "lon", "lat", "flag_type", "notes") if c in pm_df.columns]
+                                shp_df = pm_df[shp_cols].copy()
+                                if "timestamp" in shp_df.columns:
+                                    shp_df["timestamp"] = shp_df["timestamp"].astype(str)
+                                shp_df = shp_df.rename(columns={
+                                    "animal_id": "animalID", "id_bio_year": "id_bio_yr",
+                                    "timestamp": "datetime", "flag_type": "flag",
+                                })
+                                gpm = gpd.GeoDataFrame(
+                                    shp_df,
+                                    geometry=gpd.points_from_xy(pm_df["lon"], pm_df["lat"]),
                                     crs="EPSG:4326",
                                 )
-                                grn.to_file(removed_dir / "ResidentsNomadsRemoved.shp")
+                                gpm.to_file(removed_dir / "Problems_Morts_Removed.shp")
                         except Exception as shp_exc:
-                            print(f"WARNING: ResidentsNomadsRemoved.shp write failed: {shp_exc}")
-                        _log_action(
-                            "RESIDENTS_NOMADS_REMOVED",
-                            animal_years=n_removed_years,
-                            fixes=len(removed_df),
-                        )
+                            print(f"WARNING: Problems_Morts_Removed.shp write failed: {shp_exc}")
+                        _log_action("PROBLEMS_MORTS_REMOVED", fixes=int(len(pm_df)))
                     df.to_parquet(str(outputs / "processed_data.parquet"), index=False)
                     herd_id = "Herd"
                     project_name_token = "Project"
@@ -6018,8 +6142,8 @@ def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store
         threading.Thread(target=_bg_persist, daemon=True, name="migtime-flag-persist").start()
         if n_removed_years:
             rn_msg = (
-                f" Flagged {n_removed_years} resident/nomadic animal-year(s), "
-                f"excluded from analysis."
+                f" Removed {n_removed_years} animal-year(s) (resident / nomadic / "
+                f"insufficient data) from the analysis — see AnimalYearsRemoved.csv."
             )
 
     return _ok_alert(
@@ -6030,7 +6154,7 @@ def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store
 
 @app.callback(
     Output("store-migtime-table", "data", allow_duplicate=True),
-    Output("migtime-status", "children", allow_duplicate=True),
+    Output("load-migtime-status", "children", allow_duplicate=True),
     Output("store-seq-names", "data", allow_duplicate=True),
     Input("btn-load-migtime", "n_clicks"),
     State("store-workdir", "data"),
@@ -6094,44 +6218,6 @@ def load_previous_migtime(n_clicks, workdir_path):
     ), seq_names_out
 
 
-@app.callback(
-    Output("migtime-status", "children", allow_duplicate=True),
-    Input("btn-overwrite-migtime", "n_clicks"),
-    State("store-migtime-table", "data"),
-    State("store-workdir", "data"),
-    State("store-animal-notes", "data"),
-    State("store-road-crossings", "data"),
-    State("store-seq-names", "data"),
-    prevent_initial_call=True,
-)
-def overwrite_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store, seq_names):
-    if not migtime_json:
-        return _err_alert("No migtime table in memory to save.")
-    exports_dir = _migtime_exports_dir(workdir_path)
-    if exports_dir is None:
-        return _err_alert("Set a working directory in Tab 1 first.")
-    if not exports_dir.exists():
-        return _err_alert(
-            "No prior migtime tables exist. Click Export Updated Table to create the first one."
-        )
-    csvs = sorted(exports_dir.glob("migtime_*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not csvs:
-        return _err_alert(
-            "No prior migtime tables exist. Click Export Updated Table to create the first one."
-        )
-
-    target = csvs[0]
-    migtime = _json_to_df(migtime_json, "migtime")
-    _populate_migtime_notes(migtime, notes_store, road_store)
-    export_df = _friendly_migtime_for_export(migtime, seq_names)
-    try:
-        export_df.to_csv(target, index=False)
-    except Exception as exc:
-        return _err_alert(f"Overwrite failed: {exc}")
-    _log_action("MIGTIME_OVERWRITE", path=str(target), rows=len(migtime))
-    return _ok_alert(f"Overwrote {target.name} with current table ({len(migtime)} rows).")
-
-
 # ---------------------------------------------------------------------------
 # Import an external migtime CSV (Tab 1). Two callbacks:
 #   handle_migtime_upload — stash the raw text, sniff headers, pre-fill the
@@ -6174,7 +6260,7 @@ def handle_migtime_upload(contents, filename, cur_month, cur_day):
     opts = [{"label": h, "value": h} for h in headers]
     fname = html.Span([html.Strong("Loaded: "), str(filename)])
     msg = _ok_alert(
-        f"Read {len(headers)} columns. Confirm the Animal-ID column and bio-year start, then click Import Migtime."
+        f"Read {len(headers)} columns. Confirm the Animal-ID column and mig-year start, then click Import Migtime."
     )
     return (
         raw,
@@ -6265,7 +6351,7 @@ def import_migtime(n_clicks, raw, animal_col, bio_month, bio_day, notes_store, p
     msg_fn = _ok_alert if (processed_animal_ids is None or n_match > 0) else _err_alert
     msg = msg_fn(
         f"Imported {n_rows} animal-year row(s) — {n_seq} with migration sequences. "
-        f"Bio-year start set to {bio_month}/{bio_day}.{match_note} Open Tab 2 to review."
+        f"Mig-year start set to {bio_month}/{bio_day}.{match_note} Open Tab 2 to review."
     )
     return _df_to_json(migtime, "migtime"), notes_store, bio_month, bio_day, msg
 
@@ -6647,24 +6733,22 @@ def _build_point_geojson(cache_entry, migtime_json=None, animal_key=None):
 
 @app.callback(
     Output("store-map-payload", "data"),
-    Output("crosses-road-badge", "children"),
-    Output("crosses-road-badge", "style"),
-    Output("crosses-highway-badge", "children"),
-    Output("crosses-highway-badge", "style"),
     Output("animal-notes", "value"),
     Output("animal-classification", "value"),
+    # Clear the "Classified as …" / "Saved" status when navigating animals, so a
+    # message from the previous animal-year doesn't linger on the next one.
+    Output("notes-save-status", "children", allow_duplicate=True),
     Input("seq-animal-dropdown", "value"),
     Input("store-migtime-table", "data"),
     State("store-processed-data", "data"),
     State("store-animal-notes", "data"),
     State("store-animal-classification", "data"),
-    State("store-road-crossings", "data"),
     State("store-wld-env-labels", "data"),
     State("seq-bio-year-month", "value"),
     State("seq-bio-year-day", "value"),
     prevent_initial_call=True,
 )
-def update_seq_map(selected_animal, migtime_json, processed_json, notes_store, class_store, road_store, wld_labels, bio_month, bio_day):
+def update_seq_map(selected_animal, migtime_json, processed_json, notes_store, class_store, wld_labels, bio_month, bio_day):
     if not selected_animal:
         raise PreventUpdate
 
@@ -6708,27 +6792,18 @@ def update_seq_map(selected_animal, migtime_json, processed_json, notes_store, c
 
     map_payload = {
         "type": "update-data",
-        "center": entry["center"],
-        "zoom": entry["zoom"],
         "points": points_geojson,
         "line": entry["line_geojson"],
         "env_labels": env_labels,
     }
-
-    # Road crossings — use cached results or compute
-    road_store = road_store or {}
-    if selected_animal in road_store:
-        rc = road_store[selected_animal]
-    else:
-        rc = {"crosses_road": False, "crosses_highway": False}
-
-    road_yes = {"fontSize": "0.8rem", "backgroundColor": "#e63946", "color": "#fff"}
-    road_no = {"fontSize": "0.8rem", "backgroundColor": "#2a9d8f", "color": "#fff"}
-
-    road_text = "Yes" if rc.get("crosses_road") else "No"
-    road_style = road_yes if rc.get("crosses_road") else road_no
-    hwy_text = "Yes" if rc.get("crosses_highway") else "No"
-    hwy_style = road_yes if rc.get("crosses_highway") else road_no
+    # Re-center/zoom the map ONLY when the animal changed. When the migtime store
+    # changed for the same animal (a mig-date slider edit), omit center/zoom so
+    # the iframe keeps the user's current frame — the points still recolor, but
+    # the camera stays put instead of snapping back to the full extent (#10).
+    # (The iframe only flyTo()s when center/zoom are present.)
+    if dash.callback_context.triggered_id != "store-migtime-table":
+        map_payload["center"] = entry["center"]
+        map_payload["zoom"] = entry["zoom"]
 
     # Notes — load from store
     notes_store = notes_store or {}
@@ -6738,7 +6813,8 @@ def update_seq_map(selected_animal, migtime_json, processed_json, notes_store, c
     class_store = class_store or {}
     current_class = class_store.get(selected_animal)
 
-    return map_payload, road_text, road_style, hwy_text, hwy_style, current_notes, current_class
+    # Last output ("") clears the notes-save-status banner on navigation.
+    return map_payload, current_notes, current_class, ""
 
 
 # Clientside callback: push map payload to iframe via postMessage.
@@ -6894,12 +6970,11 @@ def apply_classification(classification, animal_key, class_store, notes_store, r
         class_store.pop(animal_key, None)
     _save_classifications(class_store)
 
-    rc = road_store.get(animal_key, {}) or {}
-    note_text = _classification_note(
-        classification,
-        bool(rc.get("crosses_road", False)),
-        bool(rc.get("crosses_highway", False)),
-    )
+    # Base classification sentence ONLY — the road/highway crossing phrase is
+    # deliberately NOT added here. Crossings are appended later, at export time
+    # (migtime + AnimalYearsRemoved), so picking a radio doesn't prematurely
+    # stamp "Crosses road." into the note the user sees.
+    note_text = _CLASSIFICATION_NOTE.get(classification or "", "")
     notes_store[animal_key] = note_text
     _save_notes(notes_store)
 
@@ -7017,10 +7092,23 @@ def _apply_flag_to_selection(
         df["problem"] = 0
     if "mortality_flag" not in df.columns:
         df["mortality_flag"] = 0
+    if "problem_reason" not in df.columns:
+        df["problem_reason"] = ""
+    if "mortality_reason" not in df.columns:
+        df["mortality_reason"] = ""
+
+    def _stamp_manual(row_mask, col, manual_text):
+        # Stamp a manual-flag reason only where no reason already exists, so
+        # auto-flag reasons (speed/DOP/satellite math, mortality residence math)
+        # survive and a hand-flagged point still gets a meaningful note.
+        cur = df.loc[row_mask, col].fillna("").astype(str).str.strip()
+        df.loc[row_mask, col] = cur.where(cur != "", manual_text)
 
     if flag_kind == "problem":
         df.loc[mask, "problem"] = 1
         df.loc[mask, "mortality_flag"] = 0
+        df.loc[mask, "mortality_reason"] = ""
+        _stamp_manual(mask, "problem_reason", "Manually flagged problem point.")
         verb = "flagged as problem"
     elif flag_kind == "mortality":
         # Mortality is terminal: once the animal dies, every subsequent fix
@@ -7034,11 +7122,15 @@ def _apply_flag_to_selection(
         )
         df.loc[terminal_mask, "mortality_flag"] = 1
         df.loc[terminal_mask, "problem"] = 0
+        df.loc[terminal_mask, "problem_reason"] = ""
+        _stamp_manual(terminal_mask, "mortality_reason", "Manually flagged mortality point.")
         n_matched = int(terminal_mask.sum())
         verb = f"flagged as mortality (from {earliest_death.strftime('%Y-%m-%d %H:%M')} onward)"
     elif flag_kind == "clear":
         df.loc[mask, "problem"] = 0
         df.loc[mask, "mortality_flag"] = 0
+        df.loc[mask, "problem_reason"] = ""
+        df.loc[mask, "mortality_reason"] = ""
         verb = "unflagged"
     else:
         return None, None, _err_alert(f"Unknown flag kind '{flag_kind}'.")
@@ -8961,7 +9053,7 @@ def generate_pop_outputs(
                 n_animals_yr = len(all_season_yr_ud)
                 n_seasons_yr = len(yr_seasons)
                 year_summary_lines.append(
-                    f"Bio-year {by}: {n_seasons_yr} season(s), {n_animals_yr} individual(s)"
+                    f"Mig-year {by}: {n_seasons_yr} season(s), {n_animals_yr} individual(s)"
                 )
         if year_summary_lines:
             stacked_summary.append("Year summaries: " + "; ".join(year_summary_lines))
@@ -10356,7 +10448,18 @@ def handle_export(selected_clicks, all_clicks, bios_clicks, group_values, out_di
 if __name__ == "__main__":
     import logging as _logging
     _logging.getLogger("werkzeug").setLevel(_logging.ERROR)
-    if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
+    # Open the browser once, ~1.5 s after boot — but NOT when Start App.bat is
+    # the launcher: it sets MCM_NO_BROWSER=1 and opens the browser itself, only
+    # after polling the server to readiness (avoids a premature "can't reach"
+    # flash). Without this guard, main.py's open AND the batch's open both fire
+    # → a second window/tab. The separate WERKZEUG_RUN_MAIN check keeps the
+    # debug reloader's two processes from each opening it.
+    if (os.environ.get("WERKZEUG_RUN_MAIN") != "true"
+            and os.environ.get("MCM_NO_BROWSER") != "1"):
         threading.Timer(1.5, webbrowser.open, args=("http://127.0.0.1:8050",)).start()
     print("Migration Corridor Mapper running at http://127.0.0.1:8050")
-    app.run(debug=True, host="127.0.0.1", port=8050)
+    # debug=False for the distributed build: no Werkzeug auto-reloader (which
+    # spawns a second process — the source of the double-browser-open) and no
+    # interactive debugger. Flip back to debug=True locally for hot-reload while
+    # developing.
+    app.run(debug=False, host="127.0.0.1", port=8050)

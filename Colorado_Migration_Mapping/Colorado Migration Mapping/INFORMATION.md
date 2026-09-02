@@ -236,6 +236,18 @@ Running log of setup actions and decisions on this machine (Windows 11). New dat
 
 These are the in-flight tasks mirrored from the session task list. 
 
+**Newest requests (added 2026-08-28) — top priority:**
+
+- **Update the "Detect road crossings (TIGER)" checkbox description (Tab 1).** Explain today's (2026-09-01) change: crossings are no longer shown as per-animal badges on Tab 2 — instead, when this box is checked, each animal's road/highway crossing ("Crosses road." / "Crosses highway.") is **automatically appended to its note on export** (in the migtime table for kept animals, and in `AnimalYearsRemoved.csv` for removed ones). The description should make clear the box drives that note behavior.
+- **Add a UTM Zone 12N option?** Maybe add a Zone 12N checkbox alongside 13N (far-western CO). Decide whether it's needed.
+- **Subherd analysis (expands the "Subherd selection and re-analysis" item below).** Separate the analysis by subherd: (a) by an existing **subherd field** in the data (run per subherd), and/or (b) let the user **identify subherds spatially** (draw/lasso animals on the map into groups).
+- **Map popup: show DOP + NumSats for ALL points.** When clicking a point on the Tab 2 map, show DOP and number of satellites for **every** point (not just flagged ones), listed alongside lat/long.
+- **Map popup: Next / Back buttons.** When a point is selected, add Next/Back buttons that step to the next/previous fix in the sequence chronologically — **including flagged points** — so the user can walk every fix in order.
+- **Problem-point symbology vs. the yellow mig color.** Make auto-flagged **problem points stand out even against the mig3 (yellow)** sequence color — they're currently hard to see. Redesign the problem-point symbol/outline.
+- **Help doc: migtime save + project reload.** Add to the user guide: how to **save out the migtime**, and how to **re-load a project** (Load Previous Table).
+- **Sex filter (with age class).** Add a sex filter alongside the Tab 1 age-class filter.
+- **Pre-modeling include/exclude by sex + age class (buck/doe/fawn), keeping all migtimes.** Pull sex + age class for each animal ID from the original input into the **migtime table** (add sex + age-class columns per row). Then, pre-modeling, let the user choose **which animals to include** in the analysis (all or a subset) — retaining migtimes for every animal but dropping unselected animals from the modeled dataset.
+
 - **Diagnose BBMM output divergence vs. canonical reference.** Two suspected causes: (1) `scipy.optimize.minimize_scalar` vs. R `optim` for the Horne 2007 MLE, and (2) our `T_total` divisor in `_bbmm_bridge_accumulate` sums only kept segments while R's `sum(time.lag)` sums all pairs including the ones excluded by `max.lag`. Compare per-season `.tif` outputs against the canonical `A37_BBMM_*` set at `K:\MigrationAnalysis\A37\2026.zip` → `OutputData/Jaffe_IndStackedOutput_040226/`. Visual divergence first confirmed 2026-05-18 after wiring `calc_season_banded_outputs` (this item now subsumes that earlier "BBMM per-season UD `.tif` outputs visually differ" Pending note). Additional differences to check beyond the two suspected causes:
   - **BBMM motion-variance estimator path**: our Horne (2007) MLE via `scipy.optimize.minimize_scalar` vs. R `BBMM::brownian.motion.variance` — different numerical optimisers, possibly different residual parametrisation.
     - **How the estimator works:** `_estimate_brownian_motion_variance` (`modeling.py`) slides a window of three consecutive GPS fixes (an "interior triplet": points `i`, `i+1`, `i+2`) across the track. For each triplet it linearly interpolates where `i+1` *should* be on the straight line from `i` to `i+2` (proportional to elapsed time, `alpha = lag1 / (lag1+lag2)`), then measures the squared residual — how far the actual fix deviates from that interpolation. Under Brownian motion that residual is bivariate-normal with variance `v = t_total * alpha * (1-alpha) * sigma² + location_error_terms`. The MLE finds the single `sigma²` (motion variance) that best explains all valid triplets' residuals via negative-log-likelihood minimisation.
@@ -261,6 +273,81 @@ These are the in-flight tasks mirrored from the session task list.
 - **Note in outputs: individuals are stacked, not sequences.** Add a note/label in the population output UI and exported metadata clarifying that individual UDs are stacked (averaged), not per-sequence UDs.
 - **Slow working directory selection.** Selecting a working directory takes a very long time to finish updating. Investigate whether this is a machine/network issue or an app bottleneck (e.g., scanning large directories, loading cached data).
 
+
+### 2026-09-01 — Tab 2 map keeps its frame on mig-date edits (no more zoom-out) (#10)
+
+Editing a mig date used to snap the Tab 2 map back to the animal's full extent on every slider tweak. `update_seq_map` now includes `center`/`zoom` in the map payload **only when the trigger is the animal dropdown** (animal changed); when the trigger is `store-migtime-table` (a mig-date edit on the same animal) it omits them, and the MapLibre iframe — which only `flyTo()`s when `center`/`zoom` are present (guard at `maplibre_map.html` ~line 422) — recolors the points but leaves the camera where the user put it. Uses `dash.callback_context.triggered_id`. Completes #10.
+
+Note: the iframe still clears the on-map point *selection* on every data refresh (including recolors) — a separate behavior, not changed here.
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-09-01 — Tab 2 migtime buttons: removed "Overwrite Table"; moved "Load Previous Table" up + info card
+
+- **Removed the "Overwrite Table" button** and its `overwrite_migtime` callback. Exports always create a new timestamped `migtime_<stamp>.csv`, so the full save trail is preserved (no in-place overwrite).
+- **Moved "Load Previous Table" to the top of the Tab 2 left sidebar** (above the Migration Year & Sequence Settings card), with its own status line (`load-migtime-status`, so its feedback shows next to the button) and a small 'ⓘ' click-popup next to the button (via the shared `_info_label` helper, same pattern as the Tab 3 parameters) explaining it — loads the most recently saved migtime from the working directory's `Migtime_Exports/`; ignorable in a newly created project. (Started as a full-width info `dbc.Alert`; shrunk to the popup so it doesn't crowd the sidebar.)
+- The Migtime Table card now holds just "Export Updated Table" + its status. Registers 71 callbacks. Completes #13.
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-09-01 — Tab 2 classification polish: Migratory radio first; clear stale status on navigation
+
+- Moved the **Migratory** classification radio to the far-left (first) position.
+- The "Classified as …" green status banner (`notes-save-status`) now **clears when navigating** to another animal-year: `update_seq_map` gained a `notes-save-status` output (allow_duplicate) that returns `""` on animal change, so a message from the previous animal-year no longer lingers on the next/previous one.
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-09-01 — Removed-animal CSVs restructured; "Insufficient Data" classification; crossings documented everywhere (Tab 2)
+
+Reworked how removed animal-years and removed fixes are exported, added the insufficient-data classification, and finished "crossings on all comments" (#11 + #14).
+
+- **"Insufficient Data" classification radio** added → note "Insufficient data to be included in the analysis." Added to `_REMOVED_CLASSIFICATIONS`, so (like Resident/Nomadic) those animal-years are dropped from the migtime table on export.
+- **Split the old per-fix `ResidentsNomadsRemoved.csv` into two files** (it mixed animal-year removals and fix removals):
+  - **`AnimalYearsRemoved.csv`** — ONE row per removed animal-year (resident / nomadic / insufficient); columns `id_bio_year, animal_id, bio_year, classification, notes, n_fixes, first_fix, last_fix`. `notes` = classification sentence + crossing phrase (e.g. "Resident. No migration identified. Crosses highway.").
+  - **`Problems_Morts_Removed.csv` + `.shp`** — ONE row per flagged fix (problem OR mortality) from animals **KEPT** in the analysis; fixes inside removed animal-years are excluded (no overlap). Full processed columns + `flag_type` + `notes`. Notes use the auto-flag reason (speed/DOP/sat, mortality residence math) or "Manually flagged problem/mortality point." for hand-flagged fixes. The `.shp` writes a curated, clean-named subset so the .dbf 10-char field limit doesn't launder names.
+- **Manual flags now stamp a reason** (`_apply_flag_to_selection`): hand-flagging on Tab 2 sets `problem_reason`/`mortality_reason` = "Manually flagged …" only where no auto reason exists (auto reasons preserved); unflagging clears them.
+- **Crossings documented for every animal**: kept animals → crossing phrase in the migtime export notes (existing `_populate_migtime_notes`); removed animals → in `AnimalYearsRemoved.csv`.
+- **Removed the Crosses Road/Highway badges** from Tab 2 (replaced with a static note pointing at `AnimalYearsRemoved.csv`), and **selecting a classification radio no longer bakes the crossing phrase into the visible note** — crossings are only added at export.
+
+Verified on synthetic data (AnimalYearsRemoved per-year with classification + crossing; Problems_Morts_Removed per-fix, kept animals only, no overlap, auto vs manual notes; insufficient removal). App imports (72 callbacks). Completes #11 and #14.
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-09-01 — Mig-year start persists Tab 1 → Tab 2 (charts open on that date)
+
+New `sync_migyear_start_to_tab2` callback mirrors the Tab 1 mig-year start (`param-bio-month`/`param-bio-day`) into the Tab 2 mig-year start (`seq-bio-year-month`/`seq-bio-year-day`), so the user sets it once during processing and Tab 2 opens on the same date. Also converted `render_seq_panels`' two `seq-bio-year-month`/`day` reads from `State` → `Input` (and reordered the signature so the remaining `store-processed-data` State stays last), so the four Tab 2 charts redraw and re-anchor their x-range the instant the mig-year start changes — synced from Tab 1 or edited on Tab 2. Tab 1 is the source of truth; a manual Tab 2 edit sticks until Tab 1 changes again. Both Tab 2 outputs use `allow_duplicate=True` (the migtime-import callback also writes them). Registers 72 callbacks, no circular/duplicate-output errors. Completes to-do #5.
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-09-01 — Renamed user-facing "Bio Year" → "Mig Year" (labels only)
+
+Changed all user-facing "Bio Year / Biological Year" wording to "Mig Year / Migration Year" across the app — "bio year" collides with other biological meanings. Touched: the Tab 1 "Mig Year Start (M/D)" label, Tab 2 card header "Migration Year & Sequence Settings", the Tab 2 "Mig Year Start Date" + "Mig-year start (month / day)" labels and migtime-import help text, the migtime-import status messages, the per-year summary line, and `user_guide.md`. **Display strings ONLY** — internal identifiers (`bio_year`, `id_bio_year`, `bio_month`/`bio_day`, `calc_bio_year`, `bio_year_start_month`, and all column/dict/store keys) are unchanged, so processed-data columns, parquet/migtime keys, and every callback are untouched. App imports clean (71 callbacks). Completes to-do #4.
+
+**Files touched.** `app/main.py`, `app/assets/user_guide.md`, `INFORMATION.md`.
+
+### 2026-09-01 — Tab 1 UTM checkbox: blunter label to stop lat/long users checking it
+
+Changed the Tab 1 UTM-input checkbox (`utm-input-toggle`) label from *"Yes, my CSV data is in UTM Zone 13N (EPSG:32613)"* to **"Do NOT check this box UNLESS your data is in UTM Zone 13N (EPSG:32613) rather than WGS84."** This is the exact scenario that caused the recurring `KeyError: 'lon'` — coworkers were checking the box on lat/long (WGS84) data, which pointed the pipeline at absent Easting/Northing columns. Label-only change; no logic/ID changes. Completes to-do #2. (Zone-12N option, #3, still open.)
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-09-01 — Tab 1 Project card: new-name-first layout with "— OR —" divider
+
+Reordered the Tab 1 "Project" card so the **New project name** input (`project-name`) sits **above** the **Load previous project** dropdown (`project-selector`), with a centered bold **"— OR —"** between them — making the two paths unmistakable so users actually name a new project (and can reload it later) instead of skipping it. Description text unchanged (per user); component IDs unchanged, so no callback changes. Completes to-do #1 ("Prompt users to name their project").
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-09-01 — Fixed double browser-open on launch (batch + main.py both opened)
+
+**Symptom.** On one coworker's machine, double-clicking the icon opened the app in two browser windows (not reproducible on the primary dev machine).
+
+**Root cause.** Two independent browser-openers both fire: `Start App.bat` opens the browser after polling the server to readiness, AND `main.py`'s entry point opens it via `webbrowser.open`. On the coworker's **stale copy** it was compounded: her `main.py` predates the 2026-07-14 `WERKZEUG_RUN_MAIN` guard, so Werkzeug's debug **auto-reloader** (two processes under `debug=True`) each opened the browser as well.
+
+**Fix.** `Start App.bat` now sets `MCM_NO_BROWSER=1` before launching Python; `main.py` skips its own `webbrowser.open` when that env var is set (in addition to the existing `WERKZEUG_RUN_MAIN` guard). Result: the icon/batch path opens the browser exactly once (readiness-gated); running `python app/main.py` directly still auto-opens once.
+
+**Note — the coworker's two problems are both stale-version symptoms.** The double-open (missing reloader guard) AND the plain, non-debug "Not Found" where the Tab 2 map should be (her copy predates the `/assets/<path>` Flask route + is missing `maplibre_map.html`) both resolve by **updating her install to current code** (`app/` + `Start App.bat`). The bare 404 vs. the styled Werkzeug debugger page is itself the tell that her request never reaches the current custom asset route.
+
+**Files touched.** `Start App.bat`, `app/main.py`, `INFORMATION.md`.
 
 ### 2026-08-28 — US-format timestamps → Tab 2 OverflowError fixed (robust date parsing)
 
