@@ -238,7 +238,6 @@ These are the in-flight tasks mirrored from the session task list.
 
 **Newest requests (added 2026-08-28) — top priority:**
 
-- **Update the "Detect road crossings (TIGER)" checkbox description (Tab 1).** Explain today's (2026-09-01) change: crossings are no longer shown as per-animal badges on Tab 2 — instead, when this box is checked, each animal's road/highway crossing ("Crosses road." / "Crosses highway.") is **automatically appended to its note on export** (in the migtime table for kept animals, and in `AnimalYearsRemoved.csv` for removed ones). The description should make clear the box drives that note behavior.
 - **Add a UTM Zone 12N option?** Maybe add a Zone 12N checkbox alongside 13N (far-western CO). Decide whether it's needed.
 - **Subherd analysis (expands the "Subherd selection and re-analysis" item below).** Separate the analysis by subherd: (a) by an existing **subherd field** in the data (run per subherd), and/or (b) let the user **identify subherds spatially** (draw/lasso animals on the map into groups).
 - **Map popup: show DOP + NumSats for ALL points.** When clicking a point on the Tab 2 map, show DOP and number of satellites for **every** point (not just flagged ones), listed alongside lat/long.
@@ -273,6 +272,32 @@ These are the in-flight tasks mirrored from the session task list.
 - **Note in outputs: individuals are stacked, not sequences.** Add a note/label in the population output UI and exported metadata clarifying that individual UDs are stacked (averaged), not per-sequence UDs.
 - **Slow working directory selection.** Selecting a working directory takes a very long time to finish updating. Investigate whether this is a machine/network issue or an app bottleneck (e.g., scanning large directories, loading cached data).
 
+
+### 2026-09-02 — Info (ⓘ) popovers now dismiss on outside click (were lingering all session)
+
+The shared `_info_label` ⓘ popovers used `dbc.Popover(trigger="click")`, which only closes on re-clicking the *same* icon — so clicking elsewhere, scrolling to another control, or switching tabs left the popover orphaned on screen for the rest of the session. Changed the helper to **`trigger="legacy"`** (toggle on click of the ⓘ, dismiss on any click outside the popover). Fixes it everywhere at once (Tabs 1/3/4 + the road-crossing popup) and still lets the user move into the popover to click links — unlike `trigger="hover"`, which would close the moment the mouse left the ⓘ. App imports clean (71 callbacks).
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-09-02 — Tab 1: renamed road-crossing checkbox + added ⓘ info popup
+
+Renamed the Tab 1 checkbox "Detect road crossings (TIGER) per animal-year" → **"Road/Highway Crossing Detection"**, and replaced its stale helper text (still said "off by default" and referenced the removed Tab 2 badges) with a small 'ⓘ' click-popup — the same `_info_label` pattern as the Tab 3 parameters, but with a **clickable link**. The popup explains: it's ON by default (adds time on big datasets), uses the U.S. Census Bureau TIGER/Line roads (linked), and that on export "Crosses highway." (S1100/S1200) or "Crosses road." (S1400) is auto-appended to the note in the migtime table. `_info_label` was extended to accept a **list body** (so it can embed an `html.A` link; the string form is unchanged and all existing calls still work). Also renamed the Tab 2 **"Export Updated Table" → "Export Migtime Table"** button so it matches the popup's reference (updated the related code comments too). App imports clean (71 callbacks).
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-09-02 — Road vs. highway crossing detection made independent (road = S1400 only)
+
+Changed `road_crossings.py` so "road" and "highway" are detected independently instead of "road" being a superset that always included highways:
+- `_ROAD_CODES` `{S1100, S1200, S1400}` → **`{S1400}`** (local roads only). `_HIGHWAY_CODES` unchanged (`{S1100, S1200}`).
+- `detect_crossings` now tests the track against the road (S1400) and highway (S1100/S1200) subsets **separately**, so `crosses_road` / `crosses_highway` are independent — an animal can cross one, the other, both, or neither. Previously any highway crossing forced `crosses_road=True` too.
+- `_load_roads` refactored to read the source gpkg only ONCE (cached in `_roads_full`) and slice both subsets from it, so checking both categories still costs a single file read.
+- **Note behavior unchanged (per user, option a):** `_crossing_phrase` still lets highway supersede — an animal crossing both a highway and a local road is noted as just "Crosses highway." Only the underlying `crosses_road` boolean is now S1400-specific; the exported note text is unchanged.
+
+Verified against the reprojected roads gpkg (road subset = S1400 = 264,269; highway subset = S1100/S1200 = 2,944, EPSG:4326): highway-crossing tracks now return `crosses_road=False, crosses_highway=True` — previously impossible. App imports clean (71 callbacks).
+
+Related data-prep (not committed — `environment_data/` is gitignored): built a filtered + reprojected roads gpkg (MTFCC ∈ {S1100,S1200,S1400}, reprojected NAD83→WGS84/EPSG:4326) to drop the ~55k unused features and skip the on-load `.to_crs`, shaving first-run crossing-detection time. Drop it in as `environment_data/all_roads_merged.gpkg` (same filename/schema); no code change needed since `_load_roads` still normalizes to 4326 (now a no-op).
+
+**Files touched.** `app/modules/road_crossings.py`, `INFORMATION.md`.
 
 ### 2026-09-01 — Tab 2 map keeps its frame on mig-date edits (no more zoom-out) (#10)
 

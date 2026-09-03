@@ -65,29 +65,41 @@ def env_data_dir() -> Path:
 #   S1100 = primary road (interstate / US highway, limited access)
 #   S1200 = secondary road (US highway, state highway, county highway)
 #   S1400 = local neighborhood / rural road / city street
-# A "highway" is a numbered primary or secondary road (S1100/S1200). A "road" is
-# ANY of those PLUS local roads (S1400) — so an animal that crosses only a county
-# or local road is still counted as crossing a road. Previously S1400 (the vast
-# majority of features) was excluded, so most real road crossings reported False.
+# "highway" = numbered primary/secondary road (S1100/S1200).
+# "road"    = local road only (S1400).
+# These are INDEPENDENT (changed 2026-09-02): an animal can cross a highway, a
+# local road, both, or neither. Previously "road" was the superset
+# S1100/S1200/S1400, so any highway crossing also counted as a road crossing
+# (crosses_road was redundant whenever crosses_highway was True).
 _HIGHWAY_CODES = {"S1100", "S1200"}
-_ROAD_CODES = {"S1100", "S1200", "S1400"}
+_ROAD_CODES = {"S1400"}
 
 _roads_cache: dict[str, gpd.GeoDataFrame] = {}
+_roads_full: Optional[gpd.GeoDataFrame] = None  # all road+highway codes, EPSG:4326
 
 
 def _load_roads(category: str = "roads") -> Optional[gpd.GeoDataFrame]:
+    """Return the road ('roads' = S1400) or highway ('highways' = S1100/S1200)
+    subset in EPSG:4326, with a spatial index. The source gpkg is read from disk
+    only ONCE (cached in _roads_full) and both subsets are sliced from it, so
+    detecting road + highway crossings for a whole run costs a single file read."""
     if category in _roads_cache:
         return _roads_cache[category]
 
     if _MERGED_SHP is None or not _MERGED_SHP.exists():
         return None
 
+    global _roads_full
+    if _roads_full is None:
+        gdf = gpd.read_file(str(_MERGED_SHP))
+        gdf = gdf[gdf["MTFCC"].isin(_ROAD_CODES | _HIGHWAY_CODES)]
+        _roads_full = gdf.to_crs("EPSG:4326")
+
     codes = _ROAD_CODES if category == "roads" else _HIGHWAY_CODES
-    gdf = gpd.read_file(str(_MERGED_SHP))
-    gdf = gdf[gdf["MTFCC"].isin(codes)].to_crs("EPSG:4326")
-    gdf.sindex  # build spatial index
-    _roads_cache[category] = gdf
-    return gdf
+    sub = _roads_full[_roads_full["MTFCC"].isin(codes)].copy()
+    sub.sindex  # build spatial index
+    _roads_cache[category] = sub
+    return sub
 
 
 def detect_crossings(
@@ -111,16 +123,15 @@ def detect_crossings(
 
     track = LineString(valid)
 
-    # Check roads (S1100 + S1200)
+    # Road (local, S1400) and highway (numbered, S1100/S1200) are checked
+    # INDEPENDENTLY, so an animal can cross one, the other, both, or neither.
     roads = _load_roads("roads")
-    if roads is not None:
-        candidates = roads.sindex.query(track, predicate="intersects")
-        if len(candidates) > 0:
-            result["crosses_road"] = True
-            # Check if any of those are highways specifically
-            hit_codes = set(roads.iloc[candidates]["MTFCC"].values)
-            if hit_codes & _HIGHWAY_CODES:
-                result["crosses_highway"] = True
+    if roads is not None and len(roads.sindex.query(track, predicate="intersects")) > 0:
+        result["crosses_road"] = True
+
+    highways = _load_roads("highways")
+    if highways is not None and len(highways.sindex.query(track, predicate="intersects")) > 0:
+        result["crosses_highway"] = True
 
     return result
 

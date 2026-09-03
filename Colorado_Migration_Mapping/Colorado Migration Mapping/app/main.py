@@ -1371,8 +1371,11 @@ _INFO_LABEL_COUNTER = [0]
 def _info_label(label_text, description, recommended=None):
     _INFO_LABEL_COUNTER[0] += 1
     btn_id = f"info-btn-{_INFO_LABEL_COUNTER[0]}"
+    # `description` is usually a string, but may be a list of Dash components
+    # (e.g. to embed a clickable link). Only the string form supports the
+    # appended "Recommended:" line.
     body = description
-    if recommended is not None:
+    if recommended is not None and isinstance(body, str):
         body += f"\n\nRecommended: {recommended}"
     return html.Div([
         dbc.Label(label_text, style={"fontSize": "0.85rem", "display": "inline"}),
@@ -1388,7 +1391,13 @@ def _info_label(label_text, description, recommended=None):
         dbc.Popover(
             dbc.PopoverBody(body, style={"fontSize": "0.78rem", "whiteSpace": "pre-line"}),
             target=btn_id,
-            trigger="click",
+            # "legacy" = toggle on click of the ⓘ AND dismiss on any click
+            # outside the popover (scrolling to another control, switching tabs,
+            # etc.). Plain "click" only closes on re-click of the same ⓘ, so the
+            # popover used to orphan itself and linger for the whole session.
+            # (Not "hover" — that would close the moment the mouse leaves the ⓘ,
+            # making the in-popover link unclickable.)
+            trigger="legacy",
             placement="right",
         ),
     ], style={"marginBottom": "2px"})
@@ -1863,17 +1872,40 @@ tab1_layout = dbc.Container(
                                             className="text-muted d-block mt-1",
                                         ),
                                         html.Hr(className="my-2"),
-                                        dbc.Checkbox(
-                                            id="detect-road-crossings",
-                                            value=True,
-                                            label="Detect road crossings (TIGER) per animal-year",
-                                            style={"fontSize": "0.82rem"},
-                                        ),
-                                        html.Small(
-                                            "Off by default — adds time on big datasets. "
-                                            "Enable only if you need the road / highway crossing badges in Tab 2.",
-                                            className="text-muted d-block",
-                                            style={"fontSize": "0.72rem"},
+                                        html.Div(
+                                            [
+                                                dbc.Checkbox(
+                                                    id="detect-road-crossings",
+                                                    value=True,
+                                                    label="Road/Highway Crossing Detection",
+                                                    style={"fontSize": "0.82rem"},
+                                                    className="mb-0",
+                                                ),
+                                                _info_label(
+                                                    "",
+                                                    [
+                                                        "Road/Highway Crossing Detection is ON by default, but it "
+                                                        "adds processing time on large datasets. When checked, the "
+                                                        "app checks each animal-year's movement track against roads "
+                                                        "and highways from the U.S. Census Bureau's TIGER/Line "
+                                                        "dataset (",
+                                                        html.A(
+                                                            "census.gov TIGER/Line",
+                                                            href="https://www.census.gov/geographies/mapping-files/time-series/geo/tiger-line-file.html",
+                                                            target="_blank",
+                                                            style={"color": "#8FCFFF"},
+                                                        ),
+                                                        ").\n\n",
+                                                        "Once clicking the Export Migtime Table button on tab 2, if "
+                                                        "an animal-year's track crosses a highway, \"Crosses highway.\" "
+                                                        "is automatically appended to the note in the migtime table "
+                                                        "(MTFCC codes S1100 and S1200, primary and secondary highways). "
+                                                        "If it only crosses a local road (no highway), \"Crosses road.\" "
+                                                        "is appended (MTFCC code S1400).",
+                                                    ],
+                                                ),
+                                            ],
+                                            className="d-flex align-items-center",
                                         ),
                                     ]
                                 ),
@@ -2277,7 +2309,7 @@ tab2_layout = dbc.Container(
                                 dbc.CardBody(
                                     [
                                         dbc.Button(
-                                            "Export Updated Table",
+                                            "Export Migtime Table",
                                             id="btn-export-migtime",
                                             color="primary",
                                             size="sm",
@@ -5951,7 +5983,7 @@ def _fix_removal_note(is_problem: bool, is_mortality: bool,
     prevent_initial_call=True,
 )
 def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store, processed_json, config_json, class_store, seq_names):
-    """Export Updated Table — writes the migtime CSV AND persists the
+    """Export Migtime Table — writes the migtime CSV AND persists the
     in-memory processed-data flag state to disk. Flag clicks themselves are
     now in-memory-only so they stay snappy; this button is the single point
     where flag edits are flushed to the project parquet + workdir parquet +
@@ -6935,7 +6967,7 @@ def autosave_animal_notes(notes_text, animal_key, notes_store):
 # Movement classification — Resident / Nomadic / Migratory radio. Picking one
 # auto-populates the Notes textarea (canonical sentence + crossing phrase) and
 # persists both the classification and the generated note. Resident/Nomadic
-# animal-years are dropped from the analysis on "Export Updated Table".
+# animal-years are dropped from the analysis on "Export Migtime Table".
 # ---------------------------------------------------------------------------
 
 @app.callback(
@@ -7149,7 +7181,7 @@ def _apply_flag_to_selection(
         print(f"WARNING: per-animal map cache rebuild failed: {cache_exc}")
 
     # Disk persistence (project parquet + workdir parquet + FlagsRemoved.gpkg)
-    # is now deferred to "Export Updated Table" so individual flag clicks stay
+    # is now deferred to "Export Migtime Table" so individual flag clicks stay
     # snappy. The in-memory `store-processed-data` payload returned below is
     # what every downstream callback reads, so the UI sees the new flag state
     # immediately even though nothing is written to disk yet.
