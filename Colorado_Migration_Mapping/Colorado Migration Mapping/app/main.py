@@ -3499,6 +3499,8 @@ app.layout = dbc.Container(
         dcc.Store(id="store-animal-notes", data={}, storage_type="local"),  # persists per-browser across sessions
         dcc.Store(id="store-animal-classification", data={}, storage_type="local"),  # id_bio_year -> resident/nomadic/migratory
         dcc.Store(id="store-map-payload"),       # JSON payload sent into MapLibre iframe (Tab 2)
+        dcc.Store(id="store-map-legend"),        # [{name,color}] for the Tab 2 map legend (reactive to seq count/names)
+        dcc.Store(id="_legend_push_dummy"),      # throwaway output for the legend->iframe clientside forwarder
         dcc.Store(id="store-road-crossings", data={}),    # animal_key -> {road: bool, highway: bool}
         dcc.Store(id="store-model-run-id", data=None),    # unique id when a background model run is active
         dcc.Interval(id="model-poll-interval", interval=3000, disabled=True),
@@ -5017,6 +5019,29 @@ def _seq_working_df(processed_json, bio_month, bio_day):
 # bands, the slider-card headers, and the map points (_build_point_geojson) all
 # index into the SAME list so a sequence's colour is identical everywhere.
 SEQ_COLORS = ["#FF6B6B", "#2ECC71", "#FFD93D", "#4D96FF", "#4ECDC4", "#FFA94D", "#A5F3FC", "#B5E550"]
+
+
+@app.callback(
+    Output("store-map-legend", "data"),
+    Input("seq-num-sequences", "value"),
+    Input("store-seq-names", "data"),
+)
+def build_map_legend(n_seqs, seq_names):
+    """Legend rows for the Tab 2 map key — one per migration sequence, using the
+    SAME SEQ_COLORS the point GeoJSON uses (so the key never drifts from the map)
+    and the current sequence names. Reactive to Max Sequences + renames. The
+    static rows (Unassigned / Problem / Mortality) are drawn by the iframe."""
+    try:
+        n = int(n_seqs) if n_seqs not in (None, "") else 4
+    except (TypeError, ValueError):
+        n = 4
+    n = max(1, min(len(SEQ_COLORS), n))
+    seq_names = seq_names or []
+    items = []
+    for i in range(n):
+        name = seq_names[i] if i < len(seq_names) and str(seq_names[i]).strip() else f"mig{i + 1}"
+        items.append({"name": str(name), "color": SEQ_COLORS[i % len(SEQ_COLORS)]})
+    return items
 
 
 @app.callback(
@@ -6616,6 +6641,17 @@ def _build_animal_map_entry(grp: pd.DataFrame) -> dict | None:
             except (TypeError, ValueError):
                 pass
 
+    # GPS-quality fields for the map popup — shown for ALL points, not just
+    # flagged ones. Column names follow the MAPP / app-download convention;
+    # parsed leniently and left NaN where absent.
+    def _quality_arr(colnames):
+        for c in colnames:
+            if c in grp.columns:
+                return np.round(pd.to_numeric(grp[c], errors="coerce").to_numpy(dtype=float), 2)
+        return None
+    dop_arr = _quality_arr(("DOP", "dop", "PDOP", "HDOP"))
+    nsat_arr = _quality_arr(("NumSats", "numsats", "NumSat", "Satellites", "n_sats"))
+
     problem_arr = (
         grp["problem"].fillna(0).astype(int).to_numpy()
         if "problem" in grp.columns else np.zeros(n, dtype=int)
@@ -6646,6 +6682,8 @@ def _build_animal_map_entry(grp: pd.DataFrame) -> dict | None:
         "mortality": mortality_arr,
         "problem_reason": problem_reason_arr,
         "mortality_reason": mortality_reason_arr,
+        "dop": dop_arr,
+        "nsat": nsat_arr,
     }
 
 
@@ -6729,6 +6767,8 @@ def _build_point_geojson(cache_entry, migtime_json=None, animal_key=None):
     mortality_arr = cache_entry.get("mortality", np.zeros(n, dtype=int))
     problem_reason = cache_entry.get("problem_reason", [""] * n)
     mortality_reason = cache_entry.get("mortality_reason", [""] * n)
+    dop_q = cache_entry.get("dop")
+    nsat_q = cache_entry.get("nsat")
 
     # Subsample points for the browser
     step = max(1, n // 3000)
@@ -6747,6 +6787,10 @@ def _build_point_geojson(cache_entry, migtime_json=None, animal_key=None):
             props["pr"] = problem_reason[i]
         if mortality_reason[i]:
             props["mr"] = mortality_reason[i]
+        if dop_q is not None and np.isfinite(dop_q[i]):
+            props["dop"] = float(dop_q[i])
+        if nsat_q is not None and np.isfinite(nsat_q[i]):
+            props["nsat"] = int(nsat_q[i])
         for vk, varr in env_vars.items():
             v = varr[i]
             if np.isfinite(v):
@@ -6869,6 +6913,28 @@ app.clientside_callback(
     Output("map-click-info", "children"),
     Input("store-map-payload", "data"),
     prevent_initial_call=True,
+)
+
+# Clientside: push the map legend (sequence colours/names) into the iframe.
+# Fires on load and whenever Max Sequences / sequence names change. Retries a
+# couple times so the first push still lands if the iframe is still loading.
+app.clientside_callback(
+    """
+    function(legend) {
+        var post = function() {
+            var iframe = document.getElementById('seq-map-iframe');
+            if (iframe && iframe.contentWindow) {
+                iframe.contentWindow.postMessage({type: 'set-legend', seqs: legend || []}, '*');
+            }
+        };
+        post();
+        setTimeout(post, 600);
+        setTimeout(post, 1500);
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("_legend_push_dummy", "data"),
+    Input("store-map-legend", "data"),
 )
 
 # Basemap toggle → postMessage to iframe

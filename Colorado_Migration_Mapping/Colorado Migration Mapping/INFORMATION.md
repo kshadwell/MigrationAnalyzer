@@ -240,9 +240,6 @@ These are the in-flight tasks mirrored from the session task list.
 
 - **Add a UTM Zone 12N option?** Maybe add a Zone 12N checkbox alongside 13N (far-western CO). Decide whether it's needed.
 - **Subherd analysis (expands the "Subherd selection and re-analysis" item below).** Separate the analysis by subherd: (a) by an existing **subherd field** in the data (run per subherd), and/or (b) let the user **identify subherds spatially** (draw/lasso animals on the map into groups).
-- **Map popup: show DOP + NumSats for ALL points.** When clicking a point on the Tab 2 map, show DOP and number of satellites for **every** point (not just flagged ones), listed alongside lat/long.
-- **Map popup: Next / Back buttons.** When a point is selected, add Next/Back buttons that step to the next/previous fix in the sequence chronologically — **including flagged points** — so the user can walk every fix in order.
-- **Problem-point symbology vs. the yellow mig color.** Make auto-flagged **problem points stand out even against the mig3 (yellow)** sequence color — they're currently hard to see. Redesign the problem-point symbol/outline.
 - **Help doc: migtime save + project reload.** Add to the user guide: how to **save out the migtime**, and how to **re-load a project** (Load Previous Table).
 - **Sex filter (with age class).** Add a sex filter alongside the Tab 1 age-class filter.
 - **Pre-modeling include/exclude by sex + age class (buck/doe/fawn), keeping all migtimes.** Pull sex + age class for each animal ID from the original input into the **migtime table** (add sex + age-class columns per row). Then, pre-modeling, let the user choose **which animals to include** in the analysis (all or a subset) — retaining migtimes for every animal but dropping unselected animals from the modeled dataset.
@@ -272,6 +269,48 @@ These are the in-flight tasks mirrored from the session task list.
 - **Note in outputs: individuals are stacked, not sequences.** Add a note/label in the population output UI and exported metadata clarifying that individual UDs are stacked (averaged), not per-sequence UDs.
 - **Slow working directory selection.** Selecting a working directory takes a very long time to finish updating. Investigate whether this is a machine/network issue or an app bottleneck (e.g., scanning large directories, loading cached data).
 
+
+### 2026-09-05 — Tab 2 map popup: Prev/Next fix navigation (#3)
+
+Added **◀ / ▶** arrows (with a "Fix N / M" label) at the top of the Tab 2 GPS-fix popup. They step to the previous/next fix in **chronological order — including flagged fixes** — and recenter the map on the target so an off-screen neighbour comes into view. Refactored the inline popup builder into a reusable `openPopupAtIndex(idx, recenter)` (the animal-points GeoJSON is already timestamp-ordered, so index±1 is the adjacent fix); a plain point click calls it with `recenter=false` (no jarring shift), the arrows with `recenter=true`. Position (N / M) reflects the on-map points (subsampled to ~3000 for very dense animal-years). Completes #3.
+
+**Files touched.** `app/assets/maplibre_map.html`, `INFORMATION.md`.
+
+### 2026-09-05 — Tab 2 map: legend / key (ⓘ button)
+
+Added a **map key** to the Tab 2 MapLibre map. A small "ⓘ" button sits bottom-right, just above the attribution/source control; clicking it toggles a legend panel listing: one row per migration sequence (colour dot + name), **Unassigned** (black dot), **Problem point** (amber "!" triangle), and **Mortality point** ("✕").
+
+The sequence rows are **reactive**: a new `build_map_legend` callback turns `seq-num-sequences` + `store-seq-names` + `SEQ_COLORS` into `[{name,color}]` in `store-map-legend`; a clientside forwarder pushes it to the iframe (`set-legend`, retried at 0/600/1500 ms to beat the iframe-load race). Colours come from the same `SEQ_COLORS` the point GeoJSON uses, so the key never drifts from the map. The problem/mortality swatches reuse the exact icon drawing as the map markers (the icon code was refactored to top-level `_drawProblemIcon`/`_drawMortalityIcon` + `_iconToImageData`/`_iconToDataURL`, shared by the symbol layer and the legend). App registers 73 callbacks. (Not on the numbered to-do list — ad-hoc request.)
+
+**Files touched.** `app/main.py`, `app/assets/maplibre_map.html`, `INFORMATION.md`.
+
+### 2026-09-05 — Tab 2 map: raised max zoom (16 → 20)
+
+The Tab 2 MapLibre map was capped at `maxZoom: 16`, so users couldn't zoom in far enough to inspect tightly-clustered fixes. Raised to `maxZoom: 20`. The Esri satellite raster source has native tiles to ~z18; from z18–20 MapLibre overzooms (upscales) those tiles — slightly blurry but present. Point circle-radius and flag-icon sizes clamp to their z16 values beyond that, so markers stay a sensible size when zoomed in. Just a config change in `maplibre_map.html`.
+
+**Files touched.** `app/assets/maplibre_map.html`, `INFORMATION.md`.
+
+### 2026-09-05 — Tab 2: distinct icons for problem / mortality points (#9)
+
+Replaced the faded "ghost point" styling (flagged fixes were drawn at 15% opacity in their mig-sequence colour — nearly invisible, and confusable with sequence points, especially against yellow mig3) with bold, **shape-based icons** that stand out independent of the sequence-colour palette:
+- **Problem** → amber "!" warning triangle (white halo).
+- **Mortality** → near-black "✕" in a circle (white halo).
+
+Icons are generated on a `<canvas>` and added via `map.addImage` (no glyph font / external file), drawn in a dedicated `flag-icons-layer` symbol layer above the points. The circle layer now renders flagged points as a small faint-grey base dot (still a click target to unflag) instead of their sequence colour, so a flagged fix never blends into a mig window. Distinguishing by SHAPE (not colour) keeps them clear of both the rainbow sequence palette and the yellow-selection / cyan-flash halos. Chose Option 3 (icons) over Option 2 (reserved-colour ring halos). Completes #9.
+
+**Files touched.** `app/assets/maplibre_map.html`, `INFORMATION.md`.
+
+### 2026-09-05 — User guide: removed stale references (Overwrite Table; classification list)
+
+Removed the **"Overwrite"** bullet from the Tab 2 migtime section of `user_guide.md` (that button was removed 2026-09-01), and updated the classification list from "Resident/Nomadic/Migratory" to **"Migratory/Resident/Nomadic/Insufficient Data"** (matching the current radios) with a note that Resident/Nomadic/Insufficient-Data animal-years are excluded from the analysis and documented in `AnimalYearsRemoved.csv`. Verified no other stale terms remain (Overwrite / Export Updated / badge / bio-year / crossing badges).
+
+**Files touched.** `app/assets/user_guide.md`, `INFORMATION.md`.
+
+### 2026-09-04 — Tab 2 map popup shows DOP + satellites for all points (#7)
+
+The Tab 2 point popup now shows **DOP** and **Satellites** for every clicked fix (not just flagged ones), listed right under Lat/Lon. `_build_animal_map_entry` extracts the DOP / NumSats columns into the per-animal cache (lenient name matching: `DOP/dop/PDOP/HDOP`, `NumSats/numsats/NumSat/Satellites/n_sats`); `_build_point_geojson` adds `dop`/`nsat` to each point's properties; `maplibre_map.html` renders "DOP" and "Satellites" rows after Lon (and adds them to `reservedProps` so they aren't duplicated in the generic env-var list). Gracefully absent when the source has no such columns. Verified on the E38 sample — all 86 fixes carry `dop`+`nsat`. Completes #7.
+
+**Files touched.** `app/main.py`, `app/assets/maplibre_map.html`, `INFORMATION.md`.
 
 ### 2026-09-02 — Info (ⓘ) popovers now dismiss on outside click (were lingering all session)
 

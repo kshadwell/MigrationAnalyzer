@@ -31,6 +31,15 @@
   .popup-label { color: #B0B0B0; }
   .popup-value { color: #fff; font-weight: bold; }
   .popup-divider { border-top: 1px solid #334; margin: 4px 0; }
+  /* Prev/Next navigation row at the top of the GPS-fix popup */
+  .popup-nav { display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; gap: 6px; }
+  .popup-navbtn {
+    background: #223; color: #8FCFFF; border: 1px solid #335; border-radius: 3px;
+    cursor: pointer; font-size: 12px; line-height: 1; padding: 3px 9px;
+  }
+  .popup-navbtn:hover:not(:disabled) { color: #fff; border-color: #56B4E9; }
+  .popup-navbtn:disabled { opacity: 0.35; cursor: default; }
+  .popup-navlabel { color: #B0B0B0; font-size: 10px; white-space: nowrap; }
   /* Box-select rectangle */
   #box-select {
     position: absolute;
@@ -56,12 +65,35 @@
     z-index: 1000;
     pointer-events: none;
   }
+  /* Map key / legend — 'ⓘ' button above the attribution, toggles a panel */
+  #legend-btn {
+    position: absolute; bottom: 40px; right: 8px; z-index: 1000;
+    padding: 6px 12px; border-radius: 4px;
+    background: rgba(20,20,30,0.9); color: #8FCFFF; border: 1px solid #335;
+    font: bold 14px sans-serif; line-height: 1; cursor: pointer;
+  }
+  #legend-btn:hover { color: #fff; border-color: #56B4E9; }
+  #legend-panel {
+    position: absolute; bottom: 80px; right: 8px; z-index: 1000;
+    background: rgba(20,20,30,0.95); color: #e0e0e0; border: 1px solid #335;
+    border-radius: 6px; padding: 8px 10px; max-width: 220px;
+    font: 11px 'Consolas', 'Monaco', monospace; display: none;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+  }
+  #legend-panel.open { display: block; }
+  #legend-panel .legend-title { color: #8FCFFF; font-weight: bold; margin-bottom: 5px; }
+  #legend-panel .legend-row { display: flex; align-items: center; padding: 2px 0; }
+  #legend-panel .legend-swatch { width: 16px; height: 16px; margin-right: 7px; flex: 0 0 auto; text-align: center; }
+  #legend-panel .legend-dot { width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.5); display: inline-block; vertical-align: middle; }
+  #legend-panel img.legend-icon { width: 16px; height: 16px; vertical-align: middle; }
 </style>
 </head>
 <body>
 <div id="map"></div>
 <div id="box-select"></div>
 <div id="sel-banner"></div>
+<button id="legend-btn" title="Map key">ⓘ Key</button>
+<div id="legend-panel"></div>
 <script>
 // Default labels for raster vars; merged at runtime with WLD labels pushed
 // from the Dash app via {type:'update-data', env_labels: {...}}.
@@ -98,6 +130,159 @@ function formatVal(key, val) {
   return val.toFixed(3);
 }
 
+// ---- Flagged-fix icons (shared by the map symbol layer AND the legend key,
+// so the two never drift). Drawn on a canvas — no glyph font / image file. ----
+function _drawProblemIcon(ctx, s) {
+  ctx.clearRect(0, 0, s, s);
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(s / 2, s * 0.12);
+  ctx.lineTo(s * 0.90, s * 0.86);
+  ctx.lineTo(s * 0.10, s * 0.86);
+  ctx.closePath();
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = s * 0.12; ctx.stroke();   // white halo
+  ctx.fillStyle = '#F57C00'; ctx.fill();                                 // amber
+  ctx.fillStyle = '#ffffff';
+  var bw = s * 0.10;
+  ctx.fillRect(s / 2 - bw / 2, s * 0.38, bw, s * 0.26);                  // "!" bar
+  ctx.beginPath(); ctx.arc(s / 2, s * 0.76, bw * 0.75, 0, 2 * Math.PI); ctx.fill();  // "!" dot
+}
+function _drawMortalityIcon(ctx, s) {
+  ctx.clearRect(0, 0, s, s);
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.arc(s / 2, s / 2, s * 0.36, 0, 2 * Math.PI);
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = s * 0.11; ctx.stroke();   // white halo
+  ctx.fillStyle = '#141414'; ctx.fill();                                 // near-black
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = s * 0.12;
+  var o = s * 0.19;
+  ctx.beginPath();
+  ctx.moveTo(s / 2 - o, s / 2 - o); ctx.lineTo(s / 2 + o, s / 2 + o);
+  ctx.moveTo(s / 2 + o, s / 2 - o); ctx.lineTo(s / 2 - o, s / 2 + o);
+  ctx.stroke();                                                          // white X
+}
+function _iconCanvas(size, draw) {
+  var c = document.createElement('canvas');
+  c.width = size; c.height = size;
+  draw(c.getContext('2d'), size);
+  return c;
+}
+function _iconToImageData(size, draw) {
+  return _iconCanvas(size, draw).getContext('2d').getImageData(0, 0, size, size);
+}
+function _iconToDataURL(size, draw) {
+  return _iconCanvas(size, draw).toDataURL();
+}
+
+// ---- Map legend / key. Sequence rows are pushed from Dash ('set-legend') so
+// their colours/names/count stay identical to the point GeoJSON. Static rows
+// (Unassigned / Problem / Mortality) are drawn here. ----
+var _legendSeqs = [];
+function buildLegend() {
+  var panel = document.getElementById('legend-panel');
+  if (!panel) return;
+  var dot = function (color) {
+    return '<span class="legend-dot" style="background:' + color + '"></span>';
+  };
+  var html = '<div class="legend-title">Map Key</div>';
+  for (var i = 0; i < _legendSeqs.length; i++) {
+    var sq = _legendSeqs[i] || {};
+    html += '<div class="legend-row"><span class="legend-swatch">' + dot(sq.color || '#888') +
+            '</span><span>' + (sq.name || ('mig' + (i + 1))) + '</span></div>';
+  }
+  html += '<div class="legend-row"><span class="legend-swatch">' + dot('#000000') +
+          '</span><span>Unassigned</span></div>';
+  html += '<div class="legend-row"><img class="legend-swatch legend-icon" src="' +
+          _iconToDataURL(32, _drawProblemIcon) + '"><span>Problem point</span></div>';
+  html += '<div class="legend-row"><img class="legend-swatch legend-icon" src="' +
+          _iconToDataURL(32, _drawMortalityIcon) + '"><span>Mortality point</span></div>';
+  panel.innerHTML = html;
+}
+(function wireLegendButton() {
+  var btn = document.getElementById('legend-btn');
+  var panel = document.getElementById('legend-panel');
+  if (!btn || !panel) return;
+  btn.addEventListener('click', function () {
+    panel.classList.toggle('open');
+    if (panel.classList.contains('open')) buildLegend();
+  });
+})();
+
+// ---- GPS-fix popup with Prev/Next navigation through the (chronological)
+// points. Called on point click (recenter=false) and by the ◀/▶ buttons
+// (recenter=true, so an off-screen neighbour is brought into view). pointsData
+// is already timestamp-ordered, so index±1 is the next/previous fix — including
+// flagged fixes. ----
+var _popupIndex = -1;
+function openPopupAtIndex(idx, recenter) {
+  var feats = (pointsData && pointsData.features) || [];
+  if (!feats.length) return;
+  if (idx < 0) idx = 0;
+  if (idx > feats.length - 1) idx = feats.length - 1;
+  var f = feats[idx];
+  var p = f.properties || {};
+  var coords = f.geometry.coordinates.slice();
+  _popupIndex = idx;
+
+  var html = '<div class="popup-nav">';
+  html += '<button type="button" class="popup-navbtn" data-nav="prev"' + (idx <= 0 ? ' disabled' : '') + '>&#9664;</button>';
+  html += '<span class="popup-navlabel">Fix ' + (idx + 1) + ' / ' + feats.length + '</span>';
+  html += '<button type="button" class="popup-navbtn" data-nav="next"' + (idx >= feats.length - 1 ? ' disabled' : '') + '>&#9654;</button>';
+  html += '</div>';
+  html += '<div class="popup-title">GPS Fix</div>';
+  html += '<div class="popup-row"><span class="popup-label">Date</span><span class="popup-value">' + (p.d || '—') + '</span></div>';
+  html += '<div class="popup-row"><span class="popup-label">Lat</span><span class="popup-value">' + coords[1].toFixed(5) + '</span></div>';
+  html += '<div class="popup-row"><span class="popup-label">Lon</span><span class="popup-value">' + coords[0].toFixed(5) + '</span></div>';
+  if (p.dop !== undefined && p.dop !== null) {
+    html += '<div class="popup-row"><span class="popup-label">DOP</span><span class="popup-value">' + p.dop + '</span></div>';
+  }
+  if (p.nsat !== undefined && p.nsat !== null) {
+    html += '<div class="popup-row"><span class="popup-label">Satellites</span><span class="popup-value">' + p.nsat + '</span></div>';
+  }
+  if (p.f) {
+    html += '<div class="popup-row"><span class="popup-label">Flag</span><span class="popup-value">' + p.f + '</span></div>';
+    if (p.f === 'problem' && p.pr) {
+      html += '<div class="popup-row"><span class="popup-label">Reason</span><span class="popup-value" style="color:#FCA5A5">' + p.pr + '</span></div>';
+    }
+    if (p.f === 'mortality' && p.mr) {
+      html += '<div class="popup-row"><span class="popup-label">Reason</span><span class="popup-value" style="color:#B0B0B0">' + p.mr + '</span></div>';
+    }
+  }
+  var reservedProps = new Set(['c', 'd', 'f', 'pr', 'mr', 'dop', 'nsat']);
+  var envKeys = [];
+  for (var k in p) {
+    if (!Object.prototype.hasOwnProperty.call(p, k)) continue;
+    if (reservedProps.has(k)) continue;
+    if (p[k] === undefined || p[k] === null) continue;
+    envKeys.push(k);
+  }
+  if (envKeys.length > 0) {
+    html += '<div class="popup-divider"></div>';
+    for (var j = 0; j < envKeys.length; j++) {
+      var kk = envKeys[j];
+      var val = typeof p[kk] === 'string' ? parseFloat(p[kk]) : p[kk];
+      var label = LABELS[kk] || kk;
+      html += '<div class="popup-row"><span class="popup-label">' + label + '</span><span class="popup-value">' + formatVal(kk, val) + '</span></div>';
+    }
+  }
+
+  if (currentPopup) { currentPopup.remove(); currentPopup = null; }
+  currentPopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '280px' })
+    .setLngLat(coords).setHTML(html).addTo(map);
+  if (recenter) map.easeTo({ center: coords, duration: 250 });
+
+  var elm = currentPopup.getElement();
+  if (elm) {
+    var btns = elm.querySelectorAll('.popup-navbtn');
+    for (var b = 0; b < btns.length; b++) {
+      btns[b].addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        var dir = ev.currentTarget.getAttribute('data-nav') === 'next' ? 1 : -1;
+        openPopupAtIndex(_popupIndex + dir, true);
+      });
+    }
+  }
+}
+
 const map = new maplibregl.Map({
   container: 'map',
   style: {
@@ -114,7 +299,10 @@ const map = new maplibregl.Map({
   },
   center: [-106.5, 39.5],
   zoom: 8, pitch: 0, bearing: 0, maxPitch: 85,
-  maxZoom: 16, minZoom: 4,
+  // Native Esri imagery goes to ~z18 (the raster source's maxzoom); beyond that
+  // MapLibre overzooms (upscales) those tiles — slightly blurry but lets users
+  // zoom right in on tightly-clustered fixes. Was capped at 16.
+  maxZoom: 20, minZoom: 4,
 });
 
 map.addControl(new maplibregl.NavigationControl(), 'top-left');
@@ -214,35 +402,46 @@ map.on('load', () => {
       ],
     },
     paint: {
-      // Same radius for flagged + unflagged so the ghost dots stay easy
-      // to click for unflagging — the opacity / stroke demotion below is
-      // what reads them as "ghost".
+      // Flagged fixes (problem / mortality) render here as a small, faint GREY
+      // base dot — just a click target for unflagging — with a bold icon drawn
+      // on top by 'flag-icons-layer' below. Rendering them grey (not their `c`
+      // value) keeps flagged points from wearing a mig-sequence colour, and the
+      // icon makes them stand out by SHAPE regardless of the colour palette.
       'circle-radius': ['interpolate', ['linear'], ['zoom'], 6, 2.5, 12, 5, 16, 8],
-      'circle-color': ['coalesce', ['get', 'c'], '#000'],
+      'circle-color': [
+        'match', ['coalesce', ['get', 'f'], ''],
+        ['problem', 'mortality'], '#9aa0a6',
+        ['coalesce', ['get', 'c'], '#000'],
+      ],
       'circle-opacity': [
         'match', ['coalesce', ['get', 'f'], ''],
-        'problem', 0.15,
-        'mortality', 0.15,
+        ['problem', 'mortality'], 0.35,
         0.9,
       ],
-      'circle-stroke-color': [
-        'match', ['coalesce', ['get', 'f'], ''],
-        'problem', '#FCA5A5',     // light vermillion
-        'mortality', '#B0B0B0',   // light grey
-        '#000'                    // default
-      ],
+      'circle-stroke-color': '#000',
       'circle-stroke-width': [
         'match', ['coalesce', ['get', 'f'], ''],
-        'problem', 1.2,
-        'mortality', 1.2,
-        0.4
+        ['problem', 'mortality'], 0,
+        0.4,
       ],
-      'circle-stroke-opacity': [
-        'match', ['coalesce', ['get', 'f'], ''],
-        'problem', 0.85,
-        'mortality', 0.85,
-        1.0,
-      ],
+      'circle-stroke-opacity': 1.0,
+    },
+  });
+
+  // Flagged-fix icons — a bold marker drawn ON TOP of the faint grey flagged
+  // dots so problem / mortality points stand out by SHAPE (not colour) and are
+  // never confused with mig-sequence points. Uses the shared _draw*Icon helpers
+  // (top of script) so the map markers and the legend key match exactly.
+  map.addImage('flag-problem', _iconToImageData(44, _drawProblemIcon), { pixelRatio: 2 });
+  map.addImage('flag-mortality', _iconToImageData(44, _drawMortalityIcon), { pixelRatio: 2 });
+  map.addLayer({
+    id: 'flag-icons-layer', type: 'symbol', source: 'animal-points',
+    filter: ['any', ['==', ['get', 'f'], 'problem'], ['==', ['get', 'f'], 'mortality']],
+    layout: {
+      'icon-image': ['match', ['get', 'f'], 'mortality', 'flag-mortality', 'flag-problem'],
+      'icon-size': ['interpolate', ['linear'], ['zoom'], 6, 0.4, 12, 0.7, 16, 1.0],
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
     },
   });
 
@@ -306,39 +505,16 @@ map.on('load', () => {
     refreshSelectionStyling();
     notifySelectionChanged();
 
-    // Build the popup (same as before)
-    if (currentPopup) { currentPopup.remove(); currentPopup = null; }
-    const coords = f.geometry.coordinates.slice();
-    let html = '<div class="popup-title">GPS Fix</div>';
-    html += '<div class="popup-row"><span class="popup-label">Date</span><span class="popup-value">' + (p.d || '—') + '</span></div>';
-    html += '<div class="popup-row"><span class="popup-label">Lat</span><span class="popup-value">' + coords[1].toFixed(5) + '</span></div>';
-    html += '<div class="popup-row"><span class="popup-label">Lon</span><span class="popup-value">' + coords[0].toFixed(5) + '</span></div>';
-    if (p.f) {
-      html += '<div class="popup-row"><span class="popup-label">Flag</span><span class="popup-value">' + p.f + '</span></div>';
-      if (p.f === 'problem' && p.pr) {
-        html += '<div class="popup-row"><span class="popup-label">Reason</span><span class="popup-value" style="color:#FCA5A5">' + p.pr + '</span></div>';
-      }
-      if (p.f === 'mortality' && p.mr) {
-        html += '<div class="popup-row"><span class="popup-label">Reason</span><span class="popup-value" style="color:#B0B0B0">' + p.mr + '</span></div>';
-      }
+    // Open the popup with ◀/▶ navigation. Find this fix's index in the
+    // (chronological) points array by its 'd' key; openPopupAtIndex builds the
+    // popup and wires the arrows. recenter=false so a plain click doesn't shift
+    // the map (nav arrows recenter so off-screen neighbours come into view).
+    var _feats = (pointsData && pointsData.features) || [];
+    var _idx = -1;
+    for (var _i = 0; _i < _feats.length; _i++) {
+      if (_feats[_i].properties && _feats[_i].properties.d === key) { _idx = _i; break; }
     }
-    const reservedProps = new Set(['c', 'd', 'f', 'pr', 'mr']);
-    const envKeys = [];
-    for (const k of Object.keys(p)) {
-      if (reservedProps.has(k)) continue;
-      if (p[k] === undefined || p[k] === null) continue;
-      envKeys.push(k);
-    }
-    if (envKeys.length > 0) {
-      html += '<div class="popup-divider"></div>';
-      for (const k of envKeys) {
-        const val = typeof p[k] === 'string' ? parseFloat(p[k]) : p[k];
-        const label = LABELS[k] || k;
-        html += '<div class="popup-row"><span class="popup-label">' + label + '</span><span class="popup-value">' + formatVal(k, val) + '</span></div>';
-      }
-    }
-    currentPopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '280px' })
-      .setLngLat(coords).setHTML(html).addTo(map);
+    if (_idx >= 0) openPopupAtIndex(_idx, false);
   });
 
   // ----- Box-select (Shift+drag) ----------------------------------------
@@ -422,6 +598,12 @@ window.addEventListener('message', (e) => {
     if (d.center && d.zoom != null) {
       map.flyTo({ center: [d.center[1], d.center[0]], zoom: d.zoom, duration: 600 });
     }
+  }
+
+  if (d.type === 'set-legend') {
+    _legendSeqs = Array.isArray(d.seqs) ? d.seqs : [];
+    var _lp = document.getElementById('legend-panel');
+    if (_lp && _lp.classList.contains('open')) buildLegend();  // live-update if open
   }
 
   if (d.type === 'flash-point') {

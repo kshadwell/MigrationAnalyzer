@@ -71,11 +71,10 @@ This tab helps you identify and label migration sequences for each animal-year.
 3. **Adjust Manually** — Use the sliders at the top to set migration dates:  
    * On the map in the right, the points that have been included in sequences should light up with the corresponding sequence color. Generally, when identifying migrations, you would want to include at least one point from the starting range in the beginning of the sequence and at least one point in the ending range at the end of the sequence.  
    * You can adjust the size of the sequences card to view multiple sequences at once, and adjust the size of the map box using the grabber at the bottom right corner.  
-   * Add comments for each animal-year in the Notes box. You can automatically add comments in the notes box using the Resident/Nomadic/Migratory buttons in this box.  
+   * Add comments for each animal-year in the Notes box. You can automatically add comments in the notes box using the Migratory/Resident/Nomadic/Insufficient Data buttons in this box. Animal-years marked Resident, Nomadic, or Insufficient Data are excluded from the analysis (removed from the migtime table on export and documented in AnimalYearsRemoved.csv).  
 4. **Migtime Table** — The table at the bottom summarizes all sequences across all animals. You can:  
    * **Export** the table to save your work \- this is usually the best option. It creates an updated migtime table using your sequence dates and notes while still keeping older migtimes tables.  
-   * **Load** a previously exported table to resume where you left off  
-   * **Overwrite** to replace the current table with an edited version
+   * **Load** a previously exported table to resume where you left off
 
 Review each animal-year before moving to Tab 3\. The quality of your corridor maps depends on accurate sequence boundaries.
 
