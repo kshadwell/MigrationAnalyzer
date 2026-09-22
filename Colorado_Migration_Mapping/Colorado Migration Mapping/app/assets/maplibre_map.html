@@ -86,6 +86,11 @@
   #legend-panel .legend-swatch { width: 16px; height: 16px; margin-right: 7px; flex: 0 0 auto; text-align: center; }
   #legend-panel .legend-dot { width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.5); display: inline-block; vertical-align: middle; }
   #legend-panel img.legend-icon { width: 16px; height: 16px; vertical-align: middle; }
+  /* Tighten the default 10px gap MapLibre puts between stacked bottom-left
+     controls, so the mi/km scale bars read as one two-line unit. */
+  .maplibregl-ctrl-bottom-left .maplibregl-ctrl-scale + .maplibregl-ctrl-scale {
+    margin-top: -8px;
+  }
 </style>
 </head>
 <body>
@@ -306,6 +311,11 @@ const map = new maplibregl.Map({
 });
 
 map.addControl(new maplibregl.NavigationControl(), 'top-left');
+// MapLibre's ScaleControl only shows one unit at a time, so two stacked
+// controls (miles + km) are used to show both, matching the mile/km distance
+// stats used elsewhere in the app.
+map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'imperial' }), 'bottom-left');
+map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }), 'bottom-left');
 
 let currentPopup = null;
 
