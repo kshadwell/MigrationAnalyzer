@@ -236,7 +236,7 @@ Running log of setup actions and decisions on this machine (Windows 11). New dat
 
 These are the in-flight tasks mirrored from the session task list. 
 
-**Newest requests (added 2026-08-28) — top priority:**
+**Requests added 2026-08-28:**
 
 - **Add a UTM Zone 12N option?** Maybe add a Zone 12N checkbox alongside 13N (far-western CO). Decide whether it's needed.
 - **Subherd analysis (expands the "Subherd selection and re-analysis" item below).** Separate the analysis by subherd: (a) by an existing **subherd field** in the data (run per subherd), and/or (b) let the user **identify subherds spatially** (draw/lasso animals on the map into groups).
@@ -269,6 +269,20 @@ These are the in-flight tasks mirrored from the session task list.
 - **Note in outputs: individuals are stacked, not sequences.** Add a note/label in the population output UI and exported metadata clarifying that individual UDs are stacked (averaged), not per-sequence UDs.
 - **Slow working directory selection.** Selecting a working directory takes a very long time to finish updating. Investigate whether this is a machine/network issue or an app bottleneck (e.g., scanning large directories, loading cached data).
 
+
+### 2026-09-21 — Road/highway crossings follow the mig-year start; migtime autosave; UI polish
+
+**Road/highway crossings now recompute when the mig-year start changes.** Crossings are keyed by animal-year (`id_bio_year`), so a start-date change reshapes every key. Previously the crossing lookup used whatever was saved at Process Data time, so changing the start on Tab 2 silently orphaned it. `_compute_road_crossings()` now writes a small `road_crossings_meta.json` sidecar recording the start it was built for; a new callback recomputes in the background when Tab 2's mig-year start changes (only if detection was enabled), and `export_migtime` re-checks (and blocks on a recompute if stale) so the exported notes never use mismatched keys. Also fixed a race where Process Data wrote an empty `road_crossings.json`, clobbering the background detection thread's real result.
+
+**Migtime autosave.** A `dcc.Interval` fires every 3 minutes; if the migtime table changed since the last autosave (tracked via its store "rev" token), it's silently re-exported to `Migtime_Exports/migtime_<stamp>.csv` — same format/naming as a manual export, so Load Previous Table picks it up like any other save. Skips the heavier flag-persistence work (FlagsRemoved.gpkg, AnimalYearsRemoved.csv) that the manual Export button also does, since that's about point flags, not the migtime table. Shows "Autosaved HH:MM:SS" under the Export button. Extracted the shared notes/classification-removal/renaming logic into `_build_migtime_export_df()` so the manual and periodic paths can't drift apart.
+
+**Tab 2 map: scale bar.** Added MapLibre `ScaleControl`s (mi + km, stacked bottom-left) with CSS to tighten the default gap between them.
+
+**Tab 1: info popover for resuming a project.** Added a `ⓘ` popover next to the Project card's "Load" button (now styled purple to match Tab 2's "Load Previous Table" button) walking through the full resume workflow: set the working directory → Load the project → Process Data (no need to re-enter parameters) → move to Tab 2 → Load Previous Table if a migtime table already exists. Also notes Tab 5 can be visited directly to see prior outputs. Added an `icon_color` option to the shared `_info_label()` helper so this one popover could be purple without touching the other (blue) info icons app-wide.
+
+**Fixed:** `handle_export`'s docstring was preceded by a statement (`checked_ids = ...`), so Python never registered it as the function's docstring. Moved the statement below the docstring — no behavior change.
+
+**Files touched.** `app/main.py`, `app/assets/maplibre_map.html`, `INFORMATION.md`.
 
 ### 2026-09-05 — Tab 2 map popup: Prev/Next fix navigation (#3)
 

@@ -460,6 +460,74 @@ _CLASSIFICATION_NOTE = {
 _REMOVED_CLASSIFICATIONS = ("resident", "nomadic", "insufficient")
 
 
+_ROAD_LOCK = threading.Lock()
+
+
+def _road_meta_path(proj: str) -> Path:
+    return _project_dir(proj) / "road_crossings_meta.json"
+
+
+def _compute_road_crossings(df: pd.DataFrame, month: int, day: int, proj: str,
+                            workdir_path: str | None, only_if_enabled: bool = False) -> dict | None:
+    """(Re)compute road/highway crossings keyed by id_bio_year for the given
+    mig-year start, and write road_crossings.json (+ a meta sidecar recording the
+    start it was built for). Crossings are per animal-year, so they must be
+    recomputed whenever the mig-year start changes. Serialised by a lock; with
+    ``only_if_enabled`` it does nothing unless detection was turned on at Process
+    Data (meta sidecar exists) and the start actually differs. Returns the result
+    dict, or None if skipped."""
+    with _ROAD_LOCK:
+        meta_p = _road_meta_path(proj)
+        if only_if_enabled:
+            try:
+                meta = json.loads(meta_p.read_text()) if meta_p.exists() else None
+            except Exception:
+                meta = None
+            if not meta or (meta.get("month"), meta.get("day")) == (month, day):
+                return None
+        d = df[[c for c in ("animal_id", "timestamp", "lon", "lat") if c in df.columns]].copy()
+        ts = pd.to_datetime(d["timestamp"], errors="coerce")
+        before = (ts.dt.month < month) | ((ts.dt.month == month) & (ts.dt.day < day))
+        yr = np.where(before, ts.dt.year - 1, ts.dt.year)
+        d["id_bio_year"] = d["animal_id"].astype(str) + "_" + pd.Series(yr, index=d.index).astype("Int64").astype(str)
+        res = detect_crossings_batch(d)
+        payload = json.dumps(res, default=str)
+        (_project_dir(proj) / "road_crossings.json").write_text(payload)
+        if workdir_path and Path(workdir_path).is_dir():
+            (_workdir_outputs(Path(workdir_path)) / "road_crossings.json").write_text(payload)
+        meta_p.write_text(json.dumps({"month": month, "day": day}))
+        return res
+
+
+def _resolve_road_crossings(road_store: dict | None, workdir_path: str | None = None,
+                            df: pd.DataFrame | None = None, month: int = 2, day: int = 1) -> dict:
+    """Road/highway crossings keyed by id_bio_year for the CURRENT mig-year start.
+    If detection was enabled and the saved crossings were built for a different
+    start, recompute now (blocking) so exported notes never use stale keys. Falls
+    back to disk, then the in-browser store (the background thread only writes
+    files, so the store can be empty or stale)."""
+    proj = _ACTIVE_PROJECT or "default"
+    if df is not None:
+        try:
+            fresh = _compute_road_crossings(df, month, day, proj, workdir_path, only_if_enabled=True)
+            if fresh is not None:
+                return fresh
+        except Exception:
+            pass
+    candidates = [_project_dir(proj) / "road_crossings.json"]
+    if workdir_path and Path(workdir_path).is_dir():
+        candidates.append(_workdir_outputs(Path(workdir_path)) / "road_crossings.json")
+    for p in candidates:
+        try:
+            if p.exists():
+                data = json.loads(p.read_text())
+                if data:
+                    return data
+        except Exception:
+            continue
+    return road_store or {}
+
+
 def _classification_note(classification: str, crosses_road: bool, crosses_highway: bool) -> str:
     """Compose the auto-populated Notes text for a classification, appending the
     canonical road/highway crossing phrase when applicable."""
@@ -1449,7 +1517,7 @@ def _col_map_row(label, dropdown_id, options=None, multi=False):
 
 _INFO_LABEL_COUNTER = [0]
 
-def _info_label(label_text, description, recommended=None):
+def _info_label(label_text, description, recommended=None, icon_color="#6c9bd2"):
     _INFO_LABEL_COUNTER[0] += 1
     btn_id = f"info-btn-{_INFO_LABEL_COUNTER[0]}"
     # `description` is usually a string, but may be a list of Dash components
@@ -1464,7 +1532,7 @@ def _info_label(label_text, description, recommended=None):
             "ⓘ",
             id=btn_id,
             style={
-                "background": "none", "border": "none", "color": "#6c9bd2",
+                "background": "none", "border": "none", "color": icon_color,
                 "cursor": "pointer", "fontSize": "0.95rem", "padding": "0 0 0 5px",
                 "verticalAlign": "middle", "lineHeight": "1",
             },
@@ -1585,11 +1653,58 @@ tab1_layout = dbc.Container(
                                                     placeholder="Load previous project...",
                                                     style={"fontSize": "0.85rem"},
                                                 ),
-                                                width=8,
+                                                width=7,
                                             ),
                                             dbc.Col(
-                                                dbc.Button("Load", id="btn-load-project", color="info", size="sm", className="w-100"),
-                                                width=4,
+                                                html.Div(
+                                                    [
+                                                        dbc.Button(
+                                                            "Load",
+                                                            id="btn-load-project",
+                                                            size="sm",
+                                                            className="flex-grow-1",
+                                                            # Purple to match the Tab 2
+                                                            # "Load Previous Table" button —
+                                                            # the two together are how a
+                                                            # returning user resumes a project.
+                                                            style={
+                                                                "backgroundColor": "#7B4FD6",
+                                                                "borderColor": "#9B7BEA",
+                                                                "color": "#FFFFFF",
+                                                            },
+                                                        ),
+                                                        _info_label(
+                                                            "",
+                                                            "To pick up where you left off in a previous project:\n\n"
+                                                            "1. Set the working directory to the same directory you "
+                                                            "used to create the project.\n"
+                                                            "2. Select the project from the dropdown, then click the "
+                                                            "purple \"Load\" button next to it. Once you see a green "
+                                                            "box at the bottom of the Project card reading \"Loaded "
+                                                            "ProjectName — N points, M animals\", scroll down to "
+                                                            "Process Data.\n"
+                                                            "3. Click the blue \"Process Data\" button. You do not "
+                                                            "need to change any of the parameters — the processor "
+                                                            "reuses the parameters used when the project was first "
+                                                            "created.\n"
+                                                            "4. Once you see a green box at the top of the page "
+                                                            "reading \"Project 'ProjectName' is already loaded. "
+                                                            "Re-upload a file to reprocess\", you can move on to "
+                                                            "Tab 2.\n"
+                                                            "5. On Tab 2, if you already have a migtime table saved, "
+                                                            "click the purple \"Load Previous Table\" button at the "
+                                                            "top left. You can then edit and export a new migtime "
+                                                            "table — or, if the loaded table already has what you "
+                                                            "need, continue on to any other tab.\n\n"
+                                                            "Note: once the project is loaded and processed on Tab 1, "
+                                                            "you can also jump straight to Tab 5 to see any outputs "
+                                                            "already created for it.",
+                                                            icon_color="#9B7BEA",
+                                                        ),
+                                                    ],
+                                                    className="d-flex align-items-center",
+                                                ),
+                                                width=5,
                                             ),
                                         ], className="mb-2"),
                                         html.Div(id="project-load-status", className="mt-1 small"),
@@ -2299,9 +2414,17 @@ tab2_layout = dbc.Container(
                                 dbc.Button(
                                     "Load Previous Table",
                                     id="btn-load-migtime",
-                                    color="secondary",
-                                    size="sm",
-                                    className="flex-grow-1",
+                                    size="lg",
+                                    className="flex-grow-1 fw-bold",
+                                    # Bootstrap has no purple contextual colour, so
+                                    # style it directly — big + purple so returning
+                                    # users notice it first.
+                                    style={
+                                        "backgroundColor": "#7B4FD6",
+                                        "borderColor": "#9B7BEA",
+                                        "color": "#FFFFFF",
+                                        "fontSize": "0.98rem",
+                                    },
                                 ),
                                 _info_label(
                                     "",
@@ -2397,6 +2520,7 @@ tab2_layout = dbc.Container(
                                             className="w-100 mb-1",
                                         ),
                                         html.Div(id="migtime-status", className="mt-2 small"),
+                                        html.Div(id="migtime-autosave-status", className="mt-1 small text-muted"),
                                     ]
                                 ),
                             ],
@@ -3583,9 +3707,14 @@ app.layout = dbc.Container(
         dcc.Store(id="store-map-payload"),       # JSON payload sent into MapLibre iframe (Tab 2)
         dcc.Store(id="store-map-legend"),        # [{name,color}] for the Tab 2 map legend (reactive to seq count/names)
         dcc.Store(id="_legend_push_dummy"),      # throwaway output for the legend->iframe clientside forwarder
+        dcc.Store(id="_road_refresh_dummy"),      # throwaway output for the mig-year -> road-crossings refresh
         dcc.Store(id="store-road-crossings", data={}),    # animal_key -> {road: bool, highway: bool}
         dcc.Store(id="store-model-run-id", data=None),    # unique id when a background model run is active
         dcc.Interval(id="model-poll-interval", interval=3000, disabled=True),
+        # Periodic migtime autosave — see autosave_migtime_periodic below. All
+        # dbc.Tabs panes render at load (just hidden), so this ticks regardless
+        # of which tab is active.
+        dcc.Interval(id="migtime-autosave-interval", interval=180_000, n_intervals=0),
         dbc.Tabs(
             id="main-tabs",
             active_tab="tab-1",
@@ -4986,15 +5115,13 @@ def process_uploaded_data(
     elif detect_roads:
         import threading as _th_roads
 
+        _rc_m = int(final_config.get("bio_year_start_month", 2) or 2)
+        _rc_d = int(final_config.get("bio_year_start_day", 1) or 1)
+        _rc_df = df_out.copy()
+
         def _road_worker():
             try:
-                res = detect_crossings_batch(df_out)
-                rc_path = _project_dir(proj) / "road_crossings.json"
-                rc_path.write_text(json.dumps(res, default=str))
-                if workdir_path and Path(workdir_path).is_dir():
-                    (_workdir_outputs(Path(workdir_path)) / "road_crossings.json").write_text(
-                        json.dumps(res, default=str)
-                    )
+                _compute_road_crossings(_rc_df, _rc_m, _rc_d, proj, workdir_path)
             except Exception:
                 pass
 
@@ -5002,6 +5129,10 @@ def process_uploaded_data(
         processing_log.append("Road-crossing detection running in background...")
     else:
         processing_log.append("Road-crossing detection skipped (checkbox off).")
+        try:
+            _road_meta_path(proj).unlink(missing_ok=True)
+        except Exception:
+            pass
 
     # If a working directory is set, also mirror outputs under ModelOutputs/
     # and append the processing log to session_log.txt.
@@ -5009,7 +5140,8 @@ def process_uploaded_data(
         try:
             outputs_dir = _workdir_outputs(Path(workdir_path))
             df_out.to_parquet(str(outputs_dir / "processed_data.parquet"), index=False)
-            (outputs_dir / "road_crossings.json").write_text(json.dumps(road_results, default=str))
+            # road_crossings.json is written by _road_worker (when detection is on);
+            # writing an empty {} here used to race with and clobber its result.
             import datetime as _dt_proc
             _proc_ts = _dt_proc.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             _header = [f"DATA PROCESSED   [{_proc_ts}]", "=" * 60, ""]
@@ -5304,6 +5436,38 @@ def sync_migyear_start_to_tab2(month, day):
     m = int(month) if month not in (None, "") else 2
     d = int(day) if day not in (None, "") else 1
     return m, d
+
+
+@app.callback(
+    Output("_road_refresh_dummy", "data"),
+    Input("seq-bio-year-month", "value"),
+    Input("seq-bio-year-day", "value"),
+    State("store-processed-data", "data"),
+    State("store-workdir", "data"),
+    prevent_initial_call=True,
+)
+def refresh_road_crossings_on_migyear(month, day, processed_json, workdir_path):
+    """Crossings are keyed by animal-year, which depends on the mig-year start.
+    When the start changes (and detection was enabled), recompute in the
+    background so exported notes match the current animal-year keys. Export also
+    re-checks, so this is just a head start."""
+    if not processed_json:
+        raise PreventUpdate
+    try:
+        m, d = int(month or 2), int(day or 1)
+        df = _json_to_df(processed_json, "processed")
+    except Exception:
+        raise PreventUpdate
+    proj = _ACTIVE_PROJECT or "default"
+
+    def _worker():
+        try:
+            _compute_road_crossings(df, m, d, proj, workdir_path, only_if_enabled=True)
+        except Exception:
+            pass
+
+    threading.Thread(target=_worker, daemon=True).start()
+    raise PreventUpdate
 
 
 @app.callback(
@@ -6170,6 +6334,44 @@ def _fix_removal_note(is_problem: bool, is_mortality: bool,
     return "  ".join(parts)
 
 
+def _build_migtime_export_df(
+    migtime_json, notes_store, road_store, class_store, seq_names,
+    workdir_path, processed_json, bio_month, bio_day,
+):
+    """Shared core of a migtime save (manual Export Migtime Table AND the
+    periodic autosave below): resolve road crossings, populate notes, drop
+    animal-years classified Resident/Nomadic/Insufficient, and rename columns
+    to the user's sequence labels. Returns
+    (migtime_after_removal, export_df, removed_keys, road_store)."""
+    migtime = _json_to_df(migtime_json, "migtime")
+    _rc_df = None
+    if processed_json:
+        try:
+            _rc_df = _json_to_df(processed_json, "processed")
+        except Exception:
+            _rc_df = None
+    road_store = _resolve_road_crossings(road_store, workdir_path, _rc_df, int(bio_month or 2), int(bio_day or 1))
+    _populate_migtime_notes(migtime, notes_store, road_store)
+
+    # Animal-years classified Resident / Nomadic / Insufficient data are kept out
+    # of the analysis: excluded from the exported migtime table (so no migration
+    # sequences are built for them), flagged in-place in the processed data via a
+    # `classification` column, and archived (one row per animal-year) to
+    # AnimalYearsRemoved.csv. Per-fix problem/mortality removals from the animals
+    # that were KEPT go to Problems_Morts_Removed.csv/.shp.
+    class_store = class_store or {}
+    removed_keys = {
+        str(k) for k, v in class_store.items() if v in _REMOVED_CLASSIFICATIONS
+    }
+    if removed_keys and "id_bio_year" in migtime.columns:
+        migtime = migtime[~migtime["id_bio_year"].astype(str).isin(removed_keys)].copy()
+
+    # Friendly column names (Spring_start, …) for the CSV + a seq_map legend so
+    # the labels follow the project into the export and round-trip back on load.
+    export_df = _friendly_migtime_for_export(migtime, seq_names)
+    return migtime, export_df, removed_keys, road_store
+
+
 @app.callback(
     Output("migtime-status", "children", allow_duplicate=True),
     Input("btn-export-migtime", "n_clicks"),
@@ -6181,9 +6383,11 @@ def _fix_removal_note(is_problem: bool, is_mortality: bool,
     State("store-config", "data"),
     State("store-animal-classification", "data"),
     State("store-seq-names", "data"),
+    State("seq-bio-year-month", "value"),
+    State("seq-bio-year-day", "value"),
     prevent_initial_call=True,
 )
-def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store, processed_json, config_json, class_store, seq_names):
+def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store, processed_json, config_json, class_store, seq_names, bio_month, bio_day):
     """Export Migtime Table — writes the migtime CSV AND persists the
     in-memory processed-data flag state to disk. Flag clicks themselves are
     now in-memory-only so they stay snappy; this button is the single point
@@ -6197,31 +6401,15 @@ def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store
         return _err_alert("Set a working directory in Tab 1 first.")
     exports_dir.mkdir(parents=True, exist_ok=True)
 
-    migtime = _json_to_df(migtime_json, "migtime")
-    _populate_migtime_notes(migtime, notes_store, road_store)
-
-    # Animal-years classified Resident / Nomadic / Insufficient data are kept out
-    # of the analysis: excluded from the exported migtime table (so no migration
-    # sequences are built for them), flagged in-place in the processed data via a
-    # `classification` column, and archived (one row per animal-year) to
-    # AnimalYearsRemoved.csv. Per-fix problem/mortality removals from the animals
-    # that were KEPT go to Problems_Morts_Removed.csv/.shp.
-    class_store = class_store or {}
-    removed_keys = {
-        str(k) for k, v in class_store.items() if v in _REMOVED_CLASSIFICATIONS
-    }
-    n_removed_years = 0
-    if removed_keys and "id_bio_year" in migtime.columns:
-        before = len(migtime)
-        migtime = migtime[~migtime["id_bio_year"].astype(str).isin(removed_keys)].copy()
-        n_removed_years = before - len(migtime)
+    migtime, export_df, removed_keys, road_store = _build_migtime_export_df(
+        migtime_json, notes_store, road_store, class_store, seq_names,
+        workdir_path, processed_json, bio_month, bio_day,
+    )
+    n_removed_years = len(removed_keys)
 
     import datetime as _dt
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = exports_dir / f"migtime_{stamp}.csv"
-    # Friendly column names (Spring_start, …) for the CSV + a seq_map legend so
-    # the labels follow the project into the export and round-trip back on load.
-    export_df = _friendly_migtime_for_export(migtime, seq_names)
     try:
         export_df.to_csv(out_path, index=False)
     except Exception as exc:
@@ -6383,6 +6571,77 @@ def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store
         f"Saved to Migtime_Exports/{out_path.name} ({len(migtime)} rows).{rn_msg}"
         f" Flags saving in background."
     )
+
+
+# Tracks the migtime store's "rev" token (see _df_to_json) that was last
+# written by the autosave tick below, so an unchanged table is skipped instead
+# of rewriting an identical file to disk every interval.
+_LAST_MIGTIME_AUTOSAVE_REV: int | None = None
+
+
+@app.callback(
+    Output("migtime-autosave-status", "children"),
+    Input("migtime-autosave-interval", "n_intervals"),
+    State("store-migtime-table", "data"),
+    State("store-workdir", "data"),
+    State("store-animal-notes", "data"),
+    State("store-road-crossings", "data"),
+    State("store-processed-data", "data"),
+    State("store-animal-classification", "data"),
+    State("store-seq-names", "data"),
+    State("seq-bio-year-month", "value"),
+    State("seq-bio-year-day", "value"),
+    prevent_initial_call=True,
+)
+def autosave_migtime_periodic(
+    n_intervals, migtime_json, workdir_path, notes_store, road_store,
+    processed_json, class_store, seq_names, bio_month, bio_day,
+):
+    """Every few minutes, quietly re-save the migtime table so sequence edits,
+    notes, and classifications aren't lost if the app is closed or crashes
+    without the user clicking Export Migtime Table. Writes the SAME CSV format
+    and naming pattern as a manual export (Migtime_Exports/migtime_<stamp>.csv),
+    so Load Previous Table picks up an autosave exactly like any other save.
+
+    Only writes when the table has actually changed since the last autosave
+    (tracked via the store's "rev" token — see _df_to_json) — a no-op tick
+    every 3 minutes otherwise. Skips entirely if there's no migtime table yet
+    or no working directory is set (nowhere to write to).
+    """
+    global _LAST_MIGTIME_AUTOSAVE_REV
+    if not migtime_json:
+        raise PreventUpdate
+    exports_dir = _migtime_exports_dir(workdir_path)
+    if exports_dir is None:
+        raise PreventUpdate
+
+    try:
+        rev = json.loads(migtime_json).get("rev")
+    except Exception:
+        rev = None
+    if rev is not None and rev == _LAST_MIGTIME_AUTOSAVE_REV:
+        raise PreventUpdate
+
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        migtime, export_df, _removed_keys, _road_store = _build_migtime_export_df(
+            migtime_json, notes_store, road_store, class_store, seq_names,
+            workdir_path, processed_json, bio_month, bio_day,
+        )
+        import datetime as _dt
+        stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = exports_dir / f"migtime_{stamp}.csv"
+        export_df.to_csv(out_path, index=False)
+    except Exception as exc:
+        # Best-effort — a failed autosave shouldn't interrupt the user's
+        # session. They still have the manual Export button.
+        _log_action("MIGTIME_AUTOSAVE_FAILED", error=str(exc))
+        return html.Small(f"Autosave failed: {exc}", className="text-warning")
+
+    _LAST_MIGTIME_AUTOSAVE_REV = rev
+    _log_action("MIGTIME_AUTOSAVE", path=str(out_path), rows=len(migtime))
+    ts = _dt.datetime.now().strftime("%H:%M:%S")
+    return html.Small(f"Autosaved {ts} — Migtime_Exports/{out_path.name}", className="text-muted")
 
 
 @app.callback(
@@ -10492,7 +10751,6 @@ def _write_processing_report(df, out_path: Path) -> str:
 )
 def handle_export(selected_clicks, all_clicks, bios_clicks, group_values, out_dir, processed_json, workdir_path,
                   migtime_json, config_json, seq_names):
-    checked_ids = [v for grp in (group_values or []) for v in (grp or [])]
     """Flush population outputs from the in-memory _POP_OUTPUT_CACHE to disk.
 
     "Export Selected" writes only the ticked checklist items; "Export All"
@@ -10501,6 +10759,7 @@ def handle_export(selected_clicks, all_clicks, bios_clicks, group_values, out_di
     population_outputs.write_product. Fully deferred: this is the ONLY place the
     Tab 4 population products touch disk.
     """
+    checked_ids = [v for grp in (group_values or []) for v in (grp or [])]
     triggered = ctx.triggered_id
 
     products = _POP_OUTPUT_CACHE.get("products") or []
