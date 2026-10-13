@@ -1364,12 +1364,30 @@ def write_herd_metadata(
 
     # ----- Per-season mean start / end dates -----------------------------------
     def _mean_mmdd(dts):
+        # Pools dates across every bio-year for this season, so the year is
+        # stripped off first (day-of-year only). That alone isn't enough: a
+        # plain numeric average of day-of-year still breaks for any season
+        # whose dates straddle New Year's Eve (e.g. a fall sequence that
+        # doesn't end until early January) — late Dec and early Jan are only
+        # a few days apart on the calendar, but a linear average treats them
+        # as if they were nearly a full year apart. Use a circular mean
+        # (treat day-of-year as an angle around a circle) so it wraps correctly.
         dts = [t for t in dts if pd.notna(t)]
         if not dts:
             return "NA"
-        ord_days = [int(t.timetuple().tm_yday) for t in dts]
-        avg = int(round(np.mean(ord_days)))
-        d = _dt.date(2025, 1, 1) + _dt.timedelta(days=avg - 1)
+        NDAYS = 365.0
+
+        def _doy(t):
+            month, day = t.month, t.day
+            if month == 2 and day == 29:
+                day = 28
+            return (_dt.date(2001, month, day) - _dt.date(2001, 1, 1)).days
+
+        angles = [_doy(t) / NDAYS * 2 * np.pi for t in dts]
+        sin_mean = np.mean(np.sin(angles))
+        cos_mean = np.mean(np.cos(angles))
+        avg_doy = (np.arctan2(sin_mean, cos_mean) / (2 * np.pi)) % 1.0 * NDAYS
+        d = _dt.date(2001, 1, 1) + _dt.timedelta(days=int(round(avg_doy)) % int(NDAYS))
         return d.strftime("%m/%d")
 
     for label, abbrev in season_abbrevs:
@@ -1534,11 +1552,55 @@ def write_herd_metadata(
                     row_data[f"earliest_start [{season}]"][yr] = _fmt_date(starts[0]) if starts else "NA"
                     row_data[f"latest_start [{season}]"][yr] = _fmt_date(starts[-1]) if starts else "NA"
                     def _median_avg_mmdd(dates):
-                        ref = min(dates)
-                        offsets = sorted((d - ref).days for d in dates)
-                        med = ref + _dt.timedelta(days=offsets[len(offsets) // 2])
-                        avg = ref + _dt.timedelta(days=int(round(np.mean(offsets))))
-                        return med.strftime("%m/%d"), avg.strftime("%m/%d")
+                        # Average/median "day of the season" using only month/day,
+                        # with the calendar year stripped off. Dates are pooled
+                        # across multiple bio-years in the All_Years column, so
+                        # anchoring to the single earliest *actual* date (as a
+                        # plain (d - ref).days offset) lets multi-year gaps leak
+                        # into the average and drag it months off. Instead, map
+                        # every date onto a 365-day circle (month/day only) and
+                        # use circular statistics, which also keeps a season that
+                        # straddles New Year's (e.g. Dec->Jan) from averaging to
+                        # the wrong side of the year.
+                        NDAYS = 365.0
+
+                        def _doy(d):
+                            # Day-of-year on a fixed non-leap calendar so Feb 29
+                            # doesn't shift everything after it by a day.
+                            month, day = d.month, d.day
+                            if month == 2 and day == 29:
+                                day = 28
+                            return (_dt.date(2001, month, day) - _dt.date(2001, 1, 1)).days
+
+                        doys = [_doy(d) for d in dates]
+                        angles = [doy / NDAYS * 2 * np.pi for doy in doys]
+                        sin_mean = np.mean(np.sin(angles))
+                        cos_mean = np.mean(np.cos(angles))
+                        avg_doy = (np.arctan2(sin_mean, cos_mean) / (2 * np.pi)) % 1.0 * NDAYS
+
+                        # Circular median: rotate so the largest gap between
+                        # consecutive points sits at the "seam," then take the
+                        # ordinary median of the unrolled values.
+                        sorted_doys = sorted(doys)
+                        n = len(sorted_doys)
+                        if n == 1:
+                            med_doy = float(sorted_doys[0])
+                        else:
+                            gaps = [
+                                (sorted_doys[(i + 1) % n] - sorted_doys[i]) % NDAYS
+                                for i in range(n)
+                            ]
+                            seam = int(np.argmax(gaps))
+                            rotated = sorted_doys[seam + 1:] + sorted_doys[: seam + 1]
+                            base = rotated[0]
+                            unrolled = sorted([(v - base) % NDAYS for v in rotated])
+                            med_doy = (base + unrolled[n // 2]) % NDAYS
+
+                        def _fmt_doy(doy):
+                            base = _dt.date(2001, 1, 1) + _dt.timedelta(days=int(round(doy)) % int(NDAYS))
+                            return base.strftime("%m/%d")
+
+                        return _fmt_doy(med_doy), _fmt_doy(avg_doy)
                     if starts:
                         med_s, avg_s = _median_avg_mmdd(starts)
                         row_data[f"median_start [{season}]"][yr] = med_s

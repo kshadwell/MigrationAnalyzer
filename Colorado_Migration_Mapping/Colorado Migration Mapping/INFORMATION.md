@@ -236,6 +236,38 @@ Running log of setup actions and decisions on this machine (Windows 11). New dat
 
 These are the in-flight tasks mirrored from the session task list. 
 
+**Requests added 2026-10-13:**
+
+1. **Clarify contour-level options.** Clarify the contour levels section (5, 10, 15 vs. 95%, 90%, 85%) and update it if necessary.
+2. **DAU from `CaptureDAU`.** Pull DAU from the `CaptureDAU` field instead of `DAU`. Fall back to `DAU` if `CaptureDAU` doesn't exist.
+3. **VPN note for "Check for update".** Add to the "Check for update" pop-up error message that you need to be on the VPN. Also add the VPN requirement to the help document.
+4. **Working directory browse dialog pops up behind the browser.** The browse window always opens *behind* the browser. Ideally use the better in-app browse tool instead, or at least make the dialog open on top of the browser.
+5. **Tab 1: move the Project section after Upload Data.**
+6. **Sequence names note.** In the sequence names section, add a note that the recommended names are Spring, Summer, Fall, and Winter, and the recommended number of sequences is 4.
+7. **Rename "Mig start date".** Change the label to something like "Winter start date for NSD graph" (or similar).
+8. **Tab 1: loaded-data page buttons not working.** The page-change button under the loaded data table on Tab 1 doesn't work.
+9. **Tab 2: flag buttons reset the map zoom.** Clicking **Flag as problem**, **Flag as mortality**, or **Unflag selected** zooms the map out to the full extent. The map scale/view should stay where it is.
+10. **Re-load mig tables note.** In the re-load mig tables section, add a note that the mig table files are in the `modelOutputs` folder inside your working directory.
+11. **Make the BBMM line buffer box more visible.** The line buffer input under BBMM in the modeling tab is easy to miss. Make it bigger or give it its own section.
+12. **Show sex + age class above the NSD graph.** Add each animal's sex and age class below the animal-ID text above the NSD graph.
+13. **Tab 1: sex selection under age class.** Add a sex selection below the age-class selection on Tab 1. (Same as the 2026-08-28 "Sex filter" item below.)
+14. **Tab 1: subherd selection under herd.** In the Processing Parameters section, add a subherd selection below the herd option. Tracker has a `SubherdName` field that will be added to the export table, so use that column. `SubherdName` is too long for a shapefile field name, so rename it to `Subherd` in the app. (Related to the subherd items below.)
+15. **Road/highway crossings missing from exported notes.** Check road crossings and highway crossings: they aren't being appended to the notes when the table is exported.
+16. **Classification field on all exported tables.** Add a classification field to every exported table (e.g. when animals are included in the analysis, include a field listing migratory/etc., or `unclassified` if none of the radio buttons were clicked).
+17. **Where are the insufficient-data animals going?** Track down what happens to animals flagged as insufficient data.
+18. **GDB vs. shapefile exports.** Add a CSV to the flag/removed/insufficient GDB. Aim to export everything as shapefile when possible; where it isn't, figure out why and fix it (field names, etc.).
+19. **Review the Tab 1 UTM Zone 13 checkbox text.** The current text isn't correct, but the right wording still needs to be figured out. Pending a call with Bryan about how SQL will be integrated.
+20. **Detect problem points by geometry, not just DOP/NumSats.** Some possible problem points are missed because DOP and NumSats values differ by vendor. Use distance and turning angle relative to neighboring points to identify possible problem points. Check the USGS code or Nick's code to see if this already exists.
+21. **Feedback form link.** Add a button next to the Update button at the top of the screen that links to a form where bios can submit questions or recommendations about the app.
+22. **Age and sex columns in the migtime table.** (Overlaps the 2026-08-28 "Pre-modeling include/exclude by sex + age class" item below.)
+
+**Long-term needs:**
+
+1. **Statewide migration dashboard + usage reporting.** Create a dashboard that compiles the data every time someone runs a migration analysis. Michelle needs to know when a bio uses the app and runs outputs, so their data can be copied to the server and included in the future dashboard. How do we do this? Ideas: send Michelle an email or CSV saying who ran what and when.
+2. **Reconsider the min1/min2/min3 rasters.** Maybe get rid of them since they aren't a heat map, or change them into a heat map. A shapefile could probably replace them.
+3. **"Copy to server" button.**
+4. **CPW vs. personal version?** Maybe split the app at launch into a CPW version and a personal version.
+
 **Requests added 2026-08-28:**
 
 - **Add a UTM Zone 12N option?** Maybe add a Zone 12N checkbox alongside 13N (far-western CO). Decide whether it's needed.
@@ -269,6 +301,20 @@ These are the in-flight tasks mirrored from the session task list.
 - **Note in outputs: individuals are stacked, not sequences.** Add a note/label in the population output UI and exported metadata clarifying that individual UDs are stacked (averaged), not per-sequence UDs.
 - **Slow working directory selection.** Selecting a working directory takes a very long time to finish updating. Investigate whether this is a machine/network issue or an app bottleneck (e.g., scanning large directories, loading cached data).
 
+
+### 2026-10-08 — Fixed: average/median start-end dates skewed by multi-year date math and non-circular day-of-year averaging
+
+**Reported:** a herd's `SequencesSummary.csv` showed `average_start [Fall]` per-year values that all looked right (13-Oct, 24-Oct, 16-Oct, 21-Oct, 19-Oct, 26-Sep across 2020–2025) but an `All_Years` value of **11-Dec** — months later than any individual year.
+
+**Root cause #1 — `SequencesSummary.csv`'s `average_start`/`median_start`/`average_end`/`median_end` (`All_Years` column):** `_median_avg_mmdd()` picked `ref = min(dates)` (the single earliest *actual* date across every pooled bio-year, e.g. 13-Oct-2020) and averaged `(d - ref).days`. Within one bio-year this is harmless — all the dates are only days apart. Pooled across bio-years for `All_Years`, a 2025 start date isn't "~13 days into fall," it's "~1,800 days since 13-Oct-2020" (it also carries ~5 years of elapsed time). Averaging those inflated offsets and adding the result back onto the 2020 reference date lands the "average" months in the future.
+
+**Root cause #2 — main `MigMetadata.csv`'s `mean_start_fall`/`mean_end_fall`/`mean_start_spring`/`mean_end_spring`:** `_mean_mmdd()` already stripped the calendar year (day-of-year only), so it didn't have root cause #1's multi-year drift problem — but it averaged day-of-year with a plain linear mean, which breaks for any season whose dates straddle New Year's Eve (e.g. a fall sequence that doesn't end until early January). Late-Dec and early-Jan dates are only days apart on the calendar, but a linear average treats Jan as if it came nearly a full year after Dec, pulling the average toward mid-year (e.g. June) instead of late Dec/early Jan.
+
+**Fix:** both helpers in `population_outputs.py` now convert each date to day-of-year (month/day only, calendar year discarded) and compute a **circular mean** (treat day-of-year as an angle around a 365-day circle, average via sin/cos, `atan2` back to a day) instead of a linear mean. `_median_avg_mmdd()`'s median also went circular (rotate to the largest gap between points, then take the ordinary median of the unrolled values). This fixes the multi-year-pooling bug (root cause #1) and also makes both functions correct for any season that spans New Year's Eve (root cause #2), without changing the already-correct single-year/non-wrapping results.
+
+**Scope:** affects every row that goes through these two helpers — `SequencesSummary.csv`'s `average_start`/`median_start`/`average_end`/`median_end` for every season, in every bio-year column *and* `All_Years` (though only `All_Years` was actually wrong before, since per-year pools don't span multiple years); and `MigMetadata.csv`'s `mean_start_*`/`mean_end_*` for every season. Only affects output written by `write_herd_metadata()` going forward — existing CSVs already on disk keep the old (wrong) `All_Years`/`mean_*` values until the herd is re-run.
+
+**Files touched.** `app/modules/population_outputs.py`, `INFORMATION.md`.
 
 ### 2026-09-21 — Road/highway crossings follow the mig-year start; migtime autosave; UI polish
 
