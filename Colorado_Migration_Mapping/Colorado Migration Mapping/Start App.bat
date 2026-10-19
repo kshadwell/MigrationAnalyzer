@@ -30,10 +30,10 @@ echo.
 
 rem Launch Python in a separate window so this one can poll for readiness
 rem and so the app keeps running if the user closes the browser.
-rem MCM_NO_BROWSER tells main.py NOT to open the browser itself — THIS script
-rem opens it once, below, only after confirming the server is ready. Without
-rem this, main.py's own webbrowser.open also fires (a second window/tab).
-set "MCM_NO_BROWSER=1"
+rem main.py opens the browser itself once the server is ready. It must be the
+rem server process (which owns the foreground window) that opens it -- if this
+rem script opens it, Windows keeps the browser BEHIND the server terminal.
+rem So this script only waits, to report a startup failure.
 start "Colorado Migration Mapper - Server" "%PYTHON%" app\main.py
 
 rem Poll the server up to ~60 seconds. curl ships with Windows 10+.
@@ -47,8 +47,7 @@ timeout /t 1 /nobreak >nul
 goto wait_loop
 
 :ready
-echo Ready. Opening browser at %URL%
-start "" "%URL%"
+echo Ready. The browser is opening at %URL%
 exit /b 0
 
 :timeout

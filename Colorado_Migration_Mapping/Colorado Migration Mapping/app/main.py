@@ -1013,79 +1013,184 @@ def _remember_workdir(path: Path) -> None:
         pass
 
 
-def _find_system_python() -> str | None:
-    """Find a system Python that has tkinter (the bundled embed lacks it)."""
-    import shutil, subprocess as _sp
-    candidates = [
-        r"C:\Program Files\Python313\python.exe",
-        r"C:\Program Files\Python312\python.exe",
-        r"C:\Program Files\Python311\python.exe",
-        r"C:\Program Files (x86)\Python313\python.exe",
-        shutil.which("python") or "",
-        shutil.which("python3") or "",
-    ]
-    for p in candidates:
-        if not (p and os.path.isfile(p) and os.path.normcase(p) != os.path.normcase(sys.executable)):
-            continue
-        try:
-            r = _sp.run([p, "-c", "import tkinter"], capture_output=True, timeout=10)
-            if r.returncode == 0:
-                return p
-        except Exception:
-            continue
-    return None
+# Windows' modern "Select Folder" dialog (IFileOpenDialog + FOS_PICKFOLDERS) —
+# the File Explorer-style picker with an address bar, Quick Access and search.
+# Driven from PowerShell via a small inline C# COM shim, so it needs nothing
+# beyond stock Windows (the bundled embeddable Python lacks tkinter, which is
+# why this used to depend on a separately installed Python and otherwise fell
+# back to the old tree-style BrowseForFolder dialog). The dialog is owned by an
+# invisible TopMost form so it opens ON TOP of the browser instead of behind
+# it. Start folder / title arrive via env vars to avoid command-line quoting.
+_FOLDER_PICKER_PS = r'''
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+[ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IShellItem {
+    void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+    void GetParent(out IShellItem ppsi);
+    void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+    void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+    void Compare(IShellItem psi, uint hint, out int piOrder);
+}
+
+[ComImport, Guid("42F85136-DB7E-439C-85F1-E4075D135FC8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IFileDialog {
+    [PreserveSig] int Show(IntPtr parent);
+    void SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);
+    void SetFileTypeIndex(uint iFileType);
+    void GetFileTypeIndex(out uint piFileType);
+    void Advise(IntPtr pfde, out uint pdwCookie);
+    void Unadvise(uint dwCookie);
+    void SetOptions(uint fos);
+    void GetOptions(out uint pfos);
+    void SetDefaultFolder(IShellItem psi);
+    void SetFolder(IShellItem psi);
+    void GetFolder(out IShellItem ppsi);
+    void GetCurrentSelection(out IShellItem ppsi);
+    void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+    void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);
+    void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+    void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);
+    void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+    void GetResult(out IShellItem ppsi);
+}
+
+[ComImport, Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
+public class FileOpenDialogCoClass {}
+
+public static class MCMFolderPicker {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+    static extern void SHCreateItemFromParsingName(string pszPath, IntPtr pbc, ref Guid riid, out IShellItem ppv);
+
+    const uint FOS_NOCHANGEDIR = 0x8, FOS_PICKFOLDERS = 0x20, FOS_FORCEFILESYSTEM = 0x40;
+    const uint SIGDN_FILESYSPATH = 0x80058000;
+
+    public static string Pick(IntPtr owner, string title, string startDir) {
+        IFileDialog dlg = (IFileDialog)new FileOpenDialogCoClass();
+        uint opts;
+        dlg.GetOptions(out opts);
+        dlg.SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR);
+        dlg.SetTitle(title);
+        if (!String.IsNullOrEmpty(startDir) && System.IO.Directory.Exists(startDir)) {
+            try {
+                Guid iid = typeof(IShellItem).GUID;
+                IShellItem start;
+                SHCreateItemFromParsingName(startDir, IntPtr.Zero, ref iid, out start);
+                dlg.SetFolder(start);
+            } catch { }
+        }
+        if (dlg.Show(owner) != 0) return null;   // cancelled (or failed)
+        IShellItem item;
+        dlg.GetResult(out item);
+        string path;
+        item.GetDisplayName(SIGDN_FILESYSPATH, out path);
+        return path;
+    }
+}
+"@
+
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.ShowInTaskbar = $false
+$owner.FormBorderStyle = 'None'
+$owner.Opacity = 0
+$owner.StartPosition = 'CenterScreen'
+$owner.Size = New-Object System.Drawing.Size(1, 1)
+$owner.Show()
+$owner.Activate()
+try {
+    $p = [MCMFolderPicker]::Pick($owner.Handle, $env:MCM_PICKER_TITLE, $env:MCM_PICKER_START)
+    if ($p) { [Console]::Out.Write($p) }
+} finally {
+    $owner.Close()
+}
+'''
 
 
-def _pick_directory_native() -> str | None:
-    """Open a native folder-picker dialog. Returns the chosen path or None.
+# Fallback: the old tree-style BrowseForFolder dialog (no compilation needed).
+# Given the same invisible TopMost owner form so it opens ON TOP of the browser
+# — with no owner (hwnd 0) it lands behind the browser, which is what users
+# complained about. If the owner form can't be created (very locked-down PCs),
+# it still opens, just without an owner.
+_FOLDER_PICKER_FALLBACK_PS = r'''
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$owner = $null
+$hwnd = 0
+try {
+    Add-Type -AssemblyName System.Windows.Forms
+    $owner = New-Object System.Windows.Forms.Form
+    $owner.TopMost = $true
+    $owner.ShowInTaskbar = $false
+    $owner.FormBorderStyle = 'None'
+    $owner.Opacity = 0
+    $owner.StartPosition = 'CenterScreen'
+    $owner.Size = New-Object System.Drawing.Size(1, 1)
+    $owner.Show()
+    $owner.Activate()
+    $hwnd = [int64]$owner.Handle
+} catch { $hwnd = 0 }
+try {
+    $shell = New-Object -ComObject Shell.Application
+    $folder = $shell.BrowseForFolder($hwnd, $env:MCM_PICKER_TITLE, 0x40, 0)
+    if ($folder) { [Console]::Out.Write($folder.Self.Path) }
+} finally {
+    if ($owner) { $owner.Close() }
+}
+'''
 
-    Uses the system Python (with tkinter) in a subprocess — the bundled
-    embeddable Python does not include tkinter.
-    """
+
+def _pick_directory_native(start_dir: str | None = None) -> str | None:
+    """Open Windows' File Explorer-style folder picker (falling back to the
+    old tree-style dialog if it can't open). Returns the chosen path, or None
+    if the user cancelled.
+
+    *start_dir* (e.g. the current working directory) is where the dialog
+    opens; ignored if it doesn't exist."""
+    import base64
+    import logging as _logging
     import subprocess
-    code = (
-        "import tkinter as tk, sys\n"
-        "from tkinter import filedialog\n"
-        "root = tk.Tk()\n"
-        "root.withdraw()\n"
-        "root.attributes('-topmost', True)\n"
-        "path = filedialog.askdirectory(title='Choose project working directory')\n"
-        "root.destroy()\n"
-        "sys.stdout.write(path or '')\n"
-    )
-    sys_py = _find_system_python()
-    if sys_py:
-        try:
-            result = subprocess.run(
-                [sys_py, "-c", code],
-                capture_output=True, text=True, timeout=300,
-            )
-            chosen = result.stdout.strip()
-            if chosen:
-                return chosen
-        except Exception:
-            pass
-
-    # Fallback: PowerShell folder picker (less convenient tree-style dialog)
-    print(
-        "NOTE: For a better folder picker, install Python 3.11+ from "
-        "python.org (full installer, not embeddable). The app will "
-        "automatically detect it and use the File Explorer dialog."
-    )
-    ps_code = (
-        "$shell = New-Object -ComObject Shell.Application; "
-        "$folder = $shell.BrowseForFolder(0, 'Choose project working directory', 0x40, 0); "
-        "if ($folder) { Write-Host $folder.Self.Path -NoNewline }"
-    )
+    _log = _logging.getLogger(__name__)
+    env = dict(os.environ)
+    env["MCM_PICKER_TITLE"] = "Choose project working directory"
+    env["MCM_PICKER_START"] = str(start_dir or "")
+    # -EncodedCommand (base64 UTF-16LE) sidesteps all quoting of the script.
+    encoded = base64.b64encode(_FOLDER_PICKER_PS.encode("utf-16-le")).decode("ascii")
     try:
         result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_code],
-            capture_output=True, text=True, timeout=300,
+            ["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
+             "-EncodedCommand", encoded],
+            capture_output=True, timeout=600, env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        chosen = result.stdout.strip()
-        return chosen or None
+    except Exception as exc:
+        _log.warning("Folder picker failed to launch: %s", exc)
+        return None
+    chosen = result.stdout.decode("utf-8", errors="replace").strip().lstrip("﻿")
+    if chosen:
+        return chosen
+    if result.returncode == 0:
+        return None  # user cancelled
+    # The modern dialog couldn't open (e.g. a locked-down PC that blocks
+    # PowerShell's Add-Type). Fall back to the old tree-style picker, which
+    # needs no compilation, so Browse still works everywhere.
+    _log.warning("Folder picker error, using fallback dialog: %s",
+                 result.stderr.decode("utf-8", errors="replace").strip()[:500])
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
+             "-EncodedCommand",
+             base64.b64encode(_FOLDER_PICKER_FALLBACK_PS.encode("utf-16-le")).decode("ascii")],
+            capture_output=True, timeout=600, env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
     except Exception:
         return None
+    return result.stdout.decode("utf-8", errors="replace").strip().lstrip("﻿") or None
 
 
 # ===========================================================================
@@ -1534,6 +1639,66 @@ tab1_layout = dbc.Container(
                         ),
                         dbc.Card(
                             [
+                                dbc.CardHeader("Select or Upload Data"),
+                                dbc.CardBody(
+                                    [
+                                        dbc.Label(
+                                            "Pick from ModelInputs/",
+                                            style={"fontSize": "0.8rem"},
+                                        ),
+                                        dcc.Dropdown(
+                                            id="modelinputs-select",
+                                            options=[],
+                                            placeholder="(set a working directory to populate)",
+                                            style={"fontSize": "0.82rem", "marginBottom": "8px"},
+                                        ),
+                                        html.Small(
+                                            "Files copied into ModelInputs/ when you set a workdir, "
+                                            "plus anything you upload below.",
+                                            className="text-muted d-block mb-2",
+                                            style={"fontSize": "0.72rem"},
+                                        ),
+                                        html.Hr(className="my-1"),
+                                        dcc.Upload(
+                                            id="upload-data",
+                                            children=html.Div(
+                                                [
+                                                    "Drag & Drop or ",
+                                                    html.A("Browse", style={"color": "#7ecfff"}),
+                                                    html.Br(),
+                                                    html.Small(
+                                                        "Accepts .csv or .zip (shapefile)",
+                                                        style={"color": "#B0B0B0"},
+                                                    ),
+                                                ]
+                                            ),
+                                            style={
+                                                "width": "100%",
+                                                "height": "90px",
+                                                "lineHeight": "30px",
+                                                "borderWidth": "2px",
+                                                "borderStyle": "dashed",
+                                                "borderRadius": "8px",
+                                                "borderColor": "#556",
+                                                "textAlign": "center",
+                                                "padding": "12px",
+                                                "cursor": "pointer",
+                                            },
+                                            multiple=False,
+                                            accept=".csv,.zip,.shp",
+                                        ),
+                                        dcc.Loading(
+                                            html.Div(id="upload-filename", className="mt-1 text-muted small"),
+                                            type="circle",
+                                            style={"display": "inline-block"},
+                                        ),
+                                    ]
+                                ),
+                            ],
+                            className="mb-3",
+                        ),
+                        dbc.Card(
+                            [
                                 dbc.CardHeader("Project"),
                                 dbc.CardBody(
                                     [
@@ -1627,66 +1792,6 @@ tab1_layout = dbc.Container(
                                             ),
                                         ], className="mb-2"),
                                         html.Div(id="project-load-status", className="mt-1 small"),
-                                    ]
-                                ),
-                            ],
-                            className="mb-3",
-                        ),
-                        dbc.Card(
-                            [
-                                dbc.CardHeader("Select or Upload Data"),
-                                dbc.CardBody(
-                                    [
-                                        dbc.Label(
-                                            "Pick from ModelInputs/",
-                                            style={"fontSize": "0.8rem"},
-                                        ),
-                                        dcc.Dropdown(
-                                            id="modelinputs-select",
-                                            options=[],
-                                            placeholder="(set a working directory to populate)",
-                                            style={"fontSize": "0.82rem", "marginBottom": "8px"},
-                                        ),
-                                        html.Small(
-                                            "Files copied into ModelInputs/ when you set a workdir, "
-                                            "plus anything you upload below.",
-                                            className="text-muted d-block mb-2",
-                                            style={"fontSize": "0.72rem"},
-                                        ),
-                                        html.Hr(className="my-1"),
-                                        dcc.Upload(
-                                            id="upload-data",
-                                            children=html.Div(
-                                                [
-                                                    "Drag & Drop or ",
-                                                    html.A("Browse", style={"color": "#7ecfff"}),
-                                                    html.Br(),
-                                                    html.Small(
-                                                        "Accepts .csv or .zip (shapefile)",
-                                                        style={"color": "#B0B0B0"},
-                                                    ),
-                                                ]
-                                            ),
-                                            style={
-                                                "width": "100%",
-                                                "height": "90px",
-                                                "lineHeight": "30px",
-                                                "borderWidth": "2px",
-                                                "borderStyle": "dashed",
-                                                "borderRadius": "8px",
-                                                "borderColor": "#556",
-                                                "textAlign": "center",
-                                                "padding": "12px",
-                                                "cursor": "pointer",
-                                            },
-                                            multiple=False,
-                                            accept=".csv,.zip,.shp",
-                                        ),
-                                        dcc.Loading(
-                                            html.Div(id="upload-filename", className="mt-1 text-muted small"),
-                                            type="circle",
-                                            style={"display": "inline-block"},
-                                        ),
                                     ]
                                 ),
                             ],
@@ -1905,7 +2010,7 @@ tab1_layout = dbc.Container(
                                             [
                                                 dbc.Col(
                                                     [
-                                                        dbc.Label("Mig Year Start (M/D)", style={"fontSize": "0.85rem", "fontWeight": "bold"}),
+                                                        dbc.Label("Winter Range Reference Date (WRR date) (M/D)",style={"fontSize": "0.85rem", "fontWeight": "bold"}),
                                                         dbc.InputGroup(
                                                             [
                                                                 dbc.Input(
@@ -1927,7 +2032,7 @@ tab1_layout = dbc.Container(
                                                             ]
                                                         ),
                                                         html.Small(
-                                                            "Recommended: Mule Deer Feb. 1; Elk Feb. 15",
+                                                            "Recommended: Mule deer 2/1 (February 1st), Elk 2/15",
                                                             className="text-muted d-block mt-1",
                                                             style={"fontSize": "0.7rem"},
                                                         ),
@@ -2202,7 +2307,7 @@ tab1_layout = dbc.Container(
                                             style={"fontSize": "0.82rem", "marginBottom": "8px"},
                                             className="dash-dark-dropdown",
                                         ),
-                                        dbc.Label("Mig-year start (month / day)", style={"fontSize": "0.8rem"}),
+                                        dbc.Label("Winter Range Reference Date (WRR date) (month / day)",style={"fontSize": "0.8rem"}),
                                         dbc.Row(
                                             [
                                                 dbc.Col(
@@ -2348,7 +2453,8 @@ tab2_layout = dbc.Container(
                                 _info_label(
                                     "",
                                     "Load Previous Table loads in the most recently saved migtime "
-                                    "table in the working directory's Migtime_Exports folder. This "
+                                    "table in the working directory's Migtime_Exports folder "
+                                    "(<working directory>/ModelOutputs/Migtime_Exports). This "
                                     "is helpful when you are coming back to a previously created "
                                     "project to check on the status and update migrations. If you "
                                     "are working in a newly created project, this button can be "
@@ -2363,7 +2469,7 @@ tab2_layout = dbc.Container(
                                 dbc.CardHeader("Migration Year & Sequence Settings"),
                                 dbc.CardBody(
                                     [
-                                        dbc.Label("Mig Year Start Date", style={"fontSize": "0.85rem"}),
+                                        dbc.Label("Winter Range Reference Date (WRR date)", style={"fontSize": "0.85rem", "fontWeight": "bold"}),
                                         dbc.Row(
                                             [
                                                 dbc.Col(
@@ -2378,13 +2484,18 @@ tab2_layout = dbc.Container(
                                             className="mb-1",
                                         ),
                                         html.Small(
-                                            "Each animal-year starts on this date. "
-                                            "Recommended: Mule Deer Feb. 1; Elk Feb. 15",
+                                            "Recommended: Mule deer 2/1 (February 1st), Elk 2/15",
                                             className="text-muted d-block mb-2",
+                                            style={"fontSize": "0.7rem"},
                                         ),
-                                        dbc.Label("Max Sequences", style={"fontSize": "0.85rem"}),
-                                        dbc.Input(id="seq-num-sequences", type="number", value=4, min=1, max=8, size="sm", className="mb-1"),
-                                        dbc.Label("Sequence Names", style={"fontSize": "0.85rem"}),
+                                        dbc.Label("Max Sequences", className="mb-0", style={"fontSize": "0.85rem", "fontWeight": "bold"}),
+                                        html.Small(
+                                            "Recommended: 4",
+                                            className="text-muted d-block mb-1",
+                                            style={"fontSize": "0.7rem"},
+                                        ),
+                                        dbc.Input(id="seq-num-sequences", type="number", value=4, min=1, max=8, size="sm", className="mb-2"),
+                                        dbc.Label("Sequence Names", style={"fontSize": "0.85rem", "fontWeight": "bold"}),
                                         html.Div(id="seq-name-inputs"),
                                     ]
                                 ),
@@ -3675,13 +3786,14 @@ def toggle_help_modal(n_clicks, is_open):
 @app.callback(
     Output("store-workdir", "data", allow_duplicate=True),
     Input("btn-pick-workdir", "n_clicks"),
+    State("store-workdir", "data"),
     prevent_initial_call=True,
 )
-def pick_workdir(n_clicks):
+def pick_workdir(n_clicks, current_workdir):
     """Open a native folder picker and set the working directory."""
     if not n_clicks:
         raise PreventUpdate
-    chosen = _pick_directory_native()
+    chosen = _pick_directory_native(current_workdir)
     if not chosen:
         raise PreventUpdate
     resolved = _set_active_workdir(chosen)
@@ -5086,8 +5198,12 @@ def render_seq_name_inputs(n, seq_names):
             return str(seq_names[i]).strip()
         return defaults[i] if i < len(defaults) else f"Migration{i+1}"
 
+    # Recommended label for each of the first four slots (shown under its box).
+    recommended = ["Spring", "Summer", "Fall", "Winter"]
+
     rows = []
     for i in range(n):
+        has_rec = i < len(recommended)
         rows.append(
             dbc.InputGroup(
                 [
@@ -5103,9 +5219,17 @@ def render_seq_name_inputs(n, seq_names):
                     ),
                 ],
                 size="sm",
-                className="mb-1",
+                className="mb-0" if has_rec else "mb-1",
             )
         )
+        if has_rec:
+            rows.append(
+                html.Small(
+                    f"Recommended: {recommended[i]}",
+                    className="text-muted d-block mb-1",
+                    style={"fontSize": "0.7rem"},
+                )
+            )
     return rows
 
 
@@ -5819,7 +5943,24 @@ def _sniff_migtime_columns(raw_text: str):
 
     month = _first_int("tempstartmonth") or _first_int("startmonth") or _first_int("biostartmonth")
     day = _first_int("tempstartday") or _first_int("startday") or _first_int("biostartday")
+    # Our own exports carry the WRR date as a single "MM-DD" column.
+    wrr_col = norm.get("wrrstartdate")
+    if wrr_col and (month is None or day is None):
+        wrr = _parse_wrr_mmdd(df[wrr_col].dropna().iloc[0]) if df[wrr_col].notna().any() else None
+        if wrr:
+            month, day = wrr
     return headers, guess, month, day
+
+
+def _parse_wrr_mmdd(val):
+    """Parse a ``wrr_start_date`` cell ("MM-DD") into (month, day), or None."""
+    try:
+        m, d = (int(x) for x in str(val).strip().split("-")[:2])
+    except (ValueError, TypeError):
+        return None
+    if 1 <= m <= 12 and 1 <= d <= 31:
+        return m, d
+    return None
 
 
 def _parse_external_migtime(
@@ -6193,6 +6334,9 @@ def _build_migtime_export_df(
     # Friendly column names (Spring_start, …) for the CSV + a seq_map legend so
     # the labels follow the project into the export and round-trip back on load.
     export_df = _friendly_migtime_for_export(migtime, seq_names)
+    # Winter Range Reference date the animal-years were split on, so a reload
+    # restores the same WRR date (see load_previous_migtime).
+    export_df["wrr_start_date"] = f"{int(bio_month or 2):02d}-{int(bio_day or 1):02d}"
     return migtime, export_df, removed_keys, road_store
 
 
@@ -6472,26 +6616,39 @@ def autosave_migtime_periodic(
     Output("store-migtime-table", "data", allow_duplicate=True),
     Output("load-migtime-status", "children", allow_duplicate=True),
     Output("store-seq-names", "data", allow_duplicate=True),
+    Output("seq-bio-year-month", "value", allow_duplicate=True),
+    Output("seq-bio-year-day", "value", allow_duplicate=True),
     Input("btn-load-migtime", "n_clicks"),
     State("store-workdir", "data"),
     prevent_initial_call=True,
 )
 def load_previous_migtime(n_clicks, workdir_path):
+    _nu = dash.no_update
     exports_dir = _migtime_exports_dir(workdir_path)
     if exports_dir is None:
-        return dash.no_update, _err_alert("Set a working directory in Tab 1 first."), dash.no_update
+        return _nu, _err_alert("Set a working directory in Tab 1 first."), _nu, _nu, _nu
     if not exports_dir.exists():
-        return dash.no_update, _err_alert("No migtime tables have been created for this project yet."), dash.no_update
+        return _nu, _err_alert("No migtime tables have been created for this project yet."), _nu, _nu, _nu
 
     csvs = sorted(exports_dir.glob("migtime_*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not csvs:
-        return dash.no_update, _err_alert("No migtime tables have been created for this project yet."), dash.no_update
+        return _nu, _err_alert("No migtime tables have been created for this project yet."), _nu, _nu, _nu
 
     latest = csvs[0]
     try:
         migtime = pd.read_csv(latest)
     except Exception as exc:
-        return dash.no_update, _err_alert(f"Could not read {latest.name}: {exc}"), dash.no_update
+        return _nu, _err_alert(f"Could not read {latest.name}: {exc}"), _nu, _nu, _nu
+
+    # Restore the WRR date the table was built on (older exports lack it).
+    wrr_month: Any = _nu
+    wrr_day: Any = _nu
+    if "wrr_start_date" in migtime.columns:
+        vals = migtime["wrr_start_date"].dropna()
+        wrr = _parse_wrr_mmdd(vals.iloc[0]) if len(vals) else None
+        if wrr:
+            wrr_month, wrr_day = wrr
+        migtime = migtime.drop(columns=["wrr_start_date"])
 
     # Restore friendly-named exports (Spring_start, …) back to the canonical
     # mig{n}_start/_end schema the pipeline relies on, using the seq_map legend
@@ -6531,7 +6688,7 @@ def load_previous_migtime(n_clicks, workdir_path):
     _log_action("MIGTIME_LOAD", path=str(latest), rows=len(migtime))
     return _df_to_json(migtime, "migtime"), _ok_alert(
         f"Loaded {latest.name} ({len(migtime)} rows)."
-    ), seq_names_out
+    ), seq_names_out, wrr_month, wrr_day
 
 
 # ---------------------------------------------------------------------------
@@ -8076,7 +8233,8 @@ def _build_linebuffer_output(
         ) as dst:
             dst.write(heatmap, 1)
     except Exception as exc:
-        logger.warning("Line buffer heatmap failed: %s", exc)
+        import logging as _logging
+        _logging.getLogger(__name__).warning("Line buffer heatmap failed: %s", exc)
 
     _append_processing_log(
         [f"Buffer distance: {buffer_distance} m ({half} m each side, round caps)",
@@ -10805,15 +10963,27 @@ def handle_export(selected_clicks, all_clicks, bios_clicks, group_values, out_di
 if __name__ == "__main__":
     import logging as _logging
     _logging.getLogger("werkzeug").setLevel(_logging.ERROR)
-    # Open the browser once, ~1.5 s after boot — but NOT when Start App.bat is
-    # the launcher: it sets MCM_NO_BROWSER=1 and opens the browser itself, only
-    # after polling the server to readiness (avoids a premature "can't reach"
-    # flash). Without this guard, main.py's open AND the batch's open both fire
-    # → a second window/tab. The separate WERKZEUG_RUN_MAIN check keeps the
-    # debug reloader's two processes from each opening it.
+    # Open the browser once the server actually answers (avoids a premature
+    # "can't reach" flash). It's opened from THIS process, not Start App.bat:
+    # this server window holds the foreground, so Windows lets the browser come
+    # to the front; when the batch opened it, the browser landed behind the
+    # terminal. MCM_NO_BROWSER=1 still suppresses it; the WERKZEUG_RUN_MAIN
+    # check keeps the debug reloader's two processes from each opening it.
+    def _open_browser_when_ready(url="http://127.0.0.1:8050", timeout_s=60):
+        import time as _time
+        import urllib.request as _urlreq
+        deadline = _time.monotonic() + timeout_s
+        while _time.monotonic() < deadline:
+            try:
+                _urlreq.urlopen(url, timeout=1)
+                break
+            except Exception:
+                _time.sleep(0.5)
+        webbrowser.open(url)
+
     if (os.environ.get("WERKZEUG_RUN_MAIN") != "true"
             and os.environ.get("MCM_NO_BROWSER") != "1"):
-        threading.Timer(1.5, webbrowser.open, args=("http://127.0.0.1:8050",)).start()
+        threading.Thread(target=_open_browser_when_ready, daemon=True).start()
     print("Migration Corridor Mapper running at http://127.0.0.1:8050")
     # debug=False for the distributed build: no Werkzeug auto-reloader (which
     # spawns a second process — the source of the double-browser-open) and no

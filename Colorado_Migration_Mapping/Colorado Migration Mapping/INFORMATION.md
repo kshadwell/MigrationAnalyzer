@@ -239,27 +239,22 @@ These are the in-flight tasks mirrored from the session task list.
 **Requests added 2026-10-13:**
 
 1. **Clarify contour-level options.** Clarify the contour levels section (5, 10, 15 vs. 95%, 90%, 85%) and update it if necessary.
-2. **DAU from `CaptureDAU`.** Pull DAU from the `CaptureDAU` field instead of `DAU`. Fall back to `DAU` if `CaptureDAU` doesn't exist.
-3. **VPN note for "Check for update".** Add to the "Check for update" pop-up error message that you need to be on the VPN. Also add the VPN requirement to the help document.
-4. **Working directory browse dialog pops up behind the browser.** The browse window always opens *behind* the browser. Ideally use the better in-app browse tool instead, or at least make the dialog open on top of the browser.
-5. **Tab 1: move the Project section after Upload Data.**
-6. **Sequence names note.** In the sequence names section, add a note that the recommended names are Spring, Summer, Fall, and Winter, and the recommended number of sequences is 4.
-7. **Rename "Mig start date".** Change the label to something like "Winter start date for NSD graph" (or similar).
-8. **Tab 1: loaded-data page buttons not working.** The page-change button under the loaded data table on Tab 1 doesn't work.
-9. **Tab 2: flag buttons reset the map zoom.** Clicking **Flag as problem**, **Flag as mortality**, or **Unflag selected** zooms the map out to the full extent. The map scale/view should stay where it is.
-10. **Re-load mig tables note.** In the re-load mig tables section, add a note that the mig table files are in the `modelOutputs` folder inside your working directory.
-11. **Make the BBMM line buffer box more visible.** The line buffer input under BBMM in the modeling tab is easy to miss. Make it bigger or give it its own section.
-12. **Show sex + age class above the NSD graph.** Add each animal's sex and age class below the animal-ID text above the NSD graph.
-13. **Tab 1: sex selection under age class.** Add a sex selection below the age-class selection on Tab 1. (Same as the 2026-08-28 "Sex filter" item below.)
-14. **Tab 1: subherd selection under herd.** In the Processing Parameters section, add a subherd selection below the herd option. Tracker has a `SubherdName` field that will be added to the export table, so use that column. `SubherdName` is too long for a shapefile field name, so rename it to `Subherd` in the app. (Related to the subherd items below.)
-15. **Road/highway crossings missing from exported notes.** Check road crossings and highway crossings: they aren't being appended to the notes when the table is exported.
-16. **Classification field on all exported tables.** Add a classification field to every exported table (e.g. when animals are included in the analysis, include a field listing migratory/etc., or `unclassified` if none of the radio buttons were clicked).
-17. **Where are the insufficient-data animals going?** Track down what happens to animals flagged as insufficient data.
-18. **GDB vs. shapefile exports.** Add a CSV to the flag/removed/insufficient GDB. Aim to export everything as shapefile when possible; where it isn't, figure out why and fix it (field names, etc.).
-19. **Review the Tab 1 UTM Zone 13 checkbox text.** The current text isn't correct, but the right wording still needs to be figured out. Pending a call with Bryan about how SQL will be integrated.
-20. **Detect problem points by geometry, not just DOP/NumSats.** Some possible problem points are missed because DOP and NumSats values differ by vendor. Use distance and turning angle relative to neighboring points to identify possible problem points. Check the USGS code or Nick's code to see if this already exists.
-21. **Feedback form link.** Add a button next to the Update button at the top of the screen that links to a form where bios can submit questions or recommendations about the app.
-22. **Age and sex columns in the migtime table.** (Overlaps the 2026-08-28 "Pre-modeling include/exclude by sex + age class" item below.)
+2. **VPN note for "Check for update".** Add to the "Check for update" pop-up error message that you need to be on the VPN. Also add the VPN requirement to the help document. (2026-10-18: no "Check for update" pop-up exists in this repo's code — only `Update.bat` — need to find where it lives.)
+3. **Tab 1: loaded-data page buttons not working.** The page-change button under the loaded data table on Tab 1 doesn't work.
+4. **Tab 2: flag buttons reset the map zoom.** Clicking **Flag as problem**, **Flag as mortality**, or **Unflag selected** zooms the map out to the full extent. The map scale/view should stay where it is.
+5. **Make the BBMM line buffer box more visible.** The line buffer input under BBMM in the modeling tab is easy to miss. Make it bigger or give it its own section.
+6. **Show sex + age class above the NSD graph.** Add each animal's sex and age class below the animal-ID text above the NSD graph.
+7. **Tab 1: sex selection under age class.** Add a sex selection below the age-class selection on Tab 1. (Same as the 2026-08-28 "Sex filter" item below.)
+8. **Tab 1: subherd selection under herd.** In the Processing Parameters section, add a subherd selection below the herd option. Tracker has a `SubherdName` field that will be added to the export table, so use that column. `SubherdName` is too long for a shapefile field name, so rename it to `Subherd` in the app. (Related to the subherd items below.)
+9. **Road/highway crossings missing from exported notes.** Check road crossings and highway crossings: they aren't being appended to the notes when the table is exported.
+10. **Classification field on all exported tables.** Add a classification field to every exported table (e.g. when animals are included in the analysis, include a field listing migratory/etc., or `unclassified` if none of the radio buttons were clicked).
+11. **Where are the insufficient-data animals going?** Track down what happens to animals flagged as insufficient data.
+12. **GDB vs. shapefile exports.** Add a CSV to the flag/removed/insufficient GDB. Aim to export everything as shapefile when possible; where it isn't, figure out why and fix it (field names, etc.).
+13. **Review the Tab 1 UTM Zone 13 checkbox text.** The current text isn't correct, but the right wording still needs to be figured out. Pending a call with Bryan about how SQL will be integrated.
+14. **Detect problem points by geometry, not just DOP/NumSats.** Some possible problem points are missed because DOP and NumSats values differ by vendor. Use distance and turning angle relative to neighboring points to identify possible problem points. Check the USGS code or Nick's code to see if this already exists.
+15. **Feedback form link.** Add a button next to the Update button at the top of the screen that links to a form where bios can submit questions or recommendations about the app.
+16. **Age and sex columns in the migtime table.** (Overlaps the 2026-08-28 "Pre-modeling include/exclude by sex + age class" item below.)
+17. **WRR date info popup.** Add an ⓘ info popover next to the Winter Range Reference Date (WRR date) box (Tab 1 and Tab 2) explaining what the WRR date is. (Added 2026-10-18.)
 
 **Long-term needs:**
 
@@ -301,6 +296,24 @@ These are the in-flight tasks mirrored from the session task list.
 - **Note in outputs: individuals are stacked, not sequences.** Add a note/label in the population output UI and exported metadata clarifying that individual UDs are stacked (averaged), not per-sequence UDs.
 - **Slow working directory selection.** Selecting a working directory takes a very long time to finish updating. Investigate whether this is a machine/network issue or an app bottleneck (e.g., scanning large directories, loading cached data).
 
+
+### 2026-10-18 — WRR date rename, CaptureDAU herd ID, Tab 2 sequence hints, browser opens on top
+
+**Winter Range Reference Date (WRR date).** The bio-/mig-year start setting is now labelled "Winter Range Reference Date (WRR date)" on Tab 1, Tab 2 and the migtime-import dialog (bold on Tabs 1 and 2), with the note "Recommended: Mule deer 2/1 (February 1st), Elk 2/15". In outputs: `MigLines.shp`'s `tempStartM`/`tempStartD` are replaced by a single `wrr_date` text column (`MM-DD`; shapefile field names cap at 10 chars), and every migtime CSV export/autosave now carries a `wrr_start_date` column. Load Previous Table reads it back and sets Tab 2's WRR date inputs (older exports without it load unchanged); the external-import sniffer also recognises it. `Mig_Start`/`Mig_End` (actual sequence dates) are unchanged. Completes former to-do "Rename Mig start date".
+
+**Herd ID from `CaptureDAU`.** `herd_id` candidate order is now `CaptureDAU`, `captureDau`, `CptrDAU`, then `DAU`/`dau`, then `Project`/`project_name`. Completes former to-do "DAU from CaptureDAU".
+
+**Tab 2 sequence settings.** "Max Sequences" and "Sequence Names" labels are bold; "Recommended: 4" sits between the Max Sequences label and box; each of the first four sequence-name boxes shows "Recommended: Spring / Summer / Fall / Winter" beneath it. The Load Previous Table ⓘ now names the folder (`<working directory>/ModelOutputs/Migtime_Exports`). Completes former to-dos "Sequence names note" and "Re-load mig tables note".
+
+**Browser opens on top of the server terminal again.** Since 2026-09-01 `Start App.bat` opened the browser itself (with `MCM_NO_BROWSER=1`), and Windows' focus-stealing rules kept it behind the freshly created server window. `main.py` now opens the browser from the server process once the server answers (polls up to 60 s), and `Start App.bat` only waits to report a startup failure. The app opens in the Windows default browser (`webbrowser`'s `windows-default`); users who get Edge have Edge set as their Windows default.
+
+**Tab 1: Project card moved below Select or Upload Data.** Layout-only swap (Working Directory → Select or Upload Data → Project → Column Mapping); component IDs and callbacks unchanged. Completes former to-do "Tab 1: move the Project section after Upload Data".
+
+**Working-directory Browse uses Windows' modern folder picker, on top of the browser.** Background: the original picker was tkinter's `askdirectory` in a subprocess; the 2026-07-09 switch to bundled embeddable Python (no tkinter) broke it, and the 2026-07-14 fix searched for a separately installed Python and otherwise fell back to PowerShell's tree-style `Shell.Application.BrowseForFolder` (hwnd 0, so it often opened *behind* the browser). Most users have no system Python, so they always got the tree dialog. Now `_pick_directory_native()` runs `_FOLDER_PICKER_PS` via `powershell -STA -EncodedCommand`: an inline C# shim (`Add-Type`) drives `IFileOpenDialog` with `FOS_PICKFOLDERS` — the File Explorer-style "Select Folder" dialog (address bar, Quick Access, search) — opened in the current working directory and owned by an invisible TopMost WinForms form so it appears above the browser. No system Python needed; `_find_system_python()` and the "install Python" console note are removed. If that dialog can't open (non-zero exit with no path, e.g. a locked-down PC blocking `Add-Type`), it falls back to `_FOLDER_PICKER_FALLBACK_PS` — the tree dialog, now also given a TopMost owner (or hwnd 0 if even that is blocked). Cancel in either returns None (no change). Verified on the dev machine: modern picker works; fallback opens on top of the browser. Untested on locked-down CPW machines. Completes former to-do "Working directory browse dialog pops up behind the browser".
+
+**Fixed: undefined `logger` in the line-buffer heatmap error path.** `_build_linebuffer_output()`'s heatmap `except` called `logger.warning(...)`, but `main.py` never defines `logger` — so a heatmap failure raised `NameError`, the outer handler logged "Line buffer output FAILED: name 'logger' is not defined" (hiding the real cause), and the step's summary log lines were skipped even though the raw/dissolved line-buffer shapefiles had already been written. Now uses `logging.getLogger(__name__)`, so a heatmap failure is a warning and the step completes.
+
+**Files touched.** `app/main.py`, `app/modules/data_ingestion.py`, `app/modules/population_outputs.py`, `Start App.bat`, `INFORMATION.md`.
 
 ### 2026-10-08 — Fixed: average/median start-end dates skewed by multi-year date math and non-circular day-of-year averaging
 

@@ -1925,7 +1925,8 @@ def write_mig_outputs(
         (``["Spring", "Fall", ...]``). Used to map each sequence back to
         its ``"mig1".."mig8"`` slot for the ``Mig`` column.
     bio_year_start_month, bio_year_start_day:
-        Bio-year anchor for the ``tempStartM`` / ``tempStartD`` columns.
+        Winter Range Reference (WRR) date, written as the ``wrr_date``
+        column (``"MM-DD"``; shapefile field names cap at 10 chars).
     target_crs:
         Optional CRS to reproject all outputs into. Defaults to whatever
         the sequence geometries are already in.
@@ -2008,8 +2009,7 @@ def write_mig_outputs(
             "newUid": animal_id,
             "bioYear": int(bio_year_2digit),
             "bioYearFul": int(bio_year_full),
-            "tempStartD": int(bio_year_start_day),
-            "tempStartM": int(bio_year_start_month),
+            "wrr_date": f"{int(bio_year_start_month):02d}-{int(bio_year_start_day):02d}",
             "Mig_Start": mig_start_str,
             "Mig_End": mig_end_str,
             "Duration": round(float(duration_days), 4),

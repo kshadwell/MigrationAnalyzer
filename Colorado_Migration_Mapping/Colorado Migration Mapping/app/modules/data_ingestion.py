@@ -1245,10 +1245,10 @@ def process_data(
         log.append(f"Mortality flags: {n_mort:,} (dist < {_md}m for {_mt}h)")
 
     # ---- 12. Derive a herd_id from the data (used as the filename prefix for
-    # population-level outputs). Prefer the DAU code (CPW herd unit, e.g.
-    # "A37"); fall back to Project / project_name.
+    # population-level outputs). Prefer the capture DAU code (CPW herd unit,
+    # e.g. "A37"), then the plain DAU field; fall back to Project / project_name.
     herd_id: Optional[str] = None
-    for candidate_col in ("DAU", "dau", "CptrDAU", "Project", "project_name"):
+    for candidate_col in ("CaptureDAU", "captureDau", "CptrDAU", "DAU", "dau", "Project", "project_name"):
         if candidate_col in gdf.columns:
             non_null = gdf[candidate_col].dropna()
             # Drop blanks after stripping so empties / "  " don't survive uniqueness.
