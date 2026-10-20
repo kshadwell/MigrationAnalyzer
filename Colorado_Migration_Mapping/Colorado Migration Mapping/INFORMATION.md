@@ -252,9 +252,8 @@ These are the in-flight tasks mirrored from the session task list.
 12. **GDB vs. shapefile exports.** Add a CSV to the flag/removed/insufficient GDB. Aim to export everything as shapefile when possible; where it isn't, figure out why and fix it (field names, etc.).
 13. **Review the Tab 1 UTM Zone 13 checkbox text.** The current text isn't correct, but the right wording still needs to be figured out. Pending a call with Bryan about how SQL will be integrated.
 14. **Detect problem points by geometry, not just DOP/NumSats.** Some possible problem points are missed because DOP and NumSats values differ by vendor. Use distance and turning angle relative to neighboring points to identify possible problem points. Check the USGS code or Nick's code to see if this already exists.
-15. **Feedback form link.** Add a button next to the Update button at the top of the screen that links to a form where bios can submit questions or recommendations about the app.
-16. **Age and sex columns in the migtime table.** (Overlaps the 2026-08-28 "Pre-modeling include/exclude by sex + age class" item below.)
-17. **WRR date info popup.** Add an ⓘ info popover next to the Winter Range Reference Date (WRR date) box (Tab 1 and Tab 2) explaining what the WRR date is. (Added 2026-10-18.)
+15. **Age and sex columns in the migtime table.** (Overlaps the 2026-08-28 "Pre-modeling include/exclude by sex + age class" item below.)
+16. **WRR date info popup.** Add an ⓘ info popover next to the Winter Range Reference Date (WRR date) box (Tab 1 and Tab 2) explaining what the WRR date is. (Added 2026-10-18.)
 
 **Long-term needs:**
 
@@ -296,6 +295,14 @@ These are the in-flight tasks mirrored from the session task list.
 - **Note in outputs: individuals are stacked, not sequences.** Add a note/label in the population output UI and exported metadata clarifying that individual UDs are stacked (averaged), not per-sequence UDs.
 - **Slow working directory selection.** Selecting a working directory takes a very long time to finish updating. Investigate whether this is a machine/network issue or an app bottleneck (e.g., scanning large directories, loading cached data).
 
+
+### 2026-10-20 — Report a bug / recommendation button (Google Form)
+
+Added a bug-icon button (`app/assets/bug_icon.png`, 256×295 transparent PNG, shown 22 px tall) left of **? Help** in the navbar. It opens `feedback_modal`: **Bug** / **Recommendation** radio; optional **Name** and **Email**; for Bug, "Which tab is the bug on?" (Tab 1–5 preselected to the user's current tab, or Other + free text); a large description box ("Describe the issue" / "Describe your recommendation:"); the note "Once submitted, an email will be sent to keana.shadwell@gmail.com with your responses."; and Submit.
+
+**Delivery.** `submit_feedback` POSTs (server-side, `urllib`) to the **"MAA Edits Recommendations"** Google Form's `formResponse` endpoint — form ID and per-question `entry.<n>` IDs are in `_FEEDBACK_FORM_URL` / `_FEEDBACK_FORM_ENTRIES` near the navbar code. The form emails the owner on each new response (Responses → ⋮ → email notifications) and keeps a response sheet. Form questions, in order: Type, Name, Email, Tab (short answer); Description, App details (paragraph). The form must stay public (no "Collect email addresses", no "Restrict to users in organization") or the POST is rejected. Recommendations send Tab = "N/A". **App details** is auto-filled: submit date/time, the tab the user was on, project name, herd ID, working directory. If the POST fails (offline, form changed), the popup shows a "send it by email instead" `mailto:` link to `_FEEDBACK_FALLBACK_EMAIL` with all fields pre-filled. If questions are ever added/reordered in the form, re-read the entry IDs from the form page and update `_FEEDBACK_FORM_ENTRIES`. Verified end-to-end 2026-10-20 (submission received + notification email). Completes former to-do "Feedback form link".
+
+**Files touched.** `app/main.py`, `app/assets/bug_icon.png`, `INFORMATION.md`.
 
 ### 2026-10-18 — WRR date rename, CaptureDAU herd ID, Tab 2 sequence hints, browser opens on top
 

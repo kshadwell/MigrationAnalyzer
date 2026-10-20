@@ -1425,14 +1425,34 @@ navbar = dbc.Navbar(
                 ],
                 style={"display": "flex", "alignItems": "center"},
             ),
-            html.Button(
-                "? Help",
-                id="help-guide-btn",
-                style={
-                    "background": "none", "border": "1px solid #7ecfff",
-                    "color": "#7ecfff", "borderRadius": "4px", "padding": "4px 12px",
-                    "cursor": "pointer", "fontSize": "0.85rem",
-                },
+            html.Div(
+                [
+                    # Report a bug / recommendation — opens feedback_modal.
+                    html.Button(
+                        html.Img(
+                            src=app.get_asset_url("bug_icon.png"),
+                            alt="Report a bug",
+                            style={"height": "22px", "display": "block"},
+                        ),
+                        id="feedback-btn",
+                        title="Report a bug or send a recommendation",
+                        style={
+                            "background": "none", "border": "1px solid #7ecfff",
+                            "borderRadius": "4px", "padding": "2px 8px",
+                            "cursor": "pointer", "display": "flex", "alignItems": "center",
+                        },
+                    ),
+                    html.Button(
+                        "? Help",
+                        id="help-guide-btn",
+                        style={
+                            "background": "none", "border": "1px solid #7ecfff",
+                            "color": "#7ecfff", "borderRadius": "4px", "padding": "4px 12px",
+                            "cursor": "pointer", "fontSize": "0.85rem",
+                        },
+                    ),
+                ],
+                style={"display": "flex", "alignItems": "stretch", "gap": "8px"},
             ),
         ],
         fluid=True,
@@ -1457,6 +1477,127 @@ help_modal = dbc.Modal(
     ],
     id="help-guide-modal",
     size="xl",
+    is_open=False,
+    centered=True,
+)
+
+# ---------------------------------------------------------------------------
+# Report a bug / recommendation popup → Google Form.
+# Each submission is POSTed to the form's formResponse endpoint (the form
+# emails the owner on every new response and keeps a response sheet). Fill
+# these in from the form's "Get pre-filled link": the URL's
+# /forms/d/e/<ID>/viewform becomes .../formResponse, and each
+# entry.<number>= parameter maps to one question below. If the form isn't set
+# up yet or the POST fails (e.g. offline), the popup offers a pre-filled email
+# to _FEEDBACK_FALLBACK_EMAIL instead so no report is lost.
+# ---------------------------------------------------------------------------
+_FEEDBACK_FORM_URL = (       # "MAA Edits Recommendations" form
+    "https://docs.google.com/forms/d/e/"
+    "1FAIpQLSdsCuDJVVnh2PxBgRtqC-wRqVtGrQ3LVvbDCRRixJz1Ya7AnA/formResponse"
+)
+_FEEDBACK_FORM_ENTRIES = {   # question -> "entry.<number>"
+    "type": "entry.188604909",
+    "name": "entry.1785287608",
+    "email": "entry.1735787717",
+    "tab": "entry.671740351",
+    "description": "entry.1329174254",
+    "details": "entry.960286450",
+}
+_FEEDBACK_FALLBACK_EMAIL = "keana.shadwell@gmail.com"
+
+_TAB_LABELS = {
+    "tab-1": "1 · Data Import & Cleaning",
+    "tab-2": "2 · Migration Sequencing",
+    "tab-3": "3 · Modeling",
+    "tab-4": "4 · Population Outputs",
+    "tab-5": "5 · Map & Export",
+}
+
+feedback_modal = dbc.Modal(
+    [
+        dbc.ModalHeader(dbc.ModalTitle("Report a Bug or Send a Recommendation"), close_button=True),
+        dbc.ModalBody(
+            [
+                dbc.RadioItems(
+                    id="feedback-type",
+                    options=[
+                        {"label": "Bug", "value": "Bug"},
+                        {"label": "Recommendation", "value": "Recommendation"},
+                    ],
+                    value="Bug",
+                    inline=True,
+                    className="mb-3",
+                ),
+                dbc.Row(
+                    [
+                        dbc.Col(
+                            [
+                                dbc.Label("Name (optional)", style={"fontSize": "0.85rem"}),
+                                dbc.Input(id="feedback-name", type="text", size="sm"),
+                            ],
+                            width=6,
+                        ),
+                        dbc.Col(
+                            [
+                                dbc.Label("Email (optional)", style={"fontSize": "0.85rem"}),
+                                dbc.Input(id="feedback-email", type="email", size="sm"),
+                            ],
+                            width=6,
+                        ),
+                    ],
+                    className="mb-3",
+                ),
+                # Bug-only: which tab. Hidden for recommendations.
+                html.Div(
+                    [
+                        dbc.Label("Which tab is the bug on?",
+                                  style={"fontSize": "0.85rem", "fontWeight": "bold"}),
+                        dbc.Select(
+                            id="feedback-tab",
+                            options=[
+                                {"label": "Tab 1", "value": "Tab 1"},
+                                {"label": "Tab 2", "value": "Tab 2"},
+                                {"label": "Tab 3", "value": "Tab 3"},
+                                {"label": "Tab 4", "value": "Tab 4"},
+                                {"label": "Tab 5", "value": "Tab 5"},
+                                {"label": "Other", "value": "Other"},
+                            ],
+                            value="Tab 1",
+                            size="sm",
+                        ),
+                        dbc.Input(
+                            id="feedback-tab-other",
+                            type="text",
+                            placeholder="Where in the app? (e.g. the startup window, Browse dialog)",
+                            size="sm",
+                            className="mt-1",
+                            style={"display": "none"},
+                        ),
+                    ],
+                    id="feedback-tab-section",
+                    className="mb-3",
+                ),
+                dbc.Label("Describe the issue", id="feedback-description-label",
+                          style={"fontSize": "0.85rem", "fontWeight": "bold"}),
+                dbc.Textarea(
+                    id="feedback-description",
+                    style={"height": "220px", "fontSize": "0.85rem"},
+                ),
+                html.Small(
+                    f"Once submitted, an email will be sent to {_FEEDBACK_FALLBACK_EMAIL} "
+                    "with your responses.",
+                    className="text-muted d-block mt-2",
+                    style={"fontSize": "0.75rem"},
+                ),
+                html.Div(id="feedback-status", className="mt-2 small"),
+            ]
+        ),
+        dbc.ModalFooter(
+            dbc.Button("Submit", id="feedback-submit", color="primary", size="sm"),
+        ),
+    ],
+    id="feedback-modal",
+    size="lg",
     is_open=False,
     centered=True,
 )
@@ -3699,6 +3840,7 @@ app.layout = dbc.Container(
     children=[
         navbar,
         help_modal,
+        feedback_modal,
         # ---- Application state stores ----
         # Each dcc.Store is one slot of client-side state shared between
         # callbacks. Default storage_type is "memory" (lost on page reload);
@@ -3770,6 +3912,134 @@ def toggle_help_modal(n_clicks, is_open):
     if n_clicks:
         return not is_open
     return is_open
+
+
+@app.callback(
+    Output("feedback-modal", "is_open"),
+    Output("feedback-status", "children", allow_duplicate=True),
+    Output("feedback-tab", "value"),
+    Input("feedback-btn", "n_clicks"),
+    State("main-tabs", "active_tab"),
+    prevent_initial_call=True,
+)
+def open_feedback_modal(n_clicks, active_tab):
+    # Clear any status left over from a previous submission, and preselect the
+    # tab the user is on ("tab-3" -> "Tab 3").
+    tab = f"Tab {str(active_tab or 'tab-1').split('-')[-1]}"
+    return True, "", tab
+
+
+@app.callback(
+    Output("feedback-tab-section", "style"),
+    Output("feedback-tab-other", "style"),
+    Output("feedback-description-label", "children"),
+    Input("feedback-type", "value"),
+    Input("feedback-tab", "value"),
+)
+def update_feedback_form(fb_type, tab):
+    """Bug: show the tab picker (plus a free-text box for "Other").
+    Recommendation: hide it and relabel the description box."""
+    if fb_type == "Recommendation":
+        return {"display": "none"}, {"display": "none"}, "Describe your recommendation:"
+    other_style = {} if tab == "Other" else {"display": "none"}
+    return {}, other_style, "Describe the issue"
+
+
+def _feedback_mailto(subject: str, body: str) -> str:
+    from urllib.parse import quote
+    return (f"mailto:{_FEEDBACK_FALLBACK_EMAIL}"
+            f"?subject={quote(subject)}&body={quote(body)}")
+
+
+@app.callback(
+    Output("feedback-status", "children", allow_duplicate=True),
+    Output("feedback-description", "value"),
+    Input("feedback-submit", "n_clicks"),
+    State("feedback-type", "value"),
+    State("feedback-name", "value"),
+    State("feedback-email", "value"),
+    State("feedback-tab", "value"),
+    State("feedback-tab-other", "value"),
+    State("feedback-description", "value"),
+    State("main-tabs", "active_tab"),
+    State("project-name", "value"),
+    State("project-selector", "value"),
+    State("store-config", "data"),
+    State("store-workdir", "data"),
+    prevent_initial_call=True,
+)
+def submit_feedback(n_clicks, fb_type, name, email, tab, tab_other, description, active_tab,
+                    project_name, project_loaded, config_json, workdir_path):
+    """Send a bug report / recommendation to the Google Form (see
+    _FEEDBACK_FORM_URL). On failure, offer a pre-filled email instead."""
+    import datetime as _dt
+    from urllib.parse import urlencode
+    from urllib.request import Request, urlopen
+
+    if not n_clicks:
+        raise PreventUpdate
+    description = (description or "").strip()
+    if not description:
+        return _err_alert("Please add a description before submitting."), dash.no_update
+
+    herd_id = ""
+    try:
+        cfg = json.loads(config_json) if isinstance(config_json, str) else (config_json or {})
+        herd_id = str(cfg.get("herd_id") or "")
+    except Exception:
+        pass
+    details = "\n".join([
+        f"Submitted: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Tab: {_TAB_LABELS.get(active_tab, active_tab or '')}",
+        f"Project: {project_name or project_loaded or '(none)'}",
+        f"Herd: {herd_id or '(not processed yet)'}",
+        f"Working directory: {workdir_path or '(not set)'}",
+    ])
+    fb_type = fb_type or "Bug"
+    if fb_type == "Bug":
+        bug_tab = tab or ""
+        if bug_tab == "Other":
+            bug_tab = f"Other: {(tab_other or '').strip() or '(not specified)'}"
+    else:
+        bug_tab = "N/A"
+    fields = {
+        "type": fb_type,
+        "name": (name or "").strip(),
+        "email": (email or "").strip(),
+        "tab": bug_tab,
+        "description": description,
+        "details": details,
+    }
+
+    if _FEEDBACK_FORM_URL and all(_FEEDBACK_FORM_ENTRIES.values()):
+        payload = urlencode({_FEEDBACK_FORM_ENTRIES[k]: v for k, v in fields.items()}).encode("utf-8")
+        try:
+            req = Request(_FEEDBACK_FORM_URL, data=payload, method="POST",
+                          headers={"Content-Type": "application/x-www-form-urlencoded"})
+            with urlopen(req, timeout=15) as resp:
+                if resp.status == 200:
+                    _log_action("FEEDBACK_SUBMIT", type=fb_type)
+                    return _ok_alert("Thanks! Your report was sent."), ""
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("Feedback submit failed: %s", exc)
+
+    # Not configured, offline, or the form rejected it — fall back to email.
+    subject = f"Migration Mapper {fb_type}: {description.splitlines()[0][:60]}"
+    body = (f"Type: {fb_type}\n"
+            f"Name: {fields['name'] or '(not given)'}\n"
+            f"Email: {fields['email'] or '(not given)'}\n"
+            + (f"Tab: {bug_tab}\n" if fb_type == "Bug" else "")
+            + f"\n{description}\n\n--- App details ---\n{details}\n")
+    return dbc.Alert(
+        [
+            "Couldn't send the report automatically (are you connected to the internet?). ",
+            html.A("Click here to send it by email instead",
+                   href=_feedback_mailto(subject, body), className="alert-link"),
+            " — it opens a pre-filled email; just press Send.",
+        ],
+        color="warning", className="mt-2",
+    ), dash.no_update
 
 
 # ===========================================================================
