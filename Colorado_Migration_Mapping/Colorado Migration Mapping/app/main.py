@@ -456,6 +456,23 @@ _CLASSIFICATION_NOTE = {
 _REMOVED_CLASSIFICATIONS = ("resident", "nomadic", "insufficient")
 
 
+def _drop_removed_animal_years(migtime: pd.DataFrame, class_store: dict | None = None):
+    """Drop animal-years classified Resident / Nomadic / Insufficient from a
+    migtime table. Returns (filtered_copy, removed_keys).
+
+    Every analysis path must go through this — not just the migtime CSV export.
+    The in-memory migtime store keeps those rows (so Tab 2 can still show and
+    re-classify them), and Run Models / MigLines used to read the store
+    directly, so a removed animal-year that still had sequence dates was
+    silently modeled. *class_store* is the Tab 2 classification store; if None,
+    the active project's saved classifications are read from disk."""
+    store = class_store if class_store is not None else _load_classifications()
+    removed_keys = {str(k) for k, v in (store or {}).items() if v in _REMOVED_CLASSIFICATIONS}
+    if removed_keys and "id_bio_year" in migtime.columns:
+        migtime = migtime[~migtime["id_bio_year"].astype(str).isin(removed_keys)].copy()
+    return migtime, removed_keys
+
+
 _ROAD_LOCK = threading.Lock()
 
 
@@ -6671,15 +6688,13 @@ def _build_migtime_export_df(
     # AnimalYearsRemoved.csv. Per-fix problem/mortality removals from the animals
     # that were KEPT go to Problems_Morts_Removed.csv/.shp.
     class_store = class_store or {}
-    removed_keys = {
-        str(k) for k, v in class_store.items() if v in _REMOVED_CLASSIFICATIONS
-    }
-    if removed_keys and "id_bio_year" in migtime.columns:
-        migtime = migtime[~migtime["id_bio_year"].astype(str).isin(removed_keys)].copy()
+    migtime, removed_keys = _drop_removed_animal_years(migtime, class_store)
 
     # classification (from the Tab 2 radios, or "unclassified") and reviewed =
-    # "has a classification". `reviewed` used to be a placeholder that was never
-    # set during review, so it read FALSE for every row.
+    # "has a classification OR at least one sequence". `reviewed` used to be a
+    # placeholder that was never set during review, so it read FALSE for every
+    # row. (Sequences without a radio still read "unclassified" — and are still
+    # modeled; only Resident/Nomadic/Insufficient are excluded.)
     if "id_bio_year" in migtime.columns:
         migtime = migtime.copy()  # don't add export-only columns to the live table
         classification = (
@@ -6691,7 +6706,20 @@ def _build_migtime_export_df(
             pos = (list(migtime.columns).index("notes")
                    if "notes" in migtime.columns else len(migtime.columns))
             migtime.insert(pos, "classification", classification)
-        migtime["reviewed"] = classification != "unclassified"
+        def _blank(v) -> bool:
+            # Empty slot in any of the forms the store holds: NaT/NaN/None or
+            # a blank/"NaT" string (astype(str) can't be trusted — NaT may
+            # stringify to a float NaN).
+            if v is None or (not isinstance(v, str) and pd.isna(v)):
+                return True
+            return str(v).strip() in ("", "NaT", "nan", "None", "<NA>")
+
+        start_cols = [f"mig{i}_start" for i in range(1, 9) if f"mig{i}_start" in migtime.columns]
+        has_sequence = (
+            ~migtime[start_cols].apply(lambda col: col.map(_blank)).all(axis=1)
+            if start_cols else pd.Series(False, index=migtime.index)
+        )
+        migtime["reviewed"] = (classification != "unclassified") | has_sequence
 
     # Friendly column names (Spring_start, …) for the CSV + a seq_map legend so
     # the labels follow the project into the export and round-trip back on load.
@@ -8698,11 +8726,12 @@ def _apply_model_ui_params(config: dict, model: str, p: dict) -> None:
     State({"type": "model-param", "key": dash.ALL}, "value"),
     State({"type": "model-param", "key": dash.ALL}, "id"),
     State("model-cell-size", "value"),
+    State("store-animal-classification", "data"),
     prevent_initial_call=True,
 )
 def run_modeling(
     n_clicks, processed_json, migtime_json, model, n_cores, seq_name_inputs, config_json,
-    model_param_values, model_param_ids, cell_size,
+    model_param_values, model_param_ids, cell_size, class_store,
 ):
     """Launch the modelling pipeline in a background thread so it survives
     browser disconnects and computer sleep. Returns immediately with a
@@ -8722,7 +8751,7 @@ def run_modeling(
     _MODEL_RUN["progress_msg"] = f"Starting {model.upper()} model run..."
 
     args = (processed_json, migtime_json, model, n_cores, seq_name_inputs,
-            config_json, model_param_values, model_param_ids, cell_size)
+            config_json, model_param_values, model_param_ids, cell_size, class_store)
     t = threading.Thread(target=_run_modeling_impl, args=args, daemon=True)
     t.start()
     _MODEL_RUN["thread"] = t
@@ -8770,7 +8799,7 @@ def poll_model_run(n_intervals, run_id):
 
 def _run_modeling_impl(
     processed_json, migtime_json, model, n_cores, seq_name_inputs, config_json,
-    model_param_values, model_param_ids, cell_size,
+    model_param_values, model_param_ids, cell_size, class_store=None,
 ):
     """Background thread target — runs the full modelling pipeline and stores
     its result in _MODEL_RUN for the polling callback to pick up."""
@@ -8791,6 +8820,15 @@ def _run_modeling_impl(
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         migtime = _json_to_df(migtime_json, "migtime")
+        # Resident / Nomadic / Insufficient animal-years are out of the
+        # analysis — drop them before ANY sequence/range/MigLines extraction.
+        migtime, _removed_ay = _drop_removed_animal_years(migtime, class_store)
+        if _removed_ay:
+            _append_processing_log(
+                [f"Excluded {len(_removed_ay)} animal-year(s) classified Resident / "
+                 "Nomadic / Insufficient data from modeling."],
+                header="MODEL RUN",
+            )
 
         # Build a GeoDataFrame in WGS-84 first (for extract_sequences), then
         # project to UTM for modelling (the R workflow requires metre units).
@@ -11091,10 +11129,11 @@ def _write_processing_report(df, out_path: Path) -> str:
     State("store-migtime-table", "data"),
     State("store-config", "data"),
     State("store-seq-names", "data"),
+    State("store-animal-classification", "data"),
     prevent_initial_call=True,
 )
 def handle_export(selected_clicks, all_clicks, bios_clicks, group_values, out_dir, processed_json, workdir_path,
-                  migtime_json, config_json, seq_names):
+                  migtime_json, config_json, seq_names, class_store):
     """Flush population outputs from the in-memory _POP_OUTPUT_CACHE to disk.
 
     "Export Selected" writes only the ticked checklist items; "Export All"
@@ -11198,7 +11237,7 @@ def handle_export(selected_clicks, all_clicks, bios_clicks, group_values, out_di
             sequences_dict = _MODEL_CACHE.get("sequences_dict")
             if not sequences_dict and processed_json and migtime_json:
                 _rdf = _json_to_df(processed_json, "processed")
-                _rmig = _json_to_df(migtime_json, "migtime")
+                _rmig, _ = _drop_removed_animal_years(_json_to_df(migtime_json, "migtime"), class_store)
                 _rnames = _MODEL_CACHE.get("seq_labels") or seq_names or [f"mig{i+1}" for i in range(8)]
                 try:
                     import geopandas as _gpd_re
@@ -11222,7 +11261,7 @@ def handle_export(selected_clicks, all_clicks, bios_clicks, group_values, out_di
                 proc_df = _json_to_df(processed_json, "processed")
                 if "timestamp" in proc_df.columns:
                     proc_df["timestamp"] = pd.to_datetime(proc_df["timestamp"], errors="coerce")
-                mig_df = _json_to_df(migtime_json, "migtime")
+                mig_df, _ = _drop_removed_animal_years(_json_to_df(migtime_json, "migtime"), class_store)
                 herd_id = "Herd"
                 bio_month, bio_day = 2, 1
                 if config_json:
