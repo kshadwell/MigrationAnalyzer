@@ -68,7 +68,7 @@ _vec_point_style = {"variable": "dashExtensions.default.vecPointStyle"}
 #         silent crash at startup. Useful for diagnosing install problems.
 # ---------------------------------------------------------------------------
 try:
-    from app.modules.data_ingestion import DEFAULT_CONFIG, process_data
+    from app.modules.data_ingestion import DEFAULT_CONFIG, calc_nsd, process_data
     from app.modules.sequencing import (
         apply_auto_detections,
         build_migtime_table,
@@ -124,7 +124,7 @@ try:
     )
 except ImportError:
     try:
-        from modules.data_ingestion import DEFAULT_CONFIG, process_data
+        from modules.data_ingestion import DEFAULT_CONFIG, calc_nsd, process_data
         from modules.sequencing import (
             apply_auto_detections,
             build_migtime_table,
@@ -213,6 +213,9 @@ except ImportError:
 
         def process_data(filepath, config=None):
             raise NotImplementedError("data_ingestion module not found")
+
+        def calc_nsd(df, *a, **k):
+            return df
 
         def detect_migrations_nsd(*a, **k):
             raise NotImplementedError("sequencing module not found")
@@ -1682,7 +1685,7 @@ def _col_map_row(label, dropdown_id, options=None, multi=False):
 
 _INFO_LABEL_COUNTER = [0]
 
-def _info_label(label_text, description, recommended=None, icon_color="#6c9bd2"):
+def _info_label(label_text, description, recommended=None, icon_color="#6c9bd2", bold=False):
     _INFO_LABEL_COUNTER[0] += 1
     btn_id = f"info-btn-{_INFO_LABEL_COUNTER[0]}"
     # `description` is usually a string, but may be a list of Dash components
@@ -1692,7 +1695,8 @@ def _info_label(label_text, description, recommended=None, icon_color="#6c9bd2")
     if recommended is not None and isinstance(body, str):
         body += f"\n\nRecommended: {recommended}"
     return html.Div([
-        dbc.Label(label_text, style={"fontSize": "0.85rem", "display": "inline"}),
+        dbc.Label(label_text, style={"fontSize": "0.85rem", "display": "inline",
+                                     **({"fontWeight": "bold"} if bold else {})}),
         html.Button(
             "ⓘ",
             id=btn_id,
@@ -1715,6 +1719,40 @@ def _info_label(label_text, description, recommended=None, icon_color="#6c9bd2")
             placement="right",
         ),
     ], style={"marginBottom": "2px"})
+
+
+def _wrr_info_body():
+    """ⓘ text for the Winter Range Reference Date (Tab 1 and Tab 2). A fresh
+    component list per call — Dash components can't be shared between two
+    places in the layout."""
+    return [
+        html.B("Winter Range Reference Date (WRR date)"),
+        "\n\nThe WRR date is the day each animal's year begins. It should fall "
+        "while animals are still on their winter range, before spring migration starts.\n\n"
+        "The app uses it to:",
+        html.Ul(
+            [
+                html.Li([
+                    html.B("Split each animal's data into animal-years."),
+                    " Each animal-year runs from the WRR date to the day before the WRR "
+                    "date the next year. Every row in the migtime table is one animal-year.",
+                ]),
+                html.Li([
+                    html.B("Set the NSD graph's starting point."),
+                    " The graph on Tab 2 shows one animal-year, starting on the WRR date. "
+                    "Distance is measured from the animal's average location over its first "
+                    "20 GPS fixes on or after this date, its winter range. Migrations show up "
+                    "as the line rising away from winter range and falling back.",
+                ]),
+            ],
+            style={"paddingLeft": "1.1rem", "margin": "4px 0 8px 0", "whiteSpace": "normal"},
+        ),
+        html.B("Recommended:"),
+        " Mule deer 2/1 (February 1st), Elk 2/15.\n\n"
+        "Choose the WRR date before you start identifying migrations on Tab 2. Changing it "
+        "later regroups the animal-years, so sequences you've already marked may need to "
+        "be checked again.",
+    ]
 
 
 tab1_layout = dbc.Container(
@@ -2151,7 +2189,8 @@ tab1_layout = dbc.Container(
                                             [
                                                 dbc.Col(
                                                     [
-                                                        dbc.Label("Winter Range Reference Date (WRR date) (M/D)",style={"fontSize": "0.85rem", "fontWeight": "bold"}),
+                                                        _info_label("Winter Range Reference Date (WRR date) (M/D)",
+                                                                    _wrr_info_body(), bold=True),
                                                         dbc.InputGroup(
                                                             [
                                                                 dbc.Input(
@@ -2257,12 +2296,13 @@ tab1_layout = dbc.Container(
                                                             style={"color": "#8FCFFF"},
                                                         ),
                                                         ").\n\n",
-                                                        "Once clicking the Export Migtime Table button on tab 2, if "
-                                                        "an animal-year's track crosses a highway, \"Crosses highway.\" "
-                                                        "is automatically appended to the note in the migtime table "
-                                                        "(MTFCC codes S1100 and S1200, primary and secondary highways). "
-                                                        "If it only crosses a local road (no highway), \"Crosses road.\" "
-                                                        "is appended (MTFCC code S1400).",
+                                                        "Once clicking the Export Migtime Table button on tab 2, a "
+                                                        "crossing note is automatically appended to each animal-year's "
+                                                        "note in the migtime table: \"Crosses highway.\" if its track "
+                                                        "crosses a highway (MTFCC codes S1100 and S1200, primary and "
+                                                        "secondary highways), \"Crosses road.\" if it crosses a local "
+                                                        "road (MTFCC code S1400), or \"Crosses road and highway.\" if "
+                                                        "it crosses both.",
                                                     ],
                                                 ),
                                             ],
@@ -2610,7 +2650,8 @@ tab2_layout = dbc.Container(
                                 dbc.CardHeader("Migration Year & Sequence Settings"),
                                 dbc.CardBody(
                                     [
-                                        dbc.Label("Winter Range Reference Date (WRR date)", style={"fontSize": "0.85rem", "fontWeight": "bold"}),
+                                        _info_label("Winter Range Reference Date (WRR date)",
+                                                    _wrr_info_body(), bold=True),
                                         dbc.Row(
                                             [
                                                 dbc.Col(
@@ -5328,8 +5369,12 @@ def process_uploaded_data(
         def _road_worker():
             try:
                 _compute_road_crossings(_rc_df, _rc_m, _rc_d, proj, workdir_path)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Used to be swallowed silently — exports then just had no
+                # crossing notes with no hint why.
+                import logging as _logging
+                _logging.getLogger(__name__).warning("Road-crossing detection failed: %s", exc)
+                print(f"WARNING: Road-crossing detection failed: {exc}")
 
         _th_roads.Thread(target=_road_worker, daemon=True).start()
         processing_log.append("Road-crossing detection running in background...")
@@ -5519,9 +5564,16 @@ def sync_seq_names(values):
 
 def _seq_working_df(processed_json, bio_month, bio_day):
     """Load the processed DataFrame from cache and re-derive bio_year /
-    id_bio_year from the UI's current bio-year start. Shared by the Tab-2
+    id_bio_year from the UI's current bio-year (WRR) start. Shared by the Tab-2
     migtime writer and renderer so both key off identical animal-year windows.
-    Returns (df, nsd_col)."""
+
+    NSD per animal-year (nsd_/displacement_id_bio_year) is recomputed to match:
+    Process Data computes it with Tab 1's WRR date (reference = mean of each
+    animal-year's first n_ref_points fixes), so after a Tab-2 WRR change the
+    windows would otherwise move while distance was still measured from the
+    old winter-range reference. df.attrs["nsd_wrr"] records the WRR date the
+    NSD columns were last computed for, so this only reruns on a change (and
+    once per freshly loaded df). Returns (df, nsd_col)."""
     df = _json_to_df(processed_json, "processed")
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
@@ -5534,6 +5586,12 @@ def _seq_working_df(processed_json, bio_month, bio_day):
         bio_year_arr = np.where(before_start, year_ - 1, year_)
         df["bio_year"] = bio_year_arr
         df["id_bio_year"] = df["animal_id"].astype(str) + "_" + bio_year_arr.astype(str)
+        wrr = (int(bio_month), int(bio_day))
+        if df.attrs.get("nsd_wrr") != wrr and {"x", "y"}.issubset(df.columns):
+            calc_nsd(df, id_col="animal_id", date_col="timestamp",
+                     group_col="id_bio_year",
+                     n_ref_points=int(DEFAULT_CONFIG.get("n_ref_points", 20)))
+            df.attrs["nsd_wrr"] = wrr
     nsd_col = "nsd_id_bio_year" if "nsd_id_bio_year" in df.columns else None
     if nsd_col is None:
         nsd_cols = [c for c in df.columns if c.startswith("nsd_")]
@@ -5681,8 +5739,10 @@ def refresh_road_crossings_on_migyear(month, day, processed_json, workdir_path):
     def _worker():
         try:
             _compute_road_crossings(df, m, d, proj, workdir_path, only_if_enabled=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("Road-crossing refresh failed: %s", exc)
+            print(f"WARNING: Road-crossing refresh failed: {exc}")
 
     threading.Thread(target=_worker, daemon=True).start()
     raise PreventUpdate
@@ -6498,9 +6558,18 @@ def clear_single_sequence(n_clicks):
     return [0, 0]
 
 
+# Every crossing phrase _crossing_phrase can emit — longest first, so stripping
+# a prior copy never leaves a partial phrase behind.
+_CROSSING_PHRASES = ("Crosses road and highway.", "Crosses highway.", "Crosses road.")
+
+
 def _crossing_phrase(crosses_road: bool, crosses_highway: bool) -> str:
     """Single canonical statement about road/highway crossings for a notes
-    cell. Highway supersedes road — at most one phrase is ever returned."""
+    cell. Road (S1400) and highway (S1100/S1200) are detected independently
+    (since 2026-09-02), so an animal-year crossing both gets the combined
+    phrase — previously highway superseded road and the road crossing was lost."""
+    if crosses_road and crosses_highway:
+        return "Crosses road and highway."
     if crosses_highway:
         return "Crosses highway."
     if crosses_road:
@@ -6542,10 +6611,16 @@ def _compose_notes(user_note: str, crosses_road: bool, crosses_highway: bool) ->
     exactly one canonical phrase (we strip any prior copy).
     """
     note = (user_note or "").strip()
-    # Remove any previously-appended crossing phrase so re-exports don't double up.
-    for phrase in ("Crosses highway.", "Crosses road."):
-        if note.endswith(phrase):
-            note = note[: -len(phrase)].rstrip()
+    # Remove any previously-appended crossing phrase(s) so re-exports don't
+    # double up (loops in case an older note carries more than one).
+    stripped = True
+    while stripped:
+        stripped = False
+        for phrase in _CROSSING_PHRASES:
+            if note.endswith(phrase):
+                note = note[: -len(phrase)].rstrip()
+                stripped = True
+                break
     phrase = _crossing_phrase(crosses_road, crosses_highway)
     if not phrase:
         return note
@@ -6575,8 +6650,9 @@ def _build_migtime_export_df(
 ):
     """Shared core of a migtime save (manual Export Migtime Table AND the
     periodic autosave below): resolve road crossings, populate notes, drop
-    animal-years classified Resident/Nomadic/Insufficient, and rename columns
-    to the user's sequence labels. Returns
+    animal-years classified Resident/Nomadic/Insufficient, fill the
+    classification + reviewed columns, and rename columns to the user's
+    sequence labels. Returns
     (migtime_after_removal, export_df, removed_keys, road_store)."""
     migtime = _json_to_df(migtime_json, "migtime")
     _rc_df = None
@@ -6600,6 +6676,22 @@ def _build_migtime_export_df(
     }
     if removed_keys and "id_bio_year" in migtime.columns:
         migtime = migtime[~migtime["id_bio_year"].astype(str).isin(removed_keys)].copy()
+
+    # classification (from the Tab 2 radios, or "unclassified") and reviewed =
+    # "has a classification". `reviewed` used to be a placeholder that was never
+    # set during review, so it read FALSE for every row.
+    if "id_bio_year" in migtime.columns:
+        migtime = migtime.copy()  # don't add export-only columns to the live table
+        classification = (
+            migtime["id_bio_year"].astype(str).map(class_store).fillna("unclassified")
+        )
+        if "classification" in migtime.columns:
+            migtime["classification"] = classification
+        else:
+            pos = (list(migtime.columns).index("notes")
+                   if "notes" in migtime.columns else len(migtime.columns))
+            migtime.insert(pos, "classification", classification)
+        migtime["reviewed"] = classification != "unclassified"
 
     # Friendly column names (Spring_start, …) for the CSV + a seq_map legend so
     # the labels follow the project into the export and round-trip back on load.
