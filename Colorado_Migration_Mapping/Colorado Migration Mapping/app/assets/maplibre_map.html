@@ -122,6 +122,11 @@ let selectedKeys = new Set();
 // Cached copy of the latest points GeoJSON so flash-point lookups can find
 // off-screen features (querySourceFeatures only returns viewport features).
 let pointsData = { type: 'FeatureCollection', features: [] };
+// view_key of the last update-data we zoomed to. The parent re-sends center/zoom
+// for the same animal-year when unrelated stores change (e.g. a flag click
+// rewrites the processed data, which re-sets the animal dropdown), so only fly
+// when the key changes — otherwise the user's current view is kept.
+let lastViewKey = null;
 
 function formatVal(key, val) {
   if (val == null || val === undefined) return '—';
@@ -605,8 +610,9 @@ window.addEventListener('message', (e) => {
     selectedKeys.clear();
     refreshSelectionStyling();
     notifySelectionChanged();
-    if (d.center && d.zoom != null) {
+    if (d.center && d.zoom != null && (d.view_key == null || d.view_key !== lastViewKey)) {
       map.flyTo({ center: [d.center[1], d.center[0]], zoom: d.zoom, duration: 600 });
+      if (d.view_key != null) lastViewKey = d.view_key;
     }
   }
 

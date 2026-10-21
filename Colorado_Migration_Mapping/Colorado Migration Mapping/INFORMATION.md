@@ -240,17 +240,15 @@ These are the in-flight tasks mirrored from the session task list.
 
 1. **Clarify contour-level options.** Clarify the contour levels section (5, 10, 15 vs. 95%, 90%, 85%) and update it if necessary.
 2. **VPN note for "Check for update".** Add to the "Check for update" pop-up error message that you need to be on the VPN. Also add the VPN requirement to the help document. (2026-10-18: no "Check for update" pop-up exists in this repo's code — only `Update.bat` — need to find where it lives.)
-3. **Tab 1: loaded-data page buttons not working.** The page-change button under the loaded data table on Tab 1 doesn't work.
-4. **Tab 2: flag buttons reset the map zoom.** Clicking **Flag as problem**, **Flag as mortality**, or **Unflag selected** zooms the map out to the full extent. The map scale/view should stay where it is.
-5. **Make the BBMM line buffer box more visible.** The line buffer input under BBMM in the modeling tab is easy to miss. Make it bigger or give it its own section.
-6. **Show sex + age class above the NSD graph.** Add each animal's sex and age class below the animal-ID text above the NSD graph.
-7. **Tab 1: sex selection under age class.** Add a sex selection below the age-class selection on Tab 1. (Same as the 2026-08-28 "Sex filter" item below.)
-8. **Tab 1: subherd selection under herd.** In the Processing Parameters section, add a subherd selection below the herd option. Tracker has a `SubherdName` field that will be added to the export table, so use that column. `SubherdName` is too long for a shapefile field name, so rename it to `Subherd` in the app. (Related to the subherd items below.)
-9. **Classification field on all exported tables.** Add a classification field to every exported table (e.g. when animals are included in the analysis, include a field listing migratory/etc., or `unclassified` if none of the radio buttons were clicked). (2026-10-20: done for the migtime export; AnimalYearsRemoved.csv already had it. Still to do: the other exported tables/shapefiles.)
-10. **GDB vs. shapefile exports.** Add a CSV to the flag/removed/insufficient GDB. Aim to export everything as shapefile when possible; where it isn't, figure out why and fix it (field names, etc.).
-11. **Review the Tab 1 UTM Zone 13 checkbox text.** The current text isn't correct, but the right wording still needs to be figured out. Pending a call with Bryan about how SQL will be integrated.
-12. **Detect problem points by geometry, not just DOP/NumSats.** Some possible problem points are missed because DOP and NumSats values differ by vendor. Use distance and turning angle relative to neighboring points to identify possible problem points. Check the USGS code or Nick's code to see if this already exists.
-13. **Age and sex columns in the migtime table.** (Overlaps the 2026-08-28 "Pre-modeling include/exclude by sex + age class" item below.)
+3. **Make the BBMM line buffer box more visible.** The line buffer input under BBMM in the modeling tab is easy to miss. Make it bigger or give it its own section.
+4. **Show sex + age class above the NSD graph.** Add each animal's sex and age class below the animal-ID text above the NSD graph.
+5. **Tab 1: sex selection under age class.** Add a sex selection below the age-class selection on Tab 1. (Same as the 2026-08-28 "Sex filter" item below.)
+6. **Tab 1: subherd selection under herd.** In the Processing Parameters section, add a subherd selection below the herd option. Tracker has a `SubherdName` field that will be added to the export table, so use that column. `SubherdName` is too long for a shapefile field name, so rename it to `Subherd` in the app. (Related to the subherd items below.)
+7. **Classification field on all exported tables.** Add a classification field to every exported table (e.g. when animals are included in the analysis, include a field listing migratory/etc., or `unclassified` if none of the radio buttons were clicked). (2026-10-20: done for the migtime export; AnimalYearsRemoved.csv already had it. Still to do: the other exported tables/shapefiles.)
+8. **GDB vs. shapefile exports.** Add a CSV to the flag/removed/insufficient GDB. Aim to export everything as shapefile when possible; where it isn't, figure out why and fix it (field names, etc.).
+9. **Review the Tab 1 UTM Zone 13 checkbox text.** The current text isn't correct, but the right wording still needs to be figured out. Pending a call with Bryan about how SQL will be integrated.
+10. **Detect problem points by geometry, not just DOP/NumSats.** Some possible problem points are missed because DOP and NumSats values differ by vendor. Use distance and turning angle relative to neighboring points to identify possible problem points. Check the USGS code or Nick's code to see if this already exists.
+11. **Age and sex columns in the migtime table.** (Overlaps the 2026-08-28 "Pre-modeling include/exclude by sex + age class" item below.)
 
 **Long-term needs:**
 
@@ -290,8 +288,28 @@ These are the in-flight tasks mirrored from the session task list.
 - **MigPoints/MigLines slow to load in Tab 5.** Even after trimming columns for display, these layers are sluggish to render on the map. Investigate further optimizations (e.g. simplifying geometries, limiting point count, or rendering as tile layers).
 - **FlagsRemoved layer symbology.** The FlagsRemoved shapefile looks wrong when loaded as a vector overlay in Tab 5 — investigate and fix the default styling/symbology.
 - **Note in outputs: individuals are stacked, not sequences.** Add a note/label in the population output UI and exported metadata clarifying that individual UDs are stacked (averaged), not per-sequence UDs.
-- **Slow working directory selection.** Selecting a working directory takes a very long time to finish updating. Investigate whether this is a machine/network issue or an app bottleneck (e.g., scanning large directories, loading cached data).
+- **Slow working directory selection.** Selecting a working directory takes a very long time to finish updating. Investigate whether this is a machine/network issue or an app bottleneck (e.g., scanning large directories, loading cached data). (2026-10-21: one bottleneck fixed — choosing a working directory auto-loads its newest ModelInputs file, and the shapefile preview was reading the whole file to show 200 rows: 8.2 s → 0.1 s on a 418k-row test shapefile. Re-check whether it still feels slow.)
 
+
+### 2026-10-21 — Tab 1 preview pages through the full dataset (25 rows/page)
+
+**Reported:** the page buttons under the Tab 1 loaded-data table "didn't work". **Cause:** they did work, but the preview was only ever `df.head(20)` of a 200-row read of the input file (`page_size=10` → 2 pages). On a 400+ animal file the first 20 rows were all one animal (D09_D9M_2024_268_121224), so both pages showed the same animal and there was no page 3.
+
+**Fix.** The preview (`_make_preview_table`) is now a server-side-paged `DataTable` (`id="tab1-preview-table"`, `page_action="custom"`, 25 rows/page, `page_count` from the row count). The full DataFrame stays in the module global `_TAB1_PREVIEW_DF`; `page_tab1_preview` sends only the current page (≈1 ms per page on 450k rows). A caption above the table shows the row count. On file load it still shows the file's first 200 rows, captioned "first 200 rows of the file; click Process Data to page through the full dataset". The new callback `show_processed_in_preview` (Input `store-processed-data`) then swaps in the **full processed data** after Process Data or Load Project. It skips the rebuild when the cached df is the same object (flag clicks and the Tab 2 NSD recompute edit it in place), so the user's page isn't reset. `loading-tab1` now has `target_components` (status/summary/preview children only) so page clicks don't flash the spinner.
+
+**Also:** the shapefile/ZIP preview now uses `gpd.read_file(..., rows=200)` instead of reading the whole file and taking `.head(200)`: 8.2 s → 0.1 s on the 418,339-row Tab1Test shapefile. This also speeds up choosing a working directory, which auto-loads the newest ModelInputs file. Completes former to-do "Tab 1: loaded-data page buttons not working".
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-10-21 — Fixed: Tab 2 flag buttons zoomed the map out and dropped sequence colors
+
+**Bug.** Clicking **Flag as Problem**, **Flag as Mortality** or **Unflag Selected** on Tab 2 zoomed the map out to the animal-year's full extent. The cause was `_apply_flag_to_selection()`, which put `center`/`zoom` in its `update-data` payload, and the MapLibre iframe (`assets/maplibre_map.html`) `flyTo()`s whenever both are present. The same payload also built the points with no migtime table, so every point turned black (sequence colors lost) until the user changed animals, and it left out merged WLD popup labels.
+
+**Fix.** The flag payload no longer sends `center`/`zoom`, so the map keeps the user's current view. This is the same rule `update_seq_map` already uses for mig-date slider edits. The three flag callbacks now pass `store-migtime-table` and `store-wld-env-labels` (as State) through to `_apply_flag_to_selection()`, so points keep their sequence colors and popups keep the WLD labels. Point selection is still cleared after a flag click, as before. Verified on synthetic data: no center/zoom in the payload, sequence colors present, flagged point marked `problem`.
+
+**Second cause (found when the first fix alone still zoomed out).** A flag click updates `store-processed-data`, which re-runs `populate_animal_dropdown` and re-sets `seq-animal-dropdown.value` to the same animal. Dash treats that as a change, so `update_seq_map` re-ran and sent its own payload *with* center/zoom right after the flag payload. Fix: `update_seq_map` now adds `view_key` (`"<id_bio_year>|<wrr month>-<wrr day>"`) to payloads that carry center/zoom, and the iframe only `flyTo()`s when `view_key` differs from the last one it zoomed to (`lastViewKey`; payloads without a `view_key` still always fly). Re-runs for the same animal-year keep the user's view; choosing a different animal-year or changing the WRR date still re-centers, and an iframe reload resets `lastViewKey`. Also, the iframe `src` is now `/assets/maplibre_map.html?v=<file mtime>`, so browsers load the edited map page instead of a cached copy. Completes former to-do "Tab 2: flag buttons reset the map zoom".
+
+**Files touched.** `app/main.py`, `app/assets/maplibre_map.html`, `INFORMATION.md`.
 
 ### 2026-10-20 — Report a bug / recommendation button (Google Form)
 

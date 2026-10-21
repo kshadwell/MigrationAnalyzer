@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import math
 import os
 import sys
 import tempfile
@@ -1376,27 +1377,50 @@ def _build_loaded_project_summary(df: pd.DataFrame, project_name: str, meta: dic
     ])
 
 
-def _make_preview_table(df: pd.DataFrame, max_rows: int = 20) -> dash_table.DataTable:
-    preview = df.head(max_rows).copy()
+# Tab 1 preview table: the full DataFrame stays server-side and the table uses
+# custom (server-side) paging, so only the current page is sent to the browser.
+# Set by _make_preview_table; read by page_tab1_preview.
+_TAB1_PREVIEW_DF: pd.DataFrame | None = None
+_TAB1_PREVIEW_PAGE_SIZE = 25
+
+
+def _preview_display_cols(df: pd.DataFrame) -> list[str]:
     # Drop geopandas' geometry column — its Shapely values aren't JSON-serialisable
     # and Dash chokes when sending the preview to the browser. (The lon/lat
     # columns already carry the coords; this is a tabular preview, not a map.)
-    drop_cols = [
-        c for c in preview.columns
-        if c == "geometry" or str(preview[c].dtype) == "geometry"
+    return [
+        c for c in df.columns
+        if c != "geometry" and str(df[c].dtype) != "geometry"
     ]
-    if drop_cols:
-        preview = preview.drop(columns=drop_cols)
-    # Convert remaining non-serialisable types to strings.
-    for col in preview.columns:
-        if pd.api.types.is_datetime64_any_dtype(preview[col]):
-            preview[col] = preview[col].astype(str)
-        elif preview[col].dtype == object:
-            preview[col] = preview[col].astype(str)
-    return dash_table.DataTable(
-        data=preview.to_dict("records"),
-        columns=[{"name": c, "id": c} for c in preview.columns],
-        page_size=10,
+
+
+def _preview_page_records(df: pd.DataFrame, page: int) -> list[dict]:
+    start = max(int(page or 0), 0) * _TAB1_PREVIEW_PAGE_SIZE
+    chunk = df.iloc[start:start + _TAB1_PREVIEW_PAGE_SIZE][_preview_display_cols(df)].copy()
+    # Convert non-serialisable types to strings.
+    for col in chunk.columns:
+        if pd.api.types.is_datetime64_any_dtype(chunk[col]):
+            chunk[col] = chunk[col].astype(str)
+        elif chunk[col].dtype == object:
+            chunk[col] = chunk[col].astype(str)
+    return chunk.to_dict("records")
+
+
+def _make_preview_table(df: pd.DataFrame, note: str | None = None) -> html.Div:
+    global _TAB1_PREVIEW_DF
+    _TAB1_PREVIEW_DF = df
+    n_pages = max(math.ceil(len(df) / _TAB1_PREVIEW_PAGE_SIZE), 1)
+    caption = f"{len(df):,} rows · {_TAB1_PREVIEW_PAGE_SIZE} per page"
+    if note:
+        caption += f" · {note}"
+    table = dash_table.DataTable(
+        id="tab1-preview-table",
+        data=_preview_page_records(df, 0),
+        columns=[{"name": c, "id": c} for c in _preview_display_cols(df)],
+        page_action="custom",
+        page_current=0,
+        page_size=_TAB1_PREVIEW_PAGE_SIZE,
+        page_count=n_pages,
         style_table={"overflowX": "auto"},
         style_cell={
             "backgroundColor": "#2a2a2a",
@@ -1412,6 +1436,10 @@ def _make_preview_table(df: pd.DataFrame, max_rows: int = 20) -> dash_table.Data
             "color": "#aef",
         },
     )
+    return html.Div([
+        html.Small(caption, className="text-muted d-block mb-1"),
+        table,
+    ])
 
 
 # ===========================================================================
@@ -2556,8 +2584,10 @@ tab1_layout = dbc.Container(
                 #   tab1-summary — Processing Summary card built by
                 #                  _build_loaded_project_summary OR the in-line
                 #                  summary block in process_uploaded_data.
-                #   tab1-preview — DataTable of the first 20 rows (made by
-                #                  _make_preview_table).
+                #   tab1-preview — server-side-paged DataTable, 25 rows/page
+                #                  (made by _make_preview_table): the file's
+                #                  first 200 rows on load, then the full
+                #                  processed data (show_processed_in_preview).
                 # dcc.Loading wraps all three so a single circle spinner covers
                 # the whole right column during the long Process Data run.
                 dbc.Col(
@@ -2565,6 +2595,13 @@ tab1_layout = dbc.Container(
                         dcc.Loading(
                             id="loading-tab1",
                             type="circle",
+                            # Only spin for these; otherwise every preview page
+                            # click (tab1-preview-table.data) flashes the spinner.
+                            target_components={
+                                "tab1-status": "children",
+                                "tab1-summary": "children",
+                                "tab1-preview": "children",
+                            },
                             children=[
                                 html.Div(id="tab1-status"),
                                 html.Div(id="tab1-summary", className="mt-2"),
@@ -2945,7 +2982,11 @@ tab2_layout = dbc.Container(
                                     html.Div(
                                         html.Iframe(
                                             id="seq-map-iframe",
-                                            src="/assets/maplibre_map.html",
+                                            # ?v=<mtime> so the browser picks up edits
+                                            # to the map page instead of a cached copy.
+                                            src="/assets/maplibre_map.html?v=%d" % int(
+                                                os.path.getmtime(os.path.join(_ASSETS_DIR, "maplibre_map.html"))
+                                            ),
                                             style={
                                                 "height": "100%",
                                                 "width": "100%",
@@ -4440,7 +4481,9 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
         source_path = str(file_path)
     elif suffix == ".shp":
         import geopandas as gpd_local
-        gdf_preview = gpd_local.read_file(str(file_path)).head(200)
+        # rows=200: read only the preview rows, not the whole (possibly
+        # multi-GB) .dbf.
+        gdf_preview = gpd_local.read_file(str(file_path), rows=200)
         detected_crs = gdf_preview.crs
         df = gdf_preview
         source_path = str(file_path)
@@ -4462,7 +4505,7 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
                 *_AGE_DEFAULTS,
             )
         import geopandas as gpd_local
-        gdf_preview = gpd_local.read_file(str(shp_files[0])).head(200)
+        gdf_preview = gpd_local.read_file(str(shp_files[0]), rows=200)
         detected_crs = gdf_preview.crs
         df = gdf_preview
         source_path = str(shp_files[0])
@@ -4511,7 +4554,9 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
     sat_val = _auto(["NumSats", "numsats", "Satellites", "satellites", "n_sats", "NSats", "SatCount"])
     age_val = _auto(["captureAgeClass", "AgeClass", "age_class", "Age", "ageclass"])
 
-    preview_table = _make_preview_table(df)
+    preview_table = _make_preview_table(
+        df, note=f"first {len(df):,} rows of the file; click Process Data to page through the full dataset",
+    )
 
     crs_note = ""
     if detected_crs and detected_crs.to_epsg():
@@ -4948,6 +4993,40 @@ def toggle_minimumx(checked):
         n_animals = len(set(seq_animal.values()))
     label = f"Minimum number of animals (1–{n_animals})"
     return bool(checked), label, n_animals
+
+
+@app.callback(
+    Output("tab1-preview-table", "data"),
+    Input("tab1-preview-table", "page_current"),
+    prevent_initial_call=True,
+)
+def page_tab1_preview(page_current):
+    """Serve one page of the Tab 1 preview (custom paging) from _TAB1_PREVIEW_DF."""
+    if _TAB1_PREVIEW_DF is None:
+        raise PreventUpdate
+    return _preview_page_records(_TAB1_PREVIEW_DF, page_current)
+
+
+@app.callback(
+    Output("tab1-preview", "children", allow_duplicate=True),
+    Input("store-processed-data", "data"),
+    prevent_initial_call=True,
+)
+def show_processed_in_preview(processed_json):
+    """After Process Data (or Load Project), page through the full processed
+    dataset in the Tab 1 preview instead of the 200-row file sample."""
+    if not processed_json:
+        raise PreventUpdate
+    try:
+        df = _json_to_df(processed_json, "processed")
+    except Exception:
+        raise PreventUpdate
+    # Flag clicks and the Tab 2 NSD recompute edit the cached df in place and
+    # re-emit the store; the table already reads that same object, so don't
+    # rebuild it (which would jump back to page 1).
+    if df is _TAB1_PREVIEW_DF:
+        raise PreventUpdate
+    return _make_preview_table(df, note="processed data")
 
 
 @app.callback(
@@ -7686,6 +7765,12 @@ def update_seq_map(selected_animal, migtime_json, processed_json, notes_store, c
     if dash.callback_context.triggered_id != "store-migtime-table":
         map_payload["center"] = entry["center"]
         map_payload["zoom"] = entry["zoom"]
+        # The dropdown value is re-set to the same animal whenever
+        # store-processed-data changes (e.g. a flag click), which re-runs this
+        # callback as if the animal changed. The iframe only flies when
+        # view_key differs from the last one it zoomed to, so those re-runs
+        # keep the user's view; a new animal or WRR date still re-centers.
+        map_payload["view_key"] = f"{selected_animal}|{bio_month}-{bio_day}"
 
     # Notes — load from store
     notes_store = notes_store or {}
@@ -7954,6 +8039,8 @@ def _apply_flag_to_selection(
     processed_json: str | None,
     flag_kind: str,
     config_json: str | None = None,
+    migtime_json: str | None = None,
+    wld_labels: dict | None = None,
 ) -> tuple[str | None, dict | None, dbc.Alert]:
     """Shared core of Flag-as-Problem / Flag-as-Mortality / Unflag callbacks.
 
@@ -8067,16 +8154,18 @@ def _apply_flag_to_selection(
     )
 
     # Rebuild the map payload for this animal so the UI shows the new
-    # outline colors immediately.
+    # outline colors immediately. No center/zoom, so the iframe keeps the
+    # user's current view instead of zooming out to the full extent; pass the
+    # migtime table so points keep their sequence colors.
     map_payload = None
     if animal_key in _MAP_CACHE:
         entry = _MAP_CACHE[animal_key]
         env_labels = dict(AVAILABLE_VARIABLES)
+        if wld_labels:
+            env_labels.update(wld_labels)
         map_payload = {
             "type": "update-data",
-            "center": entry["center"],
-            "zoom": entry["zoom"],
-            "points": _build_point_geojson(entry, None, animal_key),
+            "points": _build_point_geojson(entry, migtime_json, animal_key),
             "line": entry["line_geojson"],
             "env_labels": env_labels,
         }
@@ -8095,11 +8184,14 @@ def _apply_flag_to_selection(
     State("seq-animal-dropdown", "value"),
     State("store-processed-data", "data"),
     State("store-config", "data"),
+    State("store-migtime-table", "data"),
+    State("store-wld-env-labels", "data"),
     prevent_initial_call=True,
 )
-def flag_selected_problem(n_clicks, selection, animal_key, processed_json, config_json):
+def flag_selected_problem(n_clicks, selection, animal_key, processed_json, config_json, migtime_json, wld_labels):
     new_json, payload, alert = _apply_flag_to_selection(
         selection, animal_key, processed_json, "problem", config_json,
+        migtime_json, wld_labels,
     )
     if new_json is None:
         return dash.no_update, dash.no_update, alert
@@ -8115,11 +8207,14 @@ def flag_selected_problem(n_clicks, selection, animal_key, processed_json, confi
     State("seq-animal-dropdown", "value"),
     State("store-processed-data", "data"),
     State("store-config", "data"),
+    State("store-migtime-table", "data"),
+    State("store-wld-env-labels", "data"),
     prevent_initial_call=True,
 )
-def flag_selected_mortality(n_clicks, selection, animal_key, processed_json, config_json):
+def flag_selected_mortality(n_clicks, selection, animal_key, processed_json, config_json, migtime_json, wld_labels):
     new_json, payload, alert = _apply_flag_to_selection(
         selection, animal_key, processed_json, "mortality", config_json,
+        migtime_json, wld_labels,
     )
     if new_json is None:
         return dash.no_update, dash.no_update, alert
@@ -8135,11 +8230,14 @@ def flag_selected_mortality(n_clicks, selection, animal_key, processed_json, con
     State("seq-animal-dropdown", "value"),
     State("store-processed-data", "data"),
     State("store-config", "data"),
+    State("store-migtime-table", "data"),
+    State("store-wld-env-labels", "data"),
     prevent_initial_call=True,
 )
-def unflag_selected(n_clicks, selection, animal_key, processed_json, config_json):
+def unflag_selected(n_clicks, selection, animal_key, processed_json, config_json, migtime_json, wld_labels):
     new_json, payload, alert = _apply_flag_to_selection(
         selection, animal_key, processed_json, "clear", config_json,
+        migtime_json, wld_labels,
     )
     if new_json is None:
         return dash.no_update, dash.no_update, alert
