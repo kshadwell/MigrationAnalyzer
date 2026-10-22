@@ -100,6 +100,9 @@ window.dashExtensions.default = Object.assign({}, window.dashExtensions.default,
         var p = (feature && feature.properties) || {};
         var color = p._color || '#E63946';
         var c = Number(p.contour);
+        // Area levels (% of animals) grow inward; Volume isopleths grow
+        // outward (95 = largest), so flip them to keep the core darkest.
+        if (p.ctype === 'Volume' && !isNaN(c)) { c = 100 - c; }
         var op = 0.25;
         if (!isNaN(c)) { op = Math.max(0.12, Math.min(0.6, c / 150)); }
         return {color: color, weight: 1, opacity: 0.85, fillColor: color, fillOpacity: op};

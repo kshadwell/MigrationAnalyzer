@@ -3349,11 +3349,15 @@ tab3_layout = dbc.Container(
 #                             per year first; see calc_population_use docstring
 #                             for the math.
 #     - pop-contour-type    — area (proportion of individuals whose UD > 0 at
-#                             a cell) vs volume (cumulative UD volume rank).
-#     - pop-contour-levels  — free-text comma-sep list. Each level is the %
-#                             of sequences that must overlap a cell for the
-#                             cell to be inside that contour. 5-30% is the
+#                             a cell) vs volume (isopleth of the mean UD).
+#                             Applies to the Population Use contours only.
+#     - pop-contour-levels  — Area levels, free-text comma-sep list. Each level
+#                             is the % of animals that must overlap a cell for
+#                             the cell to be inside that contour. 5-30% is the
 #                             common corridor band; >50% is rare bottlenecks.
+#                             Always used for footprints.
+#     - pop-volume-levels   — Volume isopleth levels (95 = 95% of use, the
+#                             largest polygon). Shown only for Volume.
 #     - pop-min-drop /
 #       pop-min-fill        — cleanup pass on the contour polygons. Drop
 #                             polygons smaller than min_drop m²; fill holes
@@ -3408,10 +3412,14 @@ tab4_layout = dbc.Container(
                                             className="mb-2",
                                         ),
                                         _info_label("Contour Type",
-                                                   "Area: each contour level is the percentage of sequences "
-                                                   "whose UDs (utilization distributions) overlap a cell. "
-                                                   "Volume: each level is based on the cumulative UD volume rank "
-                                                   "(isopleth), similar to home-range contours.",
+                                                   "Applies to the Population Use contours. "
+                                                   "Area: each level is the % of animals whose UDs (utilization "
+                                                   "distributions) overlap a cell, so 5 = cells used by at least 5% "
+                                                   "of animals (lower = larger polygon). "
+                                                   "Volume: each level is a volume isopleth of the mean population UD, "
+                                                   "like home-range contours, so 95 = the smallest area holding 95% "
+                                                   "of use (higher = larger polygon). "
+                                                   "Footprint contours always use Area levels.",
                                                    "Area"),
                                         dcc.RadioItems(
                                             id="pop-contour-type",
@@ -3424,11 +3432,13 @@ tab4_layout = dbc.Container(
                                             inline=True,
                                             labelStyle={"color": "white"},
                                         ),
-                                        _info_label("Contour Levels (%)",
-                                                   "Comma-separated list of percentage thresholds for generating "
-                                                   "population corridor polygons. Each level produces a separate "
-                                                   "shapefile. Lower values capture broader use areas; higher values "
-                                                   "capture only the most heavily used corridors.",
+                                        _info_label("Area Levels (% of animals)",
+                                                   "Comma-separated list. Each level is the % of animals whose UDs "
+                                                   "(utilization distributions) overlap a cell; each produces one "
+                                                   "polygon. Lower values give broader use areas; higher values give "
+                                                   "only the most heavily shared corridors. Used for the Footprint "
+                                                   "contours, and for the Population Use contours when Contour Type "
+                                                   "is Area. The 1-animal and 2-animal levels are always added.",
                                                    "5, 10, 15, 20, 30, 50"),
                                         dbc.Input(
                                             id="pop-contour-levels",
@@ -3438,11 +3448,40 @@ tab4_layout = dbc.Container(
                                             className="mb-1",
                                         ),
                                         html.Small(
-                                            "Each level is the percentage of sequences whose UDs (utilization distributions) overlap a cell. "
-                                            "For migration corridors, 5-30% gives broad-use polygons; >50% would "
-                                            "require majority overlap and is rare except at bottlenecks.",
+                                            "5 = cells used by at least 5% of animals. For migration corridors, "
+                                            "5-30% gives broad-use polygons; >50% requires majority overlap and is "
+                                            "rare except at bottlenecks.",
                                             className="text-muted d-block mb-2",
                                             style={"fontSize": "0.72rem"},
+                                        ),
+                                        # Shown only when Contour Type = Volume
+                                        # (toggle_pop_volume_levels).
+                                        html.Div(
+                                            id="pop-volume-levels-wrap",
+                                            style={"display": "none"},
+                                            children=[
+                                                _info_label("Volume Isopleth Levels (%)",
+                                                           "Comma-separated list, used for the Population Use "
+                                                           "contours when Contour Type is Volume. Each level is the "
+                                                           "% of the mean population UD's volume enclosed, as in "
+                                                           "home-range contours: 95 = the smallest area holding 95% "
+                                                           "of use (largest polygon), 50 = the core area.",
+                                                           "50, 75, 90, 95"),
+                                                dbc.Input(
+                                                    id="pop-volume-levels",
+                                                    type="text",
+                                                    value="50, 75, 90, 95",
+                                                    placeholder="e.g. 50, 75, 90, 95",
+                                                    className="mb-1",
+                                                ),
+                                                html.Small(
+                                                    "95 = the area holding 95% of use (largest polygon); "
+                                                    "50 = core area. Footprint contours still use the Area "
+                                                    "levels above.",
+                                                    className="text-muted d-block mb-2",
+                                                    style={"fontSize": "0.72rem"},
+                                                ),
+                                            ],
                                         ),
                                         dbc.Row(
                                             [
@@ -9658,6 +9697,15 @@ def refresh_pop_seasons_checklist(_model_results_json, _active_tab):
 
 
 @app.callback(
+    Output("pop-volume-levels-wrap", "style"),
+    Input("pop-contour-type", "value"),
+)
+def toggle_pop_volume_levels(contour_type):
+    """Show the Volume isopleth levels box only when Contour Type = Volume."""
+    return {"display": "block"} if (contour_type or "area").lower() == "volume" else {"display": "none"}
+
+
+@app.callback(
     Output("pop-status", "children"),
     Output("pop-map-preview", "children"),
     Output("store-pop-outputs", "data"),
@@ -9677,13 +9725,14 @@ def refresh_pop_seasons_checklist(_model_results_json, _active_tab):
     State("pop-minimumx-toggle", "value"),
     State("pop-minimumx-value", "value"),
     State("store-config", "data"),
+    State("pop-volume-levels", "value"),
     prevent_initial_call=True,
 )
 def generate_pop_outputs(
     n_clicks, processed_json, model_results_json,
     seasons, merge_order, contour_type, contour_levels_str,
     min_drop, min_fill, smooth, smooth_bw, stopover_on, stopover_pct,
-    minimumx_on, minimumx_value, config_json,
+    minimumx_on, minimumx_value, config_json, volume_levels_str,
 ):
     if not processed_json:
         return _err_alert("No processed data. Complete Tab 1 first."), "", None
@@ -9704,7 +9753,16 @@ def generate_pop_outputs(
     try:
         contour_levels = [float(x.strip()) for x in (contour_levels_str or "5,10,15,20,30,50").split(",")]
     except ValueError:
-        return _err_alert("Invalid contour levels. Use comma-separated numbers like: 50, 75, 95, 99"), "", None
+        return _err_alert("Invalid Area levels. Use comma-separated numbers like: 5, 10, 15, 20, 30, 50"), "", None
+    is_volume = (contour_type or "area").lower() == "volume"
+    volume_levels: list[float] = []
+    if is_volume:
+        try:
+            volume_levels = [float(x.strip()) for x in (volume_levels_str or "50,75,90,95").split(",")]
+        except ValueError:
+            return _err_alert("Invalid Volume isopleth levels. Use comma-separated numbers like: 50, 75, 90, 95"), "", None
+        if any(not (0 < v < 100) for v in volume_levels):
+            return _err_alert("Volume isopleth levels must be between 0 and 100 (e.g. 50, 75, 90, 95)."), "", None
 
     try:
         # Normalise Tab 4 form values into what the population_outputs module wants.
@@ -9833,7 +9891,10 @@ def generate_pop_outputs(
             "seasons": seasons or [],
             "merge_order": list(merge_order_tuple),
             "contour_type": contour_type_norm,
+            # Area levels (% of animals): footprints always, use contours when Area.
             "contour_levels": contour_levels,
+            # Volume isopleth levels for the use contours (Volume only).
+            "volume_levels": volume_levels if is_volume else None,
             "min_area_drop": float(min_drop) if min_drop not in (None, "") else 10000.0,
             "min_area_fill": float(min_fill) if min_fill not in (None, "") else 5000.0,
             "smooth": bool(smooth),
@@ -9853,7 +9914,7 @@ def generate_pop_outputs(
             grid_meta=pop_grid,
             merge_order=merge_order_tuple,
             contour_type=contour_type_norm,
-            contour_levels=contour_levels,
+            contour_levels=volume_levels if is_volume else contour_levels,
             min_area_drop=pop_config["min_area_drop"],
             min_area_fill=pop_config["min_area_fill"],
             simplify=pop_config["smooth"],
@@ -10156,8 +10217,12 @@ def generate_pop_outputs(
             preview_children.append(wrote_card)
         if stacked_card is not None:
             preview_children.append(stacked_card)
-        preview_children.append(_contour_table(pop_use_gdf, "Population Use Contours"))
-        preview_children.append(_contour_table(pop_foot_gdf, "Population Footprint Contours"))
+        preview_children.append(_contour_table(
+            pop_use_gdf,
+            "Population Use Contours (volume isopleths: 95% = area holding 95% of use)" if is_volume
+            else "Population Use Contours (% of animals)",
+        ))
+        preview_children.append(_contour_table(pop_foot_gdf, "Population Footprint Contours (% of animals)"))
         preview = html.Div(preview_children)
 
         # Build a "what's actually possible" line so the user can pick sensible
@@ -10185,8 +10250,13 @@ def generate_pop_outputs(
                 f"Input data date range: {date_range[0]} — {date_range[1]}" if date_range else "Input data date range: unknown",
                 f"Seasons merged: {', '.join(seasons) if seasons else 'all'}",
                 f"Merge order: {pop_config['merge_order']}",
-                f"Contour type: {pop_config['contour_type']}",
-                f"Contour levels: {', '.join(lvl_strs)}",
+                f"Contour type (population use): {pop_config['contour_type']}",
+                f"Area levels (% of animals; footprints"
+                + ("" if is_volume else " + population use") + f"): {', '.join(lvl_strs)}",
+            ] + (
+                [f"Volume isopleth levels (population use): {', '.join(f'{v:g}%' for v in volume_levels)}"]
+                if is_volume else []
+            ) + [
                 f"min_area_drop: {pop_config['min_area_drop']:g} m2   min_area_fill: {pop_config['min_area_fill']:g} m2",
                 f"Smoothing (ksmooth): {'on' if pop_config['smooth'] else 'off'}"
                 + (f", smoothness={pop_config['smooth_bandwidth']:g}" if pop_config['smooth'] else ""),

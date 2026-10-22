@@ -238,17 +238,16 @@ These are the in-flight tasks mirrored from the session task list.
 
 **Requests added 2026-10-13:**
 
-1. **Clarify contour-level options.** Clarify the contour levels section (5, 10, 15 vs. 95%, 90%, 85%) and update it if necessary.
-2. **VPN note for "Check for update".** Add to the "Check for update" pop-up error message that you need to be on the VPN. Also add the VPN requirement to the help document. (2026-10-18: no "Check for update" pop-up exists in this repo's code — only `Update.bat` — need to find where it lives.)
-3. **Make the BBMM line buffer box more visible.** The line buffer input under BBMM in the modeling tab is easy to miss. Make it bigger or give it its own section.
-4. **Show sex + age class above the NSD graph.** Add each animal's sex and age class below the animal-ID text above the NSD graph.
-5. **Tab 1: sex selection under age class.** Add a sex selection below the age-class selection on Tab 1. (Same as the 2026-08-28 "Sex filter" item below.)
-6. **Tab 1: subherd selection under herd.** In the Processing Parameters section, add a subherd selection below the herd option. Tracker has a `SubherdName` field that will be added to the export table, so use that column. `SubherdName` is too long for a shapefile field name, so rename it to `Subherd` in the app. (Related to the subherd items below.)
-7. **Classification field on all exported tables.** Add a classification field to every exported table (e.g. when animals are included in the analysis, include a field listing migratory/etc., or `unclassified` if none of the radio buttons were clicked). (2026-10-20: done for the migtime export; AnimalYearsRemoved.csv already had it. Still to do: the other exported tables/shapefiles.)
-8. **GDB vs. shapefile exports.** Add a CSV to the flag/removed/insufficient GDB. Aim to export everything as shapefile when possible; where it isn't, figure out why and fix it (field names, etc.).
-9. **Review the Tab 1 UTM Zone 13 checkbox text.** The current text isn't correct, but the right wording still needs to be figured out. Pending a call with Bryan about how SQL will be integrated.
-10. **Detect problem points by geometry, not just DOP/NumSats.** Some possible problem points are missed because DOP and NumSats values differ by vendor. Use distance and turning angle relative to neighboring points to identify possible problem points. Check the USGS code or Nick's code to see if this already exists.
-11. **Age and sex columns in the migtime table.** (Overlaps the 2026-08-28 "Pre-modeling include/exclude by sex + age class" item below.)
+1. **VPN note for "Check for update".** Add to the "Check for update" pop-up error message that you need to be on the VPN. Also add the VPN requirement to the help document. (2026-10-18: no "Check for update" pop-up exists in this repo's code — only `Update.bat` — need to find where it lives.)
+2. **Make the BBMM line buffer box more visible.** The line buffer input under BBMM in the modeling tab is easy to miss. Make it bigger or give it its own section.
+3. **Show sex + age class above the NSD graph.** Add each animal's sex and age class below the animal-ID text above the NSD graph.
+4. **Tab 1: sex selection under age class.** Add a sex selection below the age-class selection on Tab 1. (Same as the 2026-08-28 "Sex filter" item below.)
+5. **Tab 1: subherd selection under herd.** In the Processing Parameters section, add a subherd selection below the herd option. Tracker has a `SubherdName` field that will be added to the export table, so use that column. `SubherdName` is too long for a shapefile field name, so rename it to `Subherd` in the app. (Related to the subherd items below.)
+6. **Classification field on all exported tables.** Add a classification field to every exported table (e.g. when animals are included in the analysis, include a field listing migratory/etc., or `unclassified` if none of the radio buttons were clicked). (2026-10-20: done for the migtime export; AnimalYearsRemoved.csv already had it. Still to do: the other exported tables/shapefiles.)
+7. **GDB vs. shapefile exports.** Add a CSV to the flag/removed/insufficient GDB. Aim to export everything as shapefile when possible; where it isn't, figure out why and fix it (field names, etc.).
+8. **Review the Tab 1 UTM Zone 13 checkbox text.** The current text isn't correct, but the right wording still needs to be figured out. Pending a call with Bryan about how SQL will be integrated.
+9. **Detect problem points by geometry, not just DOP/NumSats.** Some possible problem points are missed because DOP and NumSats values differ by vendor. Use distance and turning angle relative to neighboring points to identify possible problem points. Check the USGS code or Nick's code to see if this already exists.
+10. **Age and sex columns in the migtime table.** (Overlaps the 2026-08-28 "Pre-modeling include/exclude by sex + age class" item below.)
 
 **Long-term needs:**
 
@@ -290,6 +289,23 @@ These are the in-flight tasks mirrored from the session task list.
 - **Note in outputs: individuals are stacked, not sequences.** Add a note/label in the population output UI and exported metadata clarifying that individual UDs are stacked (averaged), not per-sequence UDs.
 - **Slow working directory selection.** Selecting a working directory takes a very long time to finish updating. Investigate whether this is a machine/network issue or an app bottleneck (e.g., scanning large directories, loading cached data). (2026-10-21: one bottleneck fixed — choosing a working directory auto-loads its newest ModelInputs file, and the shapefile preview was reading the whole file to show 200 rows: 8.2 s → 0.1 s on a 418k-row test shapefile. Re-check whether it still feels slow.)
 
+
+### 2026-10-22 — Contour levels clarified; Volume contours fixed and switched to standard isopleth %
+
+**Question (to-do "Clarify contour-level options", 5/10/15 vs. 95/90/85%).** Tab 4 has one Contour Levels box but two contour types. **Area** (default): level L = cells where at least L% of animals' UDs are > 0, so 5 is broad and 50 is a bottleneck. That was correct and is unchanged. **Volume**: the code contoured `(1 − cumulative volume) × 100`, so L really meant the **(100 − L)% isopleth**. A "5" in `Pop_use_contours.shp` was the 95% isopleth, and the UI never said so.
+
+**Bug (affects analyses that used Volume).** `calc_population_use` (Volume) summed N per-animal UDs that each total 1 but never rescaled the sum, so cumulative volume ran 0–N. Everything past the top 1/N of volume clipped to 0, and multi-animal Volume contours came out far too small. Test (synthetic Gaussian UDs): 1 animal 95% isopleth 301 km² (analytic 301.2); 10 animals' "5" contour was 13 km², should be larger than one animal's. **Area contours and footprints were not affected.**
+
+**Fix (user chose standard isopleth %).**
+- `calc_population_use` rescales the summed UD to total 1. Volume levels are now standard isopleths: 95 = smallest area holding 95% of use (the largest polygon), 50 = core. Contours are computed on the inverted grid at 100 − L and relabeled L. After the fix: 10 animals 50/75/90/95% = 81/161/263/336 km²; 1 animal 95% = 301.0 km², 50% = 69.5 km² (analytic 69.7).
+- The use-contour GeoDataFrame/shapefile gets a `ctype` column (`Area`/`Volume`). Tab 5 `contourStyle` flips Volume levels when shading, so the core stays darkest.
+- Tab 4 UI: the levels box is now **Area Levels (% of animals)** (`pop-contour-levels`). It's always used for Footprint contours, and for Use contours when Area; the 1-/2-animal levels are still added. A new **Volume Isopleth Levels (%)** box (`pop-volume-levels`, default `50, 75, 90, 95`, must be 0–100) is shown only when Contour Type = Volume (`toggle_pop_volume_levels`). The ⓘ text for Contour Type and both level boxes explains each convention.
+- `pop_config` / metadata gain `volume_levels`. The processing log says "Contour type (population use)", "Area levels (% of animals; footprints [+ population use])" and, for Volume, "Volume isopleth levels". The Tab 4 result tables are titled "(% of animals)" or "(volume isopleths: 95% = area holding 95% of use)".
+- The per-season stacked products (`_topP`, `_stopover`) already used standard top-X%-of-volume and are unchanged.
+
+**User guide** (`user_guide.md` lines ~117–118) still describes a single "Contour levels" box. Left as is (someone else is revising the guide); needs the Area/Volume split. Completes former to-do "Clarify contour-level options".
+
+**Files touched.** `app/main.py`, `app/modules/population_outputs.py`, `app/assets/map_functions.js`, `INFORMATION.md`.
 
 ### 2026-10-21 — Tab 1 preview pages through the full dataset (25 rows/page)
 

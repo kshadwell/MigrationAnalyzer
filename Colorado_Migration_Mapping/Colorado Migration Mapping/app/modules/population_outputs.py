@@ -287,10 +287,13 @@ def calc_population_use(
         - ``['year', 'id']``: average each year across individuals first,
           then average across years.
     contour_type : str
-        ``'Area'``  – contour level = % of individuals whose UD > 0 at cell.
-        ``'Volume'`` – contour level = % of total UD volume.
+        ``'Area'``  – contour level = % of individuals whose UD > 0 at cell
+        (5 → cells used by at least 5 % of individuals; lower = larger).
+        ``'Volume'`` – contour level = volume isopleth of the mean population
+        UD, as in home-range contours (95 → smallest area holding 95 % of
+        use; higher = larger).
     contour_levels : list of float
-        Contour percentage levels (e.g. 50 → 50 % isopleths).
+        Contour percentage levels, interpreted per ``contour_type``.
     min_area_drop : float
         Minimum polygon area in CRS units (metres² if projected).
         Polygons smaller than this are removed.
@@ -307,7 +310,8 @@ def calc_population_use(
     Returns
     -------
     GeoDataFrame
-        Columns: ``contour``, ``geometry``, ``area_km2``.
+        Columns: ``contour``, ``ctype`` (``'Area'``/``'Volume'``),
+        ``geometry``, ``area_km2``.
     """
     transform = grid_meta["transform"]
     src_crs = CRS.from_user_input(grid_meta["crs"])
@@ -363,7 +367,10 @@ def calc_population_use(
     if contour_type == "Area":
         # Proportion of layers with UD > 0 at each cell × 100
         presence = (stack > 0).sum(axis=0) / n_layers * 100.0
-        prop_grid = presence
+        rows = _contours_from_grid(
+            presence, transform, list(contour_levels),
+            min_area_drop, min_area_fill, simplify, smooth_bandwidth,
+        )
     elif contour_type == "Volume":
         # Normalise each layer to sum-to-1 in-place, then accumulate into a
         # 2-D sum to avoid allocating a second full 3-D array.
@@ -374,22 +381,35 @@ def calc_population_use(
             if total > 0:
                 stack[i] /= total
             summed += stack[i]
-        # cumulative volume from highest to lowest
+        # The sum of N unit layers totals N; rescale to 1 so cumulative volume
+        # runs 0–1. (Without this, everything past the top 1/N of volume
+        # clipped to 0 and multi-animal Volume contours came out far too small.)
+        grand = summed.sum()
+        if grand > 0:
+            summed /= grand
+        # Cumulative volume from the highest-use cell down: a cell is inside
+        # the L% isopleth when cum_vol <= L/100. _contours_from_grid keeps
+        # cells >= threshold, so contour 100 - cum_vol*100 at 100 - L and
+        # label the result L.
         flat = summed.ravel()
         order = np.argsort(flat)[::-1]
         cumsum = np.cumsum(flat[order])
-        rank = np.empty_like(cumsum)
-        rank[order] = cumsum
-        prop_grid = (1.0 - rank.reshape(summed.shape)) * 100.0
-        prop_grid = np.clip(prop_grid, 0, 100)
+        cum_vol = np.empty_like(cumsum)
+        cum_vol[order] = cumsum
+        inv_grid = np.clip((1.0 - cum_vol.reshape(summed.shape)) * 100.0, 0, 100)
+        inv_rows = _contours_from_grid(
+            inv_grid, transform, [100.0 - lvl for lvl in contour_levels],
+            min_area_drop, min_area_fill, simplify, smooth_bandwidth,
+        )
+        rows = [{**r, "contour": 100.0 - r["contour"]} for r in inv_rows]
     else:
         raise ValueError(f"contour_type must be 'Area' or 'Volume', got {contour_type!r}")
 
-    rows = _contours_from_grid(
-        prop_grid, transform, list(contour_levels),
-        min_area_drop, min_area_fill, simplify, smooth_bandwidth,
-    )
-    return _build_geodataframe(rows, src_crs, out_crs)
+    gdf = _build_geodataframe(rows, src_crs, out_crs)
+    # Tag the contour type so outputs (and the Tab 5 map shading) can tell a
+    # "5" = 5 % of animals apart from a "95" = 95 % volume isopleth.
+    gdf.insert(1, "ctype", contour_type)
+    return gdf
 
 
 # ---------------------------------------------------------------------------
@@ -537,13 +557,16 @@ def generate_metadata_summary(
         "bandwidth":    config.get("bandwidth",   model_results.get("bandwidth",    "Unknown")),
         "merge_order":  config.get("merge_order",  model_results.get("merge_order",  "Unknown")),
         "contour_type": config.get("contour_type", model_results.get("contour_type", "Unknown")),
+        # Area levels (% of animals) — footprints, and use contours when Area.
         "contour_levels": config.get("contour_levels", model_results.get("contour_levels", "Unknown")),
+        # Volume isopleth levels (95 = 95 % of use) — use contours when Volume.
+        "volume_levels": config.get("volume_levels", model_results.get("volume_levels")),
         "min_area_drop": config.get("min_area_drop", model_results.get("min_area_drop", "Unknown")),
         "min_area_fill": config.get("min_area_fill", model_results.get("min_area_fill", "Unknown")),
         "smooth_bandwidth": config.get("smooth_bandwidth", model_results.get("smooth_bandwidth", "Unknown")),
         **{k: v for k, v in model_results.items()
            if k not in ("kernel_type", "bandwidth", "merge_order",
-                        "contour_type", "contour_levels", "min_area_drop",
+                        "contour_type", "contour_levels", "volume_levels", "min_area_drop",
                         "min_area_fill", "smooth_bandwidth")},
     }
 
