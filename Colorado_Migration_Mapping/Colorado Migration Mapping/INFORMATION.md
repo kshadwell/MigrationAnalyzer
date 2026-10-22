@@ -239,15 +239,11 @@ These are the in-flight tasks mirrored from the session task list.
 **Requests added 2026-10-13:**
 
 1. **VPN note for "Check for update".** Add to the "Check for update" pop-up error message that you need to be on the VPN. Also add the VPN requirement to the help document. (2026-10-18: no "Check for update" pop-up exists in this repo's code — only `Update.bat` — need to find where it lives.)
-2. **Make the BBMM line buffer box more visible.** The line buffer input under BBMM in the modeling tab is easy to miss. Make it bigger or give it its own section.
-3. **Show sex + age class above the NSD graph.** Add each animal's sex and age class below the animal-ID text above the NSD graph.
-4. **Tab 1: sex selection under age class.** Add a sex selection below the age-class selection on Tab 1. (Same as the 2026-08-28 "Sex filter" item below.)
-5. **Tab 1: subherd selection under herd.** In the Processing Parameters section, add a subherd selection below the herd option. Tracker has a `SubherdName` field that will be added to the export table, so use that column. `SubherdName` is too long for a shapefile field name, so rename it to `Subherd` in the app. (Related to the subherd items below.)
-6. **Classification field on all exported tables.** Add a classification field to every exported table (e.g. when animals are included in the analysis, include a field listing migratory/etc., or `unclassified` if none of the radio buttons were clicked). (2026-10-20: done for the migtime export; AnimalYearsRemoved.csv already had it. Still to do: the other exported tables/shapefiles.)
-7. **GDB vs. shapefile exports.** Add a CSV to the flag/removed/insufficient GDB. Aim to export everything as shapefile when possible; where it isn't, figure out why and fix it (field names, etc.).
-8. **Review the Tab 1 UTM Zone 13 checkbox text.** The current text isn't correct, but the right wording still needs to be figured out. Pending a call with Bryan about how SQL will be integrated.
-9. **Detect problem points by geometry, not just DOP/NumSats.** Some possible problem points are missed because DOP and NumSats values differ by vendor. Use distance and turning angle relative to neighboring points to identify possible problem points. Check the USGS code or Nick's code to see if this already exists.
-10. **Age and sex columns in the migtime table.** (Overlaps the 2026-08-28 "Pre-modeling include/exclude by sex + age class" item below.)
+2. **Tab 1: subherd selection under herd.** In the Processing Parameters section, add a subherd selection below the herd option. Tracker has a `SubherdName` field that will be added to the export table, so use that column. `SubherdName` is too long for a shapefile field name, so rename it to `Subherd` in the app. (Related to the subherd items below.)
+3. **Classification field on all exported tables.** Add a classification field to every exported table (e.g. when animals are included in the analysis, include a field listing migratory/etc., or `unclassified` if none of the radio buttons were clicked). (2026-10-20: done for the migtime export; AnimalYearsRemoved.csv already had it. Still to do: the other exported tables/shapefiles.)
+4. **GDB vs. shapefile exports.** Add a CSV to the flag/removed/insufficient GDB. Aim to export everything as shapefile when possible; where it isn't, figure out why and fix it (field names, etc.).
+5. **Review the Tab 1 UTM Zone 13 checkbox text.** The current text isn't correct, but the right wording still needs to be figured out. Pending a call with Bryan about how SQL will be integrated.
+6. **Detect problem points by geometry, not just DOP/NumSats.** Some possible problem points are missed because DOP and NumSats values differ by vendor. Use distance and turning angle relative to neighboring points to identify possible problem points. Check the USGS code or Nick's code to see if this already exists.
 
 **Long-term needs:**
 
@@ -261,8 +257,7 @@ These are the in-flight tasks mirrored from the session task list.
 - **Add a UTM Zone 12N option?** Maybe add a Zone 12N checkbox alongside 13N (far-western CO). Decide whether it's needed.
 - **Subherd analysis (expands the "Subherd selection and re-analysis" item below).** Separate the analysis by subherd: (a) by an existing **subherd field** in the data (run per subherd), and/or (b) let the user **identify subherds spatially** (draw/lasso animals on the map into groups).
 - **Help doc: migtime save + project reload.** Add to the user guide: how to **save out the migtime**, and how to **re-load a project** (Load Previous Table).
-- **Sex filter (with age class).** Add a sex filter alongside the Tab 1 age-class filter.
-- **Pre-modeling include/exclude by sex + age class (buck/doe/fawn), keeping all migtimes.** Pull sex + age class for each animal ID from the original input into the **migtime table** (add sex + age-class columns per row). Then, pre-modeling, let the user choose **which animals to include** in the analysis (all or a subset) — retaining migtimes for every animal but dropping unselected animals from the modeled dataset.
+- **Pre-modeling include/exclude by sex + age class (buck/doe/fawn), keeping all migtimes.** Pull sex + age class for each animal ID from the original input into the **migtime table** (add sex + age-class columns per row). Then, pre-modeling, let the user choose **which animals to include** in the analysis (all or a subset) — retaining migtimes for every animal but dropping unselected animals from the modeled dataset. (2026-10-22: the migtime export now has per-animal `age_class` + `sex` columns, and Tab 1 can filter by age class and sex at Process Data. Still to do: the pre-modeling include/exclude choice that keeps every migtime.)
 
 - **Diagnose BBMM output divergence vs. canonical reference.** Two suspected causes: (1) `scipy.optimize.minimize_scalar` vs. R `optim` for the Horne 2007 MLE, and (2) our `T_total` divisor in `_bbmm_bridge_accumulate` sums only kept segments while R's `sum(time.lag)` sums all pairs including the ones excluded by `max.lag`. Compare per-season `.tif` outputs against the canonical `A37_BBMM_*` set at `K:\MigrationAnalysis\A37\2026.zip` → `OutputData/Jaffe_IndStackedOutput_040226/`. Visual divergence first confirmed 2026-05-18 after wiring `calc_season_banded_outputs` (this item now subsumes that earlier "BBMM per-season UD `.tif` outputs visually differ" Pending note). Additional differences to check beyond the two suspected causes:
   - **BBMM motion-variance estimator path**: our Horne (2007) MLE via `scipy.optimize.minimize_scalar` vs. R `BBMM::brownian.motion.variance` — different numerical optimisers, possibly different residual parametrisation.
@@ -289,6 +284,54 @@ These are the in-flight tasks mirrored from the session task list.
 - **Note in outputs: individuals are stacked, not sequences.** Add a note/label in the population output UI and exported metadata clarifying that individual UDs are stacked (averaged), not per-sequence UDs.
 - **Slow working directory selection.** Selecting a working directory takes a very long time to finish updating. Investigate whether this is a machine/network issue or an app bottleneck (e.g., scanning large directories, loading cached data). (2026-10-21: one bottleneck fixed — choosing a working directory auto-loads its newest ModelInputs file, and the shapefile preview was reading the whole file to show 200 rows: 8.2 s → 0.1 s on a 418k-row test shapefile. Re-check whether it still feels slow.)
 
+
+### 2026-10-22 — Fixed: Tab 2 sequence box slow to appear after Process Data
+
+**Reported:** after Process Data, going to Tab 2 the Sequence Date Ranges box took a while to load, so sequences couldn't be entered yet.
+
+**Cause.** Not the Tab 2 callbacks: on the Tab1Test project (389,398 fixes, 440 animals) the whole server chain (animal dropdown → `build_migtime_store` scaffold → `render_seq_panels`) takes ~1 s. The delay was the **Tab 5** map. `update_map_layers` rebuilt the Tab 5 points + tracks GeoJSON on every `store-processed-data` change **and** on every `store-migtime-table` change (an Input it never used). The tracks layer (every animal's full track, ≤2,000 vertices each) was **9.3 MB / 389,397 vertices**. dbc.Tabs mounts every pane at load, so the hidden Tab 5 dash-leaflet map parsed and drew it. That happened twice right as the user reached Tab 2 (once from Process Data, once when `build_migtime_store` created the migtime scaffold), and it tied up the browser so the Tab 2 sequence cards couldn't render. Simplifying the tracks didn't help: jagged GPS tracks only shrank ~25% even at ~100 m tolerance.
+
+**Fix.** `update_map_layers` now builds only while Tab 5 is open. Inputs are `store-processed-data`, `map-layers` and `main-tabs.active_tab` (the migtime Input was removed), plus a browser-side flag `store-map-layers-built`. A processed-data change on another tab sends nothing and just marks the layers stale. Opening Tab 5 rebuilds them if stale (or after a page reload, since the flag resets), and otherwise sends nothing. Changes made while on Tab 5 rebuild immediately, as before. The building code moved to `_build_map_layers` unchanged (full track detail kept). Verified on the Tab1Test data: Process Data / Tab 2 → nothing sent; first Tab 5 open → 5,058 points + 439 tracks; reopening Tab 5 → nothing sent.
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-10-22 — Tab 2: animal-year ID with age class and sex in the chart titles
+
+All four Tab 2 chart titles (NSD / Displacement / Speed / Elevation, built in `render_seq_panels`) now read `<metric> — <animal-year>`, with `Age = <age class>, Sex = <sex>` on a smaller second line (`<br><sup>…</sup>`, "—" when missing). Before, only the NSD title had the ID; the new title shows on whichever chart tab is open. Top margins went from 40 (NSD) / 30 (others) to 60 to fit the second line. `render_seq_panels` now takes `store-config` as State. (A first version put this in a separate header above the charts; per user feedback it moved into the chart titles.)
+
+The text comes from `_animal_attr_text`, which uses the same lookup as the migtime export's `age_class` / `sex` columns: `_add_animal_attrs` was split into `_animal_attr_sources` (which processed-data columns, from the Process Data config or fallback names) and `_animal_attr_per_animal` (each animal's most common non-blank value). It filters to the selected animal first (~5 ms). Verified on the Tab1Test data: Female and Male animals get `Age = Adult, Sex = Female` / `Male` in all four titles; a blank-sex animal shows `—`. Completes former to-do "Show sex + age class above the NSD graph".
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-10-22 — Migtime export: per-animal `age_class` and `sex` columns
+
+The migtime CSV (manual **Export Migtime Table** and the periodic autosave, both via `_build_migtime_export_df`) now has `age_class` and `sex` columns right after `animal_id`. For each animal, the value is its most common non-blank value in the processed data, or empty if missing. `_add_animal_attrs` builds them. They're export-only (added to a copy, never the live `store-migtime-table`); on Load Previous Table they come back as plain columns and are overwritten, not duplicated, on the next export.
+
+**Which columns.** Process Data now records the processed-data column names in the project config: `age_class_col` (the Tab 1 age-class column, default `captureAgeClass`) and `sex_col` (Tab 1 Sex column). Both are resolved through the Wildlife Tracker renames via the new `_resolve_input_col`, e.g. `AgeClass`/`Sex`. The config is saved with the project, so it survives Load Project. Projects processed before this change have no such keys and fall back to `AgeClass`/`captureAgeClass`/`age_class`/`Age` and `Sex`/`sex`/`animalSex`/`captureSex`/`gender`. `autosave_migtime_periodic` now takes `store-config`.
+
+Verified on the 4-animal Tab1Test sample: `config` → `AgeClass`/`Sex`; export rows `Adult/Female`, `Adult/""` (the blank-sex animal), `Adult/Male` ×2; fallback path gives the same; a table that already has the columns gets them overwritten (no duplicate columns). Completes former to-do "Age and sex columns in the migtime table".
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-10-22 — Tab 1 sex filter; fixed age-class filter never applying to Wildlife Tracker downloads
+
+**Sex filter.** The Column Mapping card has a new **Sex column** dropdown (`col-sex`) below the age-class section. It gets the same column list as the age-class dropdown whenever a file loads (`populate_sex_column`, triggered by `col-age-class.options`) and auto-detects `sex`/`Sex`/`animalSex`/`captureSex`/`gender`. Picking a column shows a checklist of its values (`sex-include`, `populate_sex_checklist`), all checked by default. At Process Data, unchecked sexes are removed after `process_data` (same stage as the age-class filter), logged ("Sex filter: N fixes removed (M animals) — excluded: …"), and written to `RemovedPoints/SexRemoved.csv` with `removal_reason = "Sex excluded: <value>"`.
+
+**Shared code.** The age-class and sex filters now share `_include_checklist` (options; shapefiles read only that column, no geometry), `_include_values` (normalization), and `_apply_include_filter` (inside `process_uploaded_data`).
+
+**Bug fixed (affects analyses).** `process_data` renames Wildlife Tracker download columns (`APP_DOWNLOAD_COLUMN_MAP`: `captureAgeClass` → `AgeClass`, `sex` → `Sex`, …), but the age-class filter looked for the original dropdown name. So for app-download files it logged "column 'captureAgeClass' not found, skipped" and **never removed unchecked age classes** (e.g. calves/fawns stayed in). `_apply_include_filter` now falls back to the renamed column. Verified on a 4-animal Tab1Test sample: excluding Male removed both male animals (1,603 fixes → `SexRemoved.csv`); excluding every age class removed all 5,922 fixes → `AgeClassRemoved.csv` (previously skipped).
+
+**Blank values.** Missing/blank cells now get a "(blank)" checkbox (checked by default) in both checklists. Before, the age filter removed blank-age fixes whenever it ran, since blanks had no checkbox and so were never "included".
+
+Completes former to-dos "Tab 1: sex selection under age class" and "Sex filter (with age class)" (2026-08-28).
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-10-22 — Tab 3: BBMM line buffer gets its own section
+
+The line buffer checkbox was the last small (0.8rem) item under "Extra BBMM outputs", and its distance box was a small `size="sm"` input, so users missed it. It's now an outlined, lightly tinted section at the bottom of the BBMM panel (`render_model_params`). The section has a bold 1rem **Line Buffer Output** header with an ⓘ (what it does, the three files it writes to `ModelOutputs/LineBuffer/`, recommended 400 m per Jerod Merkle), a larger checkbox ("Create line buffer output …"), and, when checked, a bold **Buffer distance (m)** label over a full-size input with an "m total width" suffix and the note "400 m = 200 m each side". Component IDs (`bbmm_linebuffer`, `bbmm_linebuffer_distance`, `bbmm-linebuffer-distance-wrapper`) and behavior are unchanged. `_info_label` gained a `font_size` option (default 0.85rem). Completes former to-do "Make the BBMM line buffer box more visible".
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
 
 ### 2026-10-22 — Contour levels clarified; Volume contours fixed and switched to standard isopleth %
 

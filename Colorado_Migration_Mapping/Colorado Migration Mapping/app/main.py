@@ -69,7 +69,7 @@ _vec_point_style = {"variable": "dashExtensions.default.vecPointStyle"}
 #         silent crash at startup. Useful for diagnosing install problems.
 # ---------------------------------------------------------------------------
 try:
-    from app.modules.data_ingestion import DEFAULT_CONFIG, calc_nsd, process_data
+    from app.modules.data_ingestion import APP_DOWNLOAD_COLUMN_MAP, DEFAULT_CONFIG, calc_nsd, process_data
     from app.modules.sequencing import (
         apply_auto_detections,
         build_migtime_table,
@@ -125,7 +125,7 @@ try:
     )
 except ImportError:
     try:
-        from modules.data_ingestion import DEFAULT_CONFIG, calc_nsd, process_data
+        from modules.data_ingestion import APP_DOWNLOAD_COLUMN_MAP, DEFAULT_CONFIG, calc_nsd, process_data
         from modules.sequencing import (
             apply_auto_detections,
             build_migtime_table,
@@ -200,6 +200,7 @@ except ImportError:
             raise NotImplementedError("wld_reader module not found")
         def merge_wld_to_gps(gps_df, *a, **k):
             return gps_df
+        APP_DOWNLOAD_COLUMN_MAP = {}
         DEFAULT_CONFIG = {
             "animal_id_col": "LoclAID",
             "timestamp_col": "DT_MST",
@@ -1730,7 +1731,8 @@ def _col_map_row(label, dropdown_id, options=None, multi=False):
 
 _INFO_LABEL_COUNTER = [0]
 
-def _info_label(label_text, description, recommended=None, icon_color="#6c9bd2", bold=False):
+def _info_label(label_text, description, recommended=None, icon_color="#6c9bd2", bold=False,
+                font_size="0.85rem"):
     _INFO_LABEL_COUNTER[0] += 1
     btn_id = f"info-btn-{_INFO_LABEL_COUNTER[0]}"
     # `description` is usually a string, but may be a list of Dash components
@@ -1740,7 +1742,7 @@ def _info_label(label_text, description, recommended=None, icon_color="#6c9bd2",
     if recommended is not None and isinstance(body, str):
         body += f"\n\nRecommended: {recommended}"
     return html.Div([
-        dbc.Label(label_text, style={"fontSize": "0.85rem", "display": "inline",
+        dbc.Label(label_text, style={"fontSize": font_size, "display": "inline",
                                      **({"fontWeight": "bold"} if bold else {})}),
         html.Button(
             "ⓘ",
@@ -2029,7 +2031,7 @@ tab1_layout = dbc.Container(
                                         html.Small(
                                             "Select the names of the fields in your dataset that represent "
                                             "animal ID, timestamp, longitude, latitude, DOP (precision), "
-                                            "number of satellites, and age class.",
+                                            "number of satellites, age class, and sex.",
                                             className="text-muted d-block mb-2",
                                             style={"fontSize": "0.75rem"},
                                         ),
@@ -2103,6 +2105,29 @@ tab1_layout = dbc.Container(
                                                 ),
                                             ],
                                             id="age-class-checklist-wrapper",
+                                            style={"display": "none"},
+                                        ),
+                                        html.Hr(className="my-2"),
+                                        _col_map_row("Sex column", "col-sex"),
+                                        html.Div(
+                                            [
+                                                html.Small(
+                                                    "Select which sexes you would like to include in the analysis.",
+                                                    className="text-muted d-block mb-1",
+                                                ),
+                                                dbc.Checklist(
+                                                    id="sex-include",
+                                                    options=[],
+                                                    value=[],
+                                                    inline=True,
+                                                    className="small",
+                                                ),
+                                                html.Small(
+                                                    id="sex-hint",
+                                                    className="text-muted",
+                                                ),
+                                            ],
+                                            id="sex-checklist-wrapper",
                                             style={"display": "none"},
                                         ),
                                     ]
@@ -4014,6 +4039,7 @@ app.layout = dbc.Container(
         dcc.Store(id="store-animal-notes", data={}, storage_type="local"),  # persists per-browser across sessions
         dcc.Store(id="store-animal-classification", data={}, storage_type="local"),  # id_bio_year -> resident/nomadic/migratory
         dcc.Store(id="store-map-payload"),       # JSON payload sent into MapLibre iframe (Tab 2)
+        dcc.Store(id="store-map-layers-built", data=False),  # Tab 5 points/tracks are current (update_map_layers)
         dcc.Store(id="store-map-legend"),        # [{name,color}] for the Tab 2 map legend (reactive to seq count/names)
         dcc.Store(id="_legend_push_dummy"),      # throwaway output for the legend->iframe clientside forwarder
         dcc.Store(id="_road_refresh_dummy"),      # throwaway output for the mig-year -> road-crossings refresh
@@ -4996,27 +5022,93 @@ def toggle_stopover_pct(checked):
 def populate_age_class_checklist(age_col, tmp_path):
     """Read unique age-class values from the uploaded data and populate the
     inclusion checklist. Pre-checks all classes except calf/fawn."""
+    return _include_checklist(age_col, tmp_path, exclude_default={"calf", "fawn"}, noun="class(es)")
+
+
+# Checklist value standing in for missing/blank cells in the age-class and sex
+# include filters, so blank rows get a checkbox instead of being silently
+# dropped whenever the filter is active.
+_BLANK_VALUE = "(blank)"
+
+
+def _include_values(series: pd.Series) -> pd.Series:
+    """Normalise a column for the include filters: strip, and map NaN/empty to
+    _BLANK_VALUE. Used both to list checklist options and to filter."""
+    s = series.astype(str).str.strip()
+    return s.mask(series.isna() | s.isin(["", "nan", "None"]), _BLANK_VALUE)
+
+
+def _resolve_input_col(df: pd.DataFrame, col: str | None) -> str | None:
+    """Return the processed-data column holding input column `col`. Wildlife
+    Tracker downloads are renamed during processing (captureAgeClass →
+    AgeClass, sex → Sex), while the Tab 1 dropdowns show the original name."""
+    if not col:
+        return None
+    if col in df.columns:
+        return col
+    renamed = APP_DOWNLOAD_COLUMN_MAP.get(col)
+    return renamed if renamed and renamed in df.columns else None
+
+
+def _include_checklist(col, tmp_path, exclude_default=frozenset(), noun="value(s)"):
+    """Shared body of the Tab 1 age-class / sex include checklists: read the
+    column's unique values from the input file and return
+    (options, checked values, wrapper style, hint). Everything is pre-checked
+    except values in `exclude_default` (case-insensitive)."""
     hidden = {"display": "none"}
-    if not age_col or not tmp_path:
+    if not col or not tmp_path:
         return [], [], hidden, ""
     try:
         p = Path(tmp_path)
         if p.suffix.lower() == ".csv":
-            df = pd.read_csv(str(p), low_memory=False, usecols=[age_col])
+            df = pd.read_csv(str(p), low_memory=False, usecols=[col])
         else:
             import geopandas as _gpd
-            df = _gpd.read_file(str(p))[[age_col]]
-        vals = sorted(df[age_col].dropna().astype(str).str.strip().unique(), key=str.lower)
+            # Read only this column (no geometry) — much faster on large .dbf.
+            df = _gpd.read_file(str(p), columns=[col], ignore_geometry=True)
+        vals = sorted(_include_values(df[col]).unique(), key=str.lower)
         if not vals:
             return [], [], hidden, ""
         options = [{"label": f" {v}", "value": v} for v in vals]
-        _EXCLUDE_DEFAULT = {"calf", "fawn"}
-        included = [v for v in vals if v.lower() not in _EXCLUDE_DEFAULT]
-        excluded = [v for v in vals if v.lower() in _EXCLUDE_DEFAULT]
-        hint = f"{len(excluded)} class(es) unchecked by default" if excluded else ""
+        included = [v for v in vals if v.lower() not in exclude_default]
+        excluded = [v for v in vals if v.lower() in exclude_default]
+        hint = f"{len(excluded)} {noun} unchecked by default" if excluded else ""
         return options, included, {"display": "block"}, hint
     except Exception:
         return [], [], hidden, ""
+
+
+@app.callback(
+    Output("col-sex", "options"),
+    Output("col-sex", "value"),
+    Input("col-age-class", "options"),
+    prevent_initial_call=True,
+)
+def populate_sex_column(col_options):
+    """Mirror the column list into the Sex column dropdown whenever a file is
+    loaded (the age-class dropdown gets the same list), and auto-detect it."""
+    col_options = col_options or []
+    cols = [o["value"] for o in col_options]
+    detected = None
+    for cand in ("sex", "Sex", "SEX", "animalSex", "captureSex", "gender"):
+        detected = next((c for c in cols if c.lower() == cand.lower()), None)
+        if detected:
+            break
+    return col_options, detected
+
+
+@app.callback(
+    Output("sex-include", "options"),
+    Output("sex-include", "value"),
+    Output("sex-checklist-wrapper", "style"),
+    Output("sex-hint", "children"),
+    Input("col-sex", "value"),
+    State("store-upload-path", "data"),
+    prevent_initial_call=True,
+)
+def populate_sex_checklist(sex_col, tmp_path):
+    """Read unique sex values from the uploaded data; all pre-checked."""
+    return _include_checklist(sex_col, tmp_path)
 
 
 @app.callback(
@@ -5106,6 +5198,8 @@ def show_processed_in_preview(processed_json):
     State("age-class-include", "value"),
     State("col-age-class", "value"),
     State("auto-flagging-toggle", "value"),
+    State("sex-include", "value"),
+    State("col-sex", "value"),
     prevent_initial_call=True,
 )
 def process_uploaded_data(
@@ -5116,7 +5210,7 @@ def process_uploaded_data(
     existing_processed_json, workdir_path, detect_roads,
     herd_id_override, use_utm, utm_easting_col, utm_northing_col,
     dop_col, sat_col, age_class_include, age_class_col,
-    auto_flagging_enabled,
+    auto_flagging_enabled, sex_include, sex_col,
 ):
     """Run the full data processing pipeline.
 
@@ -5221,40 +5315,55 @@ def process_uploaded_data(
     except Exception as exc:
         return _err_alert(f"Processing failed: {exc}\n{traceback.format_exc()}"), "", None, None, dash.no_update, dash.no_update, ""
 
-    # ---- Stage 3b: filter by age class ----
-    _age_col = age_class_col or "captureAgeClass"
-    _included = set(age_class_include or [])
-    if _included and _age_col in gdf.columns:
-        actual_vals = set(gdf[_age_col].astype(str).str.strip().unique())
-        excluded_vals = actual_vals - _included
-        if excluded_vals:
-            exclude_mask = gdf[_age_col].astype(str).str.strip().isin(excluded_vals)
-            excluded_df = gdf[exclude_mask].copy()
-            n_excluded = len(excluded_df)
-            if n_excluded:
-                gdf = gdf[~exclude_mask].copy()
-                _aid = "animal_id" if "animal_id" in excluded_df.columns else config["animal_id_col"]
-                processing_log.append(
-                    f"Age-class filter: {n_excluded:,} fixes removed ({excluded_df[_aid].nunique()} animals) "
-                    f"— excluded classes: {', '.join(sorted(excluded_vals))}"
-                )
-                excluded_out = excluded_df.drop(columns=["geometry"], errors="ignore").copy()
-                excluded_out["removal_reason"] = "Age class excluded: " + excluded_df[_age_col].astype(str).str.strip()
-                if workdir_path:
-                    try:
-                        removed_dir = _workdir_version(Path(workdir_path)) / "RemovedPoints"
-                        removed_dir.mkdir(parents=True, exist_ok=True)
-                        excluded_out.to_csv(
-                            removed_dir / "AgeClassRemoved.csv", index=False,
-                        )
-                    except Exception:
-                        pass
-            else:
-                processing_log.append("Age-class filter: no fixes matched excluded classes")
-        else:
-            processing_log.append("Age-class filter: all classes included, none removed")
-    elif _age_col not in (gdf.columns if hasattr(gdf, 'columns') else []):
-        processing_log.append(f"Age-class filter: column '{_age_col}' not found, skipped")
+    # ---- Stage 3b: filter by age class, then sex ----
+    def _apply_include_filter(gdf, col, included, label, reason, csv_name):
+        """Drop fixes whose `col` value (blank → _BLANK_VALUE) isn't in
+        `included`; log it and write the removed fixes to RemovedPoints/."""
+        included = set(included or [])
+        if not included:
+            return gdf
+        resolved = _resolve_input_col(gdf, col)
+        if resolved is None:
+            processing_log.append(f"{label} filter: column '{col}' not found, skipped")
+            return gdf
+        col = resolved
+        vals = _include_values(gdf[col])
+        excluded_vals = set(vals.unique()) - included
+        if not excluded_vals:
+            processing_log.append(f"{label} filter: all values included, none removed")
+            return gdf
+        exclude_mask = vals.isin(excluded_vals)
+        excluded_df = gdf[exclude_mask].copy()
+        gdf = gdf[~exclude_mask].copy()
+        _aid = "animal_id" if "animal_id" in excluded_df.columns else config["animal_id_col"]
+        processing_log.append(
+            f"{label} filter: {len(excluded_df):,} fixes removed ({excluded_df[_aid].nunique()} animals) "
+            f"— excluded: {', '.join(sorted(excluded_vals))}"
+        )
+        excluded_out = excluded_df.drop(columns=["geometry"], errors="ignore").copy()
+        excluded_out["removal_reason"] = f"{reason} excluded: " + vals[exclude_mask]
+        if workdir_path:
+            try:
+                removed_dir = _workdir_version(Path(workdir_path)) / "RemovedPoints"
+                removed_dir.mkdir(parents=True, exist_ok=True)
+                excluded_out.to_csv(removed_dir / csv_name, index=False)
+            except Exception:
+                pass
+        return gdf
+
+    gdf = _apply_include_filter(
+        gdf, age_class_col or "captureAgeClass", age_class_include,
+        "Age-class", "Age class", "AgeClassRemoved.csv",
+    )
+    if sex_col:
+        gdf = _apply_include_filter(
+            gdf, sex_col, sex_include, "Sex", "Sex", "SexRemoved.csv",
+        )
+    # Remember which processed-data columns hold age class / sex, so the
+    # migtime export can add per-animal age_class / sex columns (saved with the
+    # project config, so it survives Load Project).
+    final_config["age_class_col"] = _resolve_input_col(gdf, age_class_col or "captureAgeClass")
+    final_config["sex_col"] = _resolve_input_col(gdf, sex_col)
 
     # Manual Herd ID override from the Tab 1 input field. Stripped + sanitised
     # to the same character set the auto-derivation uses (alnum + _ + -).
@@ -5883,6 +5992,26 @@ def refresh_road_crossings_on_migyear(month, day, processed_json, workdir_path):
     raise PreventUpdate
 
 
+def _animal_attr_text(df: pd.DataFrame | None, selected_animal: str, config_json) -> str:
+    """"Age = <age class>, Sex = <sex>" for the animal in an animal-year key,
+    from the processed data ("—" when missing). Shown under the animal-year ID
+    in the Tab 2 chart titles."""
+    attrs = {"age_class": "—", "sex": "—"}
+    try:
+        cfg = json.loads(config_json) if isinstance(config_json, str) else (config_json or {})
+        if df is not None and "animal_id" in df.columns:
+            animal_id = str(selected_animal).rsplit("_", 1)[0]
+            sub = df[df["animal_id"].astype(str) == animal_id]
+            for key, src in _animal_attr_sources(df, cfg if isinstance(cfg, dict) else {}).items():
+                if src and len(sub):
+                    per_animal = _animal_attr_per_animal(sub, src)
+                    if animal_id in per_animal.index:
+                        attrs[key] = per_animal[animal_id]
+    except Exception:
+        pass
+    return f"Age = {attrs['age_class']}, Sex = {attrs['sex']}"
+
+
 @app.callback(
     Output("nsd-plot", "figure"),
     Output("displacement-plot", "figure"),
@@ -5901,9 +6030,10 @@ def refresh_road_crossings_on_migyear(month, day, processed_json, workdir_path):
     Input("seq-bio-year-month", "value"),
     Input("seq-bio-year-day", "value"),
     State("store-processed-data", "data"),
+    State("store-config", "data"),
     prevent_initial_call=True,
 )
-def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_overlays, bio_month, bio_day, processed_json):
+def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_overlays, bio_month, bio_day, processed_json, config_json=None):
     """Tab-2 RENDERER: rebuild the four plots + the slider cards from the
     migtime table, which is the single source of truth for which sequences
     exist for this animal.
@@ -5922,6 +6052,9 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_over
     bio_day = int(bio_day or 1)
 
     df, nsd_col = _seq_working_df(processed_json, bio_month, bio_day)
+    # Every chart title: "<metric> — <animal-year>" with "Age = …, Sex = …"
+    # on a smaller second line.
+    _title_id = f" — {selected_animal}<br><sup>{_animal_attr_text(df, selected_animal, config_json)}</sup>"
 
     disp_col = "displacement_id_bio_year" if "displacement_id_bio_year" in df.columns else None
     if disp_col is None:
@@ -6033,11 +6166,11 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_over
     nsd_fig.update_layout(
         template="plotly_dark",
         uirevision=selected_animal,
-        title=f"NSD — {selected_animal}",
+        title=f"NSD{_title_id}",
         xaxis_title="", yaxis_title="NSD (km²)",
         yaxis={"rangemode": "nonnegative"},
         dragmode="pan",
-        margin={"l": 50, "r": 20, "t": 40, "b": 40},
+        margin={"l": 50, "r": 20, "t": 60, "b": 40},
         legend={"orientation": "h"},
     )
 
@@ -6056,10 +6189,10 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_over
     disp_fig.update_layout(
         template="plotly_dark",
         uirevision=selected_animal,
-        title="Displacement (km)",
+        title="Displacement (km)" + _title_id,
         xaxis_title="", yaxis_title="km",
         dragmode="pan",
-        margin={"l": 50, "r": 20, "t": 30, "b": 30},
+        margin={"l": 50, "r": 20, "t": 60, "b": 30},
         legend={"orientation": "h"},
     )
 
@@ -6078,10 +6211,10 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_over
     speed_fig.update_layout(
         template="plotly_dark",
         uirevision=selected_animal,
-        title="Speed (km/h)",
+        title="Speed (km/h)" + _title_id,
         xaxis_title="", yaxis_title="km/h",
         dragmode="pan",
-        margin={"l": 50, "r": 20, "t": 30, "b": 30},
+        margin={"l": 50, "r": 20, "t": 60, "b": 30},
         legend={"orientation": "h"},
     )
 
@@ -6103,10 +6236,10 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_over
     elev_fig.update_layout(
         template="plotly_dark",
         uirevision=selected_animal,
-        title=elev_title,
+        title=elev_title + _title_id,
         xaxis_title="", yaxis_title="m",
         dragmode="pan",
-        margin={"l": 50, "r": 20, "t": 30, "b": 30},
+        margin={"l": 50, "r": 20, "t": 60, "b": 30},
         legend={"orientation": "h"},
     )
 
@@ -6779,9 +6912,58 @@ def _fix_removal_note(is_problem: bool, is_mortality: bool,
     return "  ".join(parts)
 
 
+def _add_animal_attrs(migtime: pd.DataFrame, processed_df: pd.DataFrame | None, config: dict) -> pd.DataFrame:
+    """Add per-animal `age_class` and `sex` columns (right after `animal_id`)
+    from the processed data — each animal's most common non-blank value, or ""
+    if the column/value is missing. Columns come from the Process Data config
+    (age_class_col / sex_col); projects processed before that was recorded fall
+    back to the usual column names."""
+    if "animal_id" not in migtime.columns:
+        return migtime
+    ids = migtime["animal_id"].astype(str)
+    pos = list(migtime.columns).index("animal_id") + 1
+    for out_col, src in _animal_attr_sources(processed_df, config).items():
+        values = pd.Series("", index=migtime.index)
+        if src:
+            values = ids.map(_animal_attr_per_animal(processed_df, src)).fillna("")
+        if out_col in migtime.columns:
+            migtime[out_col] = values
+        else:
+            migtime.insert(pos, out_col, values)
+        pos = list(migtime.columns).index(out_col) + 1
+    return migtime
+
+
+def _animal_attr_sources(processed_df: pd.DataFrame | None, config: dict) -> dict[str, str | None]:
+    """{"age_class": col, "sex": col} — the processed-data columns holding each
+    animal's age class / sex (None if absent). Uses the columns recorded at
+    Process Data; projects processed before that fall back to the usual names."""
+    fallbacks = {
+        "age_class": ["AgeClass", "captureAgeClass", "age_class", "Age"],
+        "sex": ["Sex", "sex", "animalSex", "captureSex", "gender"],
+    }
+    out: dict[str, str | None] = {}
+    for out_col, cfg_key in (("age_class", "age_class_col"), ("sex", "sex_col")):
+        src = None
+        if processed_df is not None and "animal_id" in processed_df.columns:
+            if cfg_key in config:
+                src = _resolve_input_col(processed_df, config.get(cfg_key))
+            else:
+                src = next((c for c in fallbacks[out_col] if c in processed_df.columns), None)
+        out[out_col] = src
+    return out
+
+
+def _animal_attr_per_animal(df: pd.DataFrame, src: str) -> pd.Series:
+    """Each animal's most common non-blank `src` value, indexed by animal_id."""
+    vals = _include_values(df[src])
+    vals = vals[vals != _BLANK_VALUE]
+    return vals.groupby(df.loc[vals.index, "animal_id"].astype(str)).agg(lambda s: s.mode().iloc[0])
+
+
 def _build_migtime_export_df(
     migtime_json, notes_store, road_store, class_store, seq_names,
-    workdir_path, processed_json, bio_month, bio_day,
+    workdir_path, processed_json, bio_month, bio_day, config_json=None,
 ):
     """Shared core of a migtime save (manual Export Migtime Table AND the
     periodic autosave below): resolve road crossings, populate notes, drop
@@ -6839,6 +7021,13 @@ def _build_migtime_export_df(
         )
         migtime["reviewed"] = (classification != "unclassified") | has_sequence
 
+    # Per-animal age class + sex from the processed data (export-only columns).
+    try:
+        cfg = json.loads(config_json) if isinstance(config_json, str) else (config_json or {})
+    except Exception:
+        cfg = {}
+    migtime = _add_animal_attrs(migtime.copy(), _rc_df, cfg if isinstance(cfg, dict) else {})
+
     # Friendly column names (Spring_start, …) for the CSV + a seq_map legend so
     # the labels follow the project into the export and round-trip back on load.
     export_df = _friendly_migtime_for_export(migtime, seq_names)
@@ -6879,7 +7068,7 @@ def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store
 
     migtime, export_df, removed_keys, road_store = _build_migtime_export_df(
         migtime_json, notes_store, road_store, class_store, seq_names,
-        workdir_path, processed_json, bio_month, bio_day,
+        workdir_path, processed_json, bio_month, bio_day, config_json,
     )
     n_removed_years = len(removed_keys)
 
@@ -7067,11 +7256,12 @@ _LAST_MIGTIME_AUTOSAVE_REV: int | None = None
     State("store-seq-names", "data"),
     State("seq-bio-year-month", "value"),
     State("seq-bio-year-day", "value"),
+    State("store-config", "data"),
     prevent_initial_call=True,
 )
 def autosave_migtime_periodic(
     n_intervals, migtime_json, workdir_path, notes_store, road_store,
-    processed_json, class_store, seq_names, bio_month, bio_day,
+    processed_json, class_store, seq_names, bio_month, bio_day, config_json,
 ):
     """Every few minutes, quietly re-save the migtime table so sequence edits,
     notes, and classifications aren't lost if the app is closed or crashes
@@ -7102,7 +7292,7 @@ def autosave_migtime_periodic(
     try:
         migtime, export_df, _removed_keys, _road_store = _build_migtime_export_df(
             migtime_json, notes_store, road_store, class_store, seq_names,
-            workdir_path, processed_json, bio_month, bio_day,
+            workdir_path, processed_json, bio_month, bio_day, config_json,
         )
         import datetime as _dt
         stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -8468,22 +8658,49 @@ def render_model_params(model, processed_json):
                 "(or is missing a bounding migration date); skips are noted in processing_log.txt.",
                 className="text-muted d-block mb-2", style={"fontSize": "0.68rem"},
             ),
-            dbc.Checkbox(
-                id={"type": "model-param", "key": "bbmm_linebuffer"},
-                label="Line buffer (buffered migration lines stacked per animal)",
-                value=False,
-                style={"fontSize": "0.8rem"},
-            ),
+            # Line buffer gets its own outlined section (users missed it as the
+            # last small checkbox in "Extra BBMM outputs").
             html.Div(
-                id="bbmm-linebuffer-distance-wrapper",
-                children=[
-                    dbc.Label("Buffer distance (m, total width — applied as half on each side)", style={"fontSize": "0.8rem", "marginTop": "4px"}),
-                    dbc.Input(
-                        id={"type": "model-param", "key": "bbmm_linebuffer_distance"},
-                        type="number", value=400, min=1, step=1, size="sm",
+                [
+                    _info_label("Line Buffer Output",
+                                "Connects each migration sequence's fixes in time order into a line, "
+                                "buffers it, and combines the buffers per animal. Writes to "
+                                "ModelOutputs/LineBuffer/: raw_linebuffer.shp (one polygon per animal), "
+                                "by_Animal_linebuffer_dissolved.shp (all animals merged into one polygon), "
+                                "and linebuffer_heatmap.tif (how many animals' buffers overlap each cell). "
+                                "A simple, model-free corridor to compare against the BBMM outputs.",
+                                "400 m total width (Jerod Merkle)",
+                                bold=True, font_size="1rem"),
+                    dbc.Checkbox(
+                        id={"type": "model-param", "key": "bbmm_linebuffer"},
+                        label="Create line buffer output (buffered migration lines stacked per animal)",
+                        value=False,
+                        style={"fontSize": "0.9rem"},
+                    ),
+                    html.Div(
+                        id="bbmm-linebuffer-distance-wrapper",
+                        children=[
+                            dbc.Label("Buffer distance (m)", className="fw-bold mt-2 mb-1", style={"fontSize": "0.9rem"}),
+                            dbc.InputGroup(
+                                [
+                                    dbc.Input(
+                                        id={"type": "model-param", "key": "bbmm_linebuffer_distance"},
+                                        type="number", value=400, min=1, step=1,
+                                    ),
+                                    dbc.InputGroupText("m total width"),
+                                ],
+                            ),
+                            html.Small(
+                                "Total width of the buffer, applied as half on each side of the line "
+                                "(400 m = 200 m each side). Recommended: 400 m.",
+                                className="text-muted d-block mt-1", style={"fontSize": "0.75rem"},
+                            ),
+                        ],
+                        style={"display": "none"},
                     ),
                 ],
-                style={"display": "none"},
+                className="mt-3 mb-2 p-2 rounded",
+                style={"border": "1px solid #6c9bd2", "background": "rgba(108,155,210,0.08)"},
             ),
         ]
     elif model == "DBBMM":
@@ -11075,12 +11292,14 @@ app.clientside_callback(
 @app.callback(
     Output("map-geojson-points", "data"),
     Output("map-geojson-tracks", "data"),
+    Output("store-map-layers-built", "data"),
     Input("store-processed-data", "data"),
-    Input("store-migtime-table", "data"),
     Input("map-layers", "value"),
+    Input("main-tabs", "active_tab"),
+    State("store-map-layers-built", "data"),
     prevent_initial_call=True,
 )
-def update_map_layers(processed_json, migtime_json, active_layers):
+def update_map_layers(processed_json, active_layers, active_tab, layers_built):
     """Build GeoJSON overlays for the map — vectorized for speed.
 
     Two output layers (points + tracks); footprint/pop-contour layers are
@@ -11091,7 +11310,26 @@ def update_map_layers(processed_json, migtime_json, active_layers):
     LineStrings capped at 2,000 vertices. Both via numpy strided slicing
     (`::step`) so we keep the deterministic visual envelope (start, end,
     rough trajectory) without sending 50k+ features through dash-leaflet.
+
+    Only built while Tab 5 is open. The tracks layer is ~9 MB on a 440-animal
+    herd, and the hidden Tab 5 map still parses + draws it, which froze the
+    browser right after Process Data (the Tab 2 sequence box couldn't load).
+    A processed-data change on another tab just marks the layers stale
+    (store-map-layers-built = False); they rebuild the next time Tab 5 opens.
+    The flag lives in the browser, so a page reload (empty map) rebuilds too.
     """
+    if active_tab != "tab-5":
+        if ctx.triggered_id == "store-processed-data" and layers_built:
+            return dash.no_update, dash.no_update, False
+        raise PreventUpdate
+    if ctx.triggered_id == "main-tabs" and layers_built:
+        raise PreventUpdate
+    points_geojson, tracks_geojson = _build_map_layers(processed_json, active_layers)
+    return points_geojson, tracks_geojson, True
+
+
+def _build_map_layers(processed_json, active_layers):
+    """Points + tracks GeoJSON for the Tab 5 map (see update_map_layers)."""
     empty = {"type": "FeatureCollection", "features": []}
     points_geojson = empty
     tracks_geojson = empty.copy()
