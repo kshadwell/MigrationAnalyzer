@@ -37,8 +37,11 @@ _APP = Path(__file__).resolve().parent.parent          # .../app
 ROOT = _APP.parent                                      # .../Colorado Migration Mapping
 
 DEFAULTS = {
-    # Internal Gitea (see deploy.sh). Switch to the GitHub URL if preferred.
-    "repo_url": "https://dnrapp110.naturenet.state.co.us/git/ShinyDev/MigrationAnalyzer.git",
+    # Public GitHub repo, so updates reach installs without anyone on the
+    # state network pushing to Gitea. To use the internal Gitea instead, set
+    # repo_url in update_config.json to
+    # https://dnrapp110.naturenet.state.co.us/git/ShinyDev/MigrationAnalyzer.git
+    "repo_url": "https://github.com/kshadwell/MigrationAnalyzer.git",
     "branch": "main",
     "token": "",            # personal access token if the repo is private
     "verify_ssl": True,     # set false for an internal server with a self-signed cert
