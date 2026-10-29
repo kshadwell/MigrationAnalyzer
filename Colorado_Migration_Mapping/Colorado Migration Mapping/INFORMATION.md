@@ -236,13 +236,28 @@ Running log of setup actions and decisions on this machine (Windows 11). New dat
 
 These are the in-flight tasks mirrored from the session task list. 
 
+**Requests added 2026-10-13:**
+
+1. **VPN note for "Check for update".** Add to the "Check for update" pop-up error message that you need to be on the VPN. Also add the VPN requirement to the help document. (2026-10-18: no "Check for update" pop-up exists in this repo's code — only `Update.bat` — need to find where it lives.)
+2. **Tab 1: subherd selection under herd.** In the Processing Parameters section, add a subherd selection below the herd option. Tracker has a `SubherdName` field that will be added to the export table, so use that column. `SubherdName` is too long for a shapefile field name, so rename it to `Subherd` in the app. (Related to the subherd items below.)
+3. **Classification field on all exported tables.** Add a classification field to every exported table (e.g. when animals are included in the analysis, include a field listing migratory/etc., or `unclassified` if none of the radio buttons were clicked). (2026-10-20: done for the migtime export; AnimalYearsRemoved.csv already had it. Still to do: the other exported tables/shapefiles.)
+4. **GDB vs. shapefile exports.** Add a CSV to the flag/removed/insufficient GDB. Aim to export everything as shapefile when possible; where it isn't, figure out why and fix it (field names, etc.).
+5. **Review the Tab 1 UTM Zone 13 checkbox text.** The current text isn't correct, but the right wording still needs to be figured out. Pending a call with Bryan about how SQL will be integrated.
+6. **Detect problem points by geometry, not just DOP/NumSats.** Some possible problem points are missed because DOP and NumSats values differ by vendor. Use distance and turning angle relative to neighboring points to identify possible problem points. Check the USGS code or Nick's code to see if this already exists.
+
+**Long-term needs:**
+
+1. **Statewide migration dashboard + usage reporting.** Create a dashboard that compiles the data every time someone runs a migration analysis. Michelle needs to know when a bio uses the app and runs outputs, so their data can be copied to the server and included in the future dashboard. How do we do this? Ideas: send Michelle an email or CSV saying who ran what and when.
+2. **Reconsider the min1/min2/min3 rasters.** Maybe get rid of them since they aren't a heat map, or change them into a heat map. A shapefile could probably replace them.
+3. **"Copy to server" button.**
+4. **CPW vs. personal version?** Maybe split the app at launch into a CPW version and a personal version.
+
 **Requests added 2026-08-28:**
 
 - **Add a UTM Zone 12N option?** Maybe add a Zone 12N checkbox alongside 13N (far-western CO). Decide whether it's needed.
 - **Subherd analysis (expands the "Subherd selection and re-analysis" item below).** Separate the analysis by subherd: (a) by an existing **subherd field** in the data (run per subherd), and/or (b) let the user **identify subherds spatially** (draw/lasso animals on the map into groups).
 - **Help doc: migtime save + project reload.** Add to the user guide: how to **save out the migtime**, and how to **re-load a project** (Load Previous Table).
-- **Sex filter (with age class).** Add a sex filter alongside the Tab 1 age-class filter.
-- **Pre-modeling include/exclude by sex + age class (buck/doe/fawn), keeping all migtimes.** Pull sex + age class for each animal ID from the original input into the **migtime table** (add sex + age-class columns per row). Then, pre-modeling, let the user choose **which animals to include** in the analysis (all or a subset) — retaining migtimes for every animal but dropping unselected animals from the modeled dataset.
+- **Pre-modeling include/exclude by sex + age class (buck/doe/fawn), keeping all migtimes.** Pull sex + age class for each animal ID from the original input into the **migtime table** (add sex + age-class columns per row). Then, pre-modeling, let the user choose **which animals to include** in the analysis (all or a subset) — retaining migtimes for every animal but dropping unselected animals from the modeled dataset. (2026-10-22: the migtime export now has per-animal `age_class` + `sex` columns, and Tab 1 can filter by age class and sex at Process Data. Still to do: the pre-modeling include/exclude choice that keeps every migtime.)
 
 - **Diagnose BBMM output divergence vs. canonical reference.** Two suspected causes: (1) `scipy.optimize.minimize_scalar` vs. R `optim` for the Horne 2007 MLE, and (2) our `T_total` divisor in `_bbmm_bridge_accumulate` sums only kept segments while R's `sum(time.lag)` sums all pairs including the ones excluded by `max.lag`. Compare per-season `.tif` outputs against the canonical `A37_BBMM_*` set at `K:\MigrationAnalysis\A37\2026.zip` → `OutputData/Jaffe_IndStackedOutput_040226/`. Visual divergence first confirmed 2026-05-18 after wiring `calc_season_banded_outputs` (this item now subsumes that earlier "BBMM per-season UD `.tif` outputs visually differ" Pending note). Additional differences to check beyond the two suspected causes:
   - **BBMM motion-variance estimator path**: our Horne (2007) MLE via `scipy.optimize.minimize_scalar` vs. R `BBMM::brownian.motion.variance` — different numerical optimisers, possibly different residual parametrisation.
@@ -267,8 +282,159 @@ These are the in-flight tasks mirrored from the session task list.
 - **MigPoints/MigLines slow to load in Tab 5.** Even after trimming columns for display, these layers are sluggish to render on the map. Investigate further optimizations (e.g. simplifying geometries, limiting point count, or rendering as tile layers).
 - **FlagsRemoved layer symbology.** The FlagsRemoved shapefile looks wrong when loaded as a vector overlay in Tab 5 — investigate and fix the default styling/symbology.
 - **Note in outputs: individuals are stacked, not sequences.** Add a note/label in the population output UI and exported metadata clarifying that individual UDs are stacked (averaged), not per-sequence UDs.
-- **Slow working directory selection.** Selecting a working directory takes a very long time to finish updating. Investigate whether this is a machine/network issue or an app bottleneck (e.g., scanning large directories, loading cached data).
+- **Slow working directory selection.** Selecting a working directory takes a very long time to finish updating. Investigate whether this is a machine/network issue or an app bottleneck (e.g., scanning large directories, loading cached data). (2026-10-21: one bottleneck fixed — choosing a working directory auto-loads its newest ModelInputs file, and the shapefile preview was reading the whole file to show 200 rows: 8.2 s → 0.1 s on a 418k-row test shapefile. Re-check whether it still feels slow.)
 
+
+### 2026-10-22 — Fixed: Tab 2 sequence box slow to appear after Process Data
+
+**Reported:** after Process Data, going to Tab 2 the Sequence Date Ranges box took a while to load, so sequences couldn't be entered yet.
+
+**Cause.** Not the Tab 2 callbacks: on the Tab1Test project (389,398 fixes, 440 animals) the whole server chain (animal dropdown → `build_migtime_store` scaffold → `render_seq_panels`) takes ~1 s. The delay was the **Tab 5** map. `update_map_layers` rebuilt the Tab 5 points + tracks GeoJSON on every `store-processed-data` change **and** on every `store-migtime-table` change (an Input it never used). The tracks layer (every animal's full track, ≤2,000 vertices each) was **9.3 MB / 389,397 vertices**. dbc.Tabs mounts every pane at load, so the hidden Tab 5 dash-leaflet map parsed and drew it. That happened twice right as the user reached Tab 2 (once from Process Data, once when `build_migtime_store` created the migtime scaffold), and it tied up the browser so the Tab 2 sequence cards couldn't render. Simplifying the tracks didn't help: jagged GPS tracks only shrank ~25% even at ~100 m tolerance.
+
+**Fix.** `update_map_layers` now builds only while Tab 5 is open. Inputs are `store-processed-data`, `map-layers` and `main-tabs.active_tab` (the migtime Input was removed), plus a browser-side flag `store-map-layers-built`. A processed-data change on another tab sends nothing and just marks the layers stale. Opening Tab 5 rebuilds them if stale (or after a page reload, since the flag resets), and otherwise sends nothing. Changes made while on Tab 5 rebuild immediately, as before. The building code moved to `_build_map_layers` unchanged (full track detail kept). Verified on the Tab1Test data: Process Data / Tab 2 → nothing sent; first Tab 5 open → 5,058 points + 439 tracks; reopening Tab 5 → nothing sent.
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-10-22 — Tab 2: animal-year ID with age class and sex in the chart titles
+
+All four Tab 2 chart titles (NSD / Displacement / Speed / Elevation, built in `render_seq_panels`) now read `<metric> — <animal-year>`, with `Age = <age class>, Sex = <sex>` on a smaller second line (`<br><sup>…</sup>`, "—" when missing). Before, only the NSD title had the ID; the new title shows on whichever chart tab is open. Top margins went from 40 (NSD) / 30 (others) to 60 to fit the second line. `render_seq_panels` now takes `store-config` as State. (A first version put this in a separate header above the charts; per user feedback it moved into the chart titles.)
+
+The text comes from `_animal_attr_text`, which uses the same lookup as the migtime export's `age_class` / `sex` columns: `_add_animal_attrs` was split into `_animal_attr_sources` (which processed-data columns, from the Process Data config or fallback names) and `_animal_attr_per_animal` (each animal's most common non-blank value). It filters to the selected animal first (~5 ms). Verified on the Tab1Test data: Female and Male animals get `Age = Adult, Sex = Female` / `Male` in all four titles; a blank-sex animal shows `—`. Completes former to-do "Show sex + age class above the NSD graph".
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-10-22 — Migtime export: per-animal `age_class` and `sex` columns
+
+The migtime CSV (manual **Export Migtime Table** and the periodic autosave, both via `_build_migtime_export_df`) now has `age_class` and `sex` columns right after `animal_id`. For each animal, the value is its most common non-blank value in the processed data, or empty if missing. `_add_animal_attrs` builds them. They're export-only (added to a copy, never the live `store-migtime-table`); on Load Previous Table they come back as plain columns and are overwritten, not duplicated, on the next export.
+
+**Which columns.** Process Data now records the processed-data column names in the project config: `age_class_col` (the Tab 1 age-class column, default `captureAgeClass`) and `sex_col` (Tab 1 Sex column). Both are resolved through the Wildlife Tracker renames via the new `_resolve_input_col`, e.g. `AgeClass`/`Sex`. The config is saved with the project, so it survives Load Project. Projects processed before this change have no such keys and fall back to `AgeClass`/`captureAgeClass`/`age_class`/`Age` and `Sex`/`sex`/`animalSex`/`captureSex`/`gender`. `autosave_migtime_periodic` now takes `store-config`.
+
+Verified on the 4-animal Tab1Test sample: `config` → `AgeClass`/`Sex`; export rows `Adult/Female`, `Adult/""` (the blank-sex animal), `Adult/Male` ×2; fallback path gives the same; a table that already has the columns gets them overwritten (no duplicate columns). Completes former to-do "Age and sex columns in the migtime table".
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-10-22 — Tab 1 sex filter; fixed age-class filter never applying to Wildlife Tracker downloads
+
+**Sex filter.** The Column Mapping card has a new **Sex column** dropdown (`col-sex`) below the age-class section. It gets the same column list as the age-class dropdown whenever a file loads (`populate_sex_column`, triggered by `col-age-class.options`) and auto-detects `sex`/`Sex`/`animalSex`/`captureSex`/`gender`. Picking a column shows a checklist of its values (`sex-include`, `populate_sex_checklist`), all checked by default. At Process Data, unchecked sexes are removed after `process_data` (same stage as the age-class filter), logged ("Sex filter: N fixes removed (M animals) — excluded: …"), and written to `RemovedPoints/SexRemoved.csv` with `removal_reason = "Sex excluded: <value>"`.
+
+**Shared code.** The age-class and sex filters now share `_include_checklist` (options; shapefiles read only that column, no geometry), `_include_values` (normalization), and `_apply_include_filter` (inside `process_uploaded_data`).
+
+**Bug fixed (affects analyses).** `process_data` renames Wildlife Tracker download columns (`APP_DOWNLOAD_COLUMN_MAP`: `captureAgeClass` → `AgeClass`, `sex` → `Sex`, …), but the age-class filter looked for the original dropdown name. So for app-download files it logged "column 'captureAgeClass' not found, skipped" and **never removed unchecked age classes** (e.g. calves/fawns stayed in). `_apply_include_filter` now falls back to the renamed column. Verified on a 4-animal Tab1Test sample: excluding Male removed both male animals (1,603 fixes → `SexRemoved.csv`); excluding every age class removed all 5,922 fixes → `AgeClassRemoved.csv` (previously skipped).
+
+**Blank values.** Missing/blank cells now get a "(blank)" checkbox (checked by default) in both checklists. Before, the age filter removed blank-age fixes whenever it ran, since blanks had no checkbox and so were never "included".
+
+Completes former to-dos "Tab 1: sex selection under age class" and "Sex filter (with age class)" (2026-08-28).
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-10-22 — Tab 3: BBMM line buffer gets its own section
+
+The line buffer checkbox was the last small (0.8rem) item under "Extra BBMM outputs", and its distance box was a small `size="sm"` input, so users missed it. It's now an outlined, lightly tinted section at the bottom of the BBMM panel (`render_model_params`). The section has a bold 1rem **Line Buffer Output** header with an ⓘ (what it does, the three files it writes to `ModelOutputs/LineBuffer/`, recommended 400 m per Jerod Merkle), a larger checkbox ("Create line buffer output …"), and, when checked, a bold **Buffer distance (m)** label over a full-size input with an "m total width" suffix and the note "400 m = 200 m each side". Component IDs (`bbmm_linebuffer`, `bbmm_linebuffer_distance`, `bbmm-linebuffer-distance-wrapper`) and behavior are unchanged. `_info_label` gained a `font_size` option (default 0.85rem). Completes former to-do "Make the BBMM line buffer box more visible".
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-10-22 — Contour levels clarified; Volume contours fixed and switched to standard isopleth %
+
+**Question (to-do "Clarify contour-level options", 5/10/15 vs. 95/90/85%).** Tab 4 has one Contour Levels box but two contour types. **Area** (default): level L = cells where at least L% of animals' UDs are > 0, so 5 is broad and 50 is a bottleneck. That was correct and is unchanged. **Volume**: the code contoured `(1 − cumulative volume) × 100`, so L really meant the **(100 − L)% isopleth**. A "5" in `Pop_use_contours.shp` was the 95% isopleth, and the UI never said so.
+
+**Bug (affects analyses that used Volume).** `calc_population_use` (Volume) summed N per-animal UDs that each total 1 but never rescaled the sum, so cumulative volume ran 0–N. Everything past the top 1/N of volume clipped to 0, and multi-animal Volume contours came out far too small. Test (synthetic Gaussian UDs): 1 animal 95% isopleth 301 km² (analytic 301.2); 10 animals' "5" contour was 13 km², should be larger than one animal's. **Area contours and footprints were not affected.**
+
+**Fix (user chose standard isopleth %).**
+- `calc_population_use` rescales the summed UD to total 1. Volume levels are now standard isopleths: 95 = smallest area holding 95% of use (the largest polygon), 50 = core. Contours are computed on the inverted grid at 100 − L and relabeled L. After the fix: 10 animals 50/75/90/95% = 81/161/263/336 km²; 1 animal 95% = 301.0 km², 50% = 69.5 km² (analytic 69.7).
+- The use-contour GeoDataFrame/shapefile gets a `ctype` column (`Area`/`Volume`). Tab 5 `contourStyle` flips Volume levels when shading, so the core stays darkest.
+- Tab 4 UI: the levels box is now **Area Levels (% of animals)** (`pop-contour-levels`). It's always used for Footprint contours, and for Use contours when Area; the 1-/2-animal levels are still added. A new **Volume Isopleth Levels (%)** box (`pop-volume-levels`, default `50, 75, 90, 95`, must be 0–100) is shown only when Contour Type = Volume (`toggle_pop_volume_levels`). The ⓘ text for Contour Type and both level boxes explains each convention.
+- `pop_config` / metadata gain `volume_levels`. The processing log says "Contour type (population use)", "Area levels (% of animals; footprints [+ population use])" and, for Volume, "Volume isopleth levels". The Tab 4 result tables are titled "(% of animals)" or "(volume isopleths: 95% = area holding 95% of use)".
+- The per-season stacked products (`_topP`, `_stopover`) already used standard top-X%-of-volume and are unchanged.
+
+**User guide** (`user_guide.md` lines ~117–118) still describes a single "Contour levels" box. Left as is (someone else is revising the guide); needs the Area/Volume split. Completes former to-do "Clarify contour-level options".
+
+**Files touched.** `app/main.py`, `app/modules/population_outputs.py`, `app/assets/map_functions.js`, `INFORMATION.md`.
+
+### 2026-10-21 — Tab 1 preview pages through the full dataset (25 rows/page)
+
+**Reported:** the page buttons under the Tab 1 loaded-data table "didn't work". **Cause:** they did work, but the preview was only ever `df.head(20)` of a 200-row read of the input file (`page_size=10` → 2 pages). On a 400+ animal file the first 20 rows were all one animal (D09_D9M_2024_268_121224), so both pages showed the same animal and there was no page 3.
+
+**Fix.** The preview (`_make_preview_table`) is now a server-side-paged `DataTable` (`id="tab1-preview-table"`, `page_action="custom"`, 25 rows/page, `page_count` from the row count). The full DataFrame stays in the module global `_TAB1_PREVIEW_DF`; `page_tab1_preview` sends only the current page (≈1 ms per page on 450k rows). A caption above the table shows the row count. On file load it still shows the file's first 200 rows, captioned "first 200 rows of the file; click Process Data to page through the full dataset". The new callback `show_processed_in_preview` (Input `store-processed-data`) then swaps in the **full processed data** after Process Data or Load Project. It skips the rebuild when the cached df is the same object (flag clicks and the Tab 2 NSD recompute edit it in place), so the user's page isn't reset. `loading-tab1` now has `target_components` (status/summary/preview children only) so page clicks don't flash the spinner.
+
+**Also:** the shapefile/ZIP preview now uses `gpd.read_file(..., rows=200)` instead of reading the whole file and taking `.head(200)`: 8.2 s → 0.1 s on the 418,339-row Tab1Test shapefile. This also speeds up choosing a working directory, which auto-loads the newest ModelInputs file. Completes former to-do "Tab 1: loaded-data page buttons not working".
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-10-21 — Fixed: Tab 2 flag buttons zoomed the map out and dropped sequence colors
+
+**Bug.** Clicking **Flag as Problem**, **Flag as Mortality** or **Unflag Selected** on Tab 2 zoomed the map out to the animal-year's full extent. The cause was `_apply_flag_to_selection()`, which put `center`/`zoom` in its `update-data` payload, and the MapLibre iframe (`assets/maplibre_map.html`) `flyTo()`s whenever both are present. The same payload also built the points with no migtime table, so every point turned black (sequence colors lost) until the user changed animals, and it left out merged WLD popup labels.
+
+**Fix.** The flag payload no longer sends `center`/`zoom`, so the map keeps the user's current view. This is the same rule `update_seq_map` already uses for mig-date slider edits. The three flag callbacks now pass `store-migtime-table` and `store-wld-env-labels` (as State) through to `_apply_flag_to_selection()`, so points keep their sequence colors and popups keep the WLD labels. Point selection is still cleared after a flag click, as before. Verified on synthetic data: no center/zoom in the payload, sequence colors present, flagged point marked `problem`.
+
+**Second cause (found when the first fix alone still zoomed out).** A flag click updates `store-processed-data`, which re-runs `populate_animal_dropdown` and re-sets `seq-animal-dropdown.value` to the same animal. Dash treats that as a change, so `update_seq_map` re-ran and sent its own payload *with* center/zoom right after the flag payload. Fix: `update_seq_map` now adds `view_key` (`"<id_bio_year>|<wrr month>-<wrr day>"`) to payloads that carry center/zoom, and the iframe only `flyTo()`s when `view_key` differs from the last one it zoomed to (`lastViewKey`; payloads without a `view_key` still always fly). Re-runs for the same animal-year keep the user's view; choosing a different animal-year or changing the WRR date still re-centers, and an iframe reload resets `lastViewKey`. Also, the iframe `src` is now `/assets/maplibre_map.html?v=<file mtime>`, so browsers load the edited map page instead of a cached copy. Completes former to-do "Tab 2: flag buttons reset the map zoom".
+
+**Files touched.** `app/main.py`, `app/assets/maplibre_map.html`, `INFORMATION.md`.
+
+### 2026-10-20 — Report a bug / recommendation button (Google Form)
+
+Added a bug-icon button (`app/assets/bug_icon.png`, 256×295 transparent PNG, shown 22 px tall) left of **? Help** in the navbar. It opens `feedback_modal`: **Bug** / **Recommendation** radio; optional **Name** and **Email**; for Bug, "Which tab is the bug on?" (Tab 1–5 preselected to the user's current tab, or Other + free text); a large description box ("Describe the issue" / "Describe your recommendation:"); the note "Once submitted, an email will be sent to keana.shadwell@gmail.com with your responses."; and Submit.
+
+**Delivery.** `submit_feedback` POSTs (server-side, `urllib`) to the **"MAA Edits Recommendations"** Google Form's `formResponse` endpoint — form ID and per-question `entry.<n>` IDs are in `_FEEDBACK_FORM_URL` / `_FEEDBACK_FORM_ENTRIES` near the navbar code. The form emails the owner on each new response (Responses → ⋮ → email notifications) and keeps a response sheet. Form questions, in order: Type, Name, Email, Tab (short answer); Description, App details (paragraph). The form must stay public (no "Collect email addresses", no "Restrict to users in organization") or the POST is rejected. Recommendations send Tab = "N/A". **App details** is auto-filled: submit date/time, the tab the user was on, project name, herd ID, working directory. If the POST fails (offline, form changed), the popup shows a "send it by email instead" `mailto:` link to `_FEEDBACK_FALLBACK_EMAIL` with all fields pre-filled. If questions are ever added/reordered in the form, re-read the entry IDs from the form page and update `_FEEDBACK_FORM_ENTRIES`. Verified end-to-end 2026-10-20 (submission received + notification email). Completes former to-do "Feedback form link".
+
+**Files touched.** `app/main.py`, `app/assets/bug_icon.png`, `INFORMATION.md`.
+
+### 2026-10-20 — Fixed: NSD not recomputed when the WRR date changes on Tab 2; WRR ⓘ popup
+
+**NSD fix (affects analyses).** NSD per animal-year (`nsd_id_bio_year` / `displacement_id_bio_year`, plus `ref_x/ref_y_id_bio_year`) was computed only at Process Data (`calc_nsd` in `data_ingestion.py`), using Tab 1's WRR date; the reference location is the mean of each animal-year's first `n_ref_points` (20) fixes. Changing the WRR date on Tab 2 re-derived `id_bio_year` in `_seq_working_df` but not NSD, so the NSD graph's windows moved to the new date while distance was still measured from the *old* winter-range reference — skewing the NSD graph and NSD-based auto-detection. `_seq_working_df` now reruns `calc_nsd(group_col="id_bio_year")` whenever the WRR date differs from the one the NSD columns were last computed for (tracked in `df.attrs["nsd_wrr"]`; reruns once per freshly loaded df, then only on a change). It updates the cached processed df in place, consistent with how `bio_year`/`id_bio_year` were already updated. Verified on synthetic data: same date → identical NSD; changed date → NSD from the new reference, matching a fresh `calc_nsd`; changed back → original values restored. Completes former to-do "Recompute NSD when the WRR date changes on Tab 2".
+
+**WRR ⓘ popup.** The WRR date label on Tab 1 and Tab 2 now has an ⓘ (`_info_label(..., bold=True)`, body from `_wrr_info_body()`) explaining what the WRR date is, how it splits animal-years and anchors the NSD graph (mean of first 20 fixes on/after the date), the recommended dates, and to set it before identifying migrations. `_info_label` gained a `bold` option. Completes former to-do "WRR date info popup".
+
+**Files touched.** `app/main.py`, `INFORMATION.md`.
+
+### 2026-10-20 — Fixed: Resident / Nomadic / Insufficient animal-years could still be modeled
+
+**Question (to-do "Where are the insufficient-data animals going?").** On migtime export, animal-years classified Resident / Nomadic / Insufficient are (a) left out of the exported migtime CSV, (b) listed in `RemovedPoints/AnimalYearsRemoved.csv` with classification + notes, and (c) stamped with a `classification` value on their fixes in the saved processed data. But (c) is never used as a filter, and the exclusion in (a) only applied to the CSV copy — the in-memory migtime store keeps those rows (so Tab 2 can still show/re-classify them).
+
+**Bug.** Tab 3 Run Models (`_run_modeling_impl`: `extract_sequences`, per-individual UDs/footprints, `build_range_sequences` seasonal ranges, `write_mig_outputs` MigLines/MigPoints) and Tab 5's MigLines/MigPoints rebuild (`handle_export`) all read the in-memory store directly. So a removed animal-year that still had sequence dates (e.g. from Auto-detect All, or sequences placed before classifying it) was silently modeled and included in population outputs. Confirmed on synthetic data: before the fix, `extract_sequences` sequenced the insufficient and resident animal-years alongside the migratory one.
+
+**Fix.** New `_drop_removed_animal_years(migtime, class_store)` (next to `_REMOVED_CLASSIFICATIONS`) is now the single filter used by the migtime export, Run Models (logs "Excluded N animal-year(s)…" to the processing log), and Tab 5's MigLines/MigPoints rebuild. `run_modeling` and `handle_export` take `store-animal-classification` as State (falls back to the project's saved classifications if empty). Model outputs produced before this fix may include removed animal-years — re-run models for any herd where animal-years were classified out. The population grid extent still uses all fixes (extent only; no effect on UDs). Completes former to-do "Where are the insufficient-data animals going?".
+
+### 2026-10-20 — Migtime export: meaningful `reviewed` + new `classification` column
+
+**Reported:** every row of a migtime export had `reviewed = FALSE`, even animal-years the user had classified. **Cause:** `reviewed` was a placeholder — `build_migtime_table()` (`sequencing.py`) creates it FALSE and nothing during Tab 2 review ever set it (only the external-migtime importer set TRUE for every imported row). **Fix:** `_build_migtime_export_df()` (shared by manual export and autosave) now adds a `classification` column (from the Tab 2 radios: migratory / resident / nomadic / insufficient, else `unclassified`), placed just before `notes`, and sets `reviewed = TRUE` when the animal-year has a classification **or** at least one sequence (user's rule: having sequences counts as reviewed). An animal-year with sequences but no radio stays `classification = unclassified` and **is still modeled** — only Resident/Nomadic/Insufficient are excluded; a migratory radio with no sequences reads migratory/TRUE but has nothing to model. Blank-slot detection handles NaT/NaN/None and blank/"NaT" strings (pandas can stringify NaT to a float NaN, so `astype(str)` alone misread empty rows as having sequences). Since resident/nomadic/insufficient animal-years are moved to AnimalYearsRemoved.csv, the migtime export shows `migratory` or `unclassified`. Columns are added to a copy, not the live in-memory table. Rows imported from an external migtime CSV are no longer automatically `reviewed = TRUE` on export — they count as reviewed once classified. Verified on test2's export: 9 migratory/TRUE, 1,182 unclassified/FALSE, 15 removed. (`auto_detected` is still TRUE only for rows filled by Auto-detect All.)
+
+### 2026-10-20 — Fixed: road crossings dropped from notes for animal-years that also cross a highway
+
+**Investigation.** On the Test1 project, every migtime export since 2026-09-21 did carry a crossing phrase for every animal-year with a crossing, and `road_crossings.json` keys matched the migtime `id_bio_year`s exactly. The gap was the phrase itself: `_crossing_phrase()` still applied the old "highway supersedes road" rule, which only made sense while "road" was a superset of highway codes. Since road (S1400) and highway (S1100/S1200) became independent checks on 2026-09-02, any animal-year crossing both got only "Crosses highway." — in Test1 that hid the road crossing for 494 of 1,096 road-crossing animal-years.
+
+**Fix.** `_crossing_phrase()` now returns "Crosses road and highway." when both are true (user's choice of wording), else "Crosses highway." / "Crosses road." as before. `_compose_notes()` strips any prior phrase from `_CROSSING_PHRASES` (looping, longest first) so re-exports never double up. Applies to the migtime export, autosave, and AnimalYearsRemoved notes (all share these helpers). Rebuilding Test1's latest export: 493 "Crosses road and highway.", 8 "Crosses highway.", 602 "Crosses road." (the 494th both-crosser is a removed animal-year). Tab 1's road-crossing ⓘ text updated to describe all three phrases. Also: the background crossing-detection threads (Process Data and the Tab 2 WRR refresh) used to swallow errors silently, leaving exports with no crossings and no hint why; they now log a warning to the server console. Completes former to-do "Road/highway crossings missing from exported notes".
+
+### 2026-10-18 — WRR date rename, CaptureDAU herd ID, Tab 2 sequence hints, browser opens on top
+
+**Winter Range Reference Date (WRR date).** The bio-/mig-year start setting is now labelled "Winter Range Reference Date (WRR date)" on Tab 1, Tab 2 and the migtime-import dialog (bold on Tabs 1 and 2), with the note "Recommended: Mule deer 2/1 (February 1st), Elk 2/15". In outputs: `MigLines.shp`'s `tempStartM`/`tempStartD` are replaced by a single `wrr_date` text column (`MM-DD`; shapefile field names cap at 10 chars), and every migtime CSV export/autosave now carries a `wrr_start_date` column. Load Previous Table reads it back and sets Tab 2's WRR date inputs (older exports without it load unchanged); the external-import sniffer also recognises it. `Mig_Start`/`Mig_End` (actual sequence dates) are unchanged. Completes former to-do "Rename Mig start date".
+
+**Herd ID from `CaptureDAU`.** `herd_id` candidate order is now `CaptureDAU`, `captureDau`, `CptrDAU`, then `DAU`/`dau`, then `Project`/`project_name`. Completes former to-do "DAU from CaptureDAU".
+
+**Tab 2 sequence settings.** "Max Sequences" and "Sequence Names" labels are bold; "Recommended: 4" sits between the Max Sequences label and box; each of the first four sequence-name boxes shows "Recommended: Spring / Summer / Fall / Winter" beneath it. The Load Previous Table ⓘ now names the folder (`<working directory>/ModelOutputs/Migtime_Exports`). Completes former to-dos "Sequence names note" and "Re-load mig tables note".
+
+**Browser opens on top of the server terminal again.** Since 2026-09-01 `Start App.bat` opened the browser itself (with `MCM_NO_BROWSER=1`), and Windows' focus-stealing rules kept it behind the freshly created server window. `main.py` now opens the browser from the server process once the server answers (polls up to 60 s), and `Start App.bat` only waits to report a startup failure. The app opens in the Windows default browser (`webbrowser`'s `windows-default`); users who get Edge have Edge set as their Windows default.
+
+**Tab 1: Project card moved below Select or Upload Data.** Layout-only swap (Working Directory → Select or Upload Data → Project → Column Mapping); component IDs and callbacks unchanged. Completes former to-do "Tab 1: move the Project section after Upload Data".
+
+**Working-directory Browse uses Windows' modern folder picker, on top of the browser.** Background: the original picker was tkinter's `askdirectory` in a subprocess; the 2026-07-09 switch to bundled embeddable Python (no tkinter) broke it, and the 2026-07-14 fix searched for a separately installed Python and otherwise fell back to PowerShell's tree-style `Shell.Application.BrowseForFolder` (hwnd 0, so it often opened *behind* the browser). Most users have no system Python, so they always got the tree dialog. Now `_pick_directory_native()` runs `_FOLDER_PICKER_PS` via `powershell -STA -EncodedCommand`: an inline C# shim (`Add-Type`) drives `IFileOpenDialog` with `FOS_PICKFOLDERS` — the File Explorer-style "Select Folder" dialog (address bar, Quick Access, search) — opened in the current working directory and owned by an invisible TopMost WinForms form so it appears above the browser. No system Python needed; `_find_system_python()` and the "install Python" console note are removed. If that dialog can't open (non-zero exit with no path, e.g. a locked-down PC blocking `Add-Type`), it falls back to `_FOLDER_PICKER_FALLBACK_PS` — the tree dialog, now also given a TopMost owner (or hwnd 0 if even that is blocked). Cancel in either returns None (no change). Verified on the dev machine: modern picker works; fallback opens on top of the browser. Untested on locked-down CPW machines. Completes former to-do "Working directory browse dialog pops up behind the browser".
+
+**Fixed: undefined `logger` in the line-buffer heatmap error path.** `_build_linebuffer_output()`'s heatmap `except` called `logger.warning(...)`, but `main.py` never defines `logger` — so a heatmap failure raised `NameError`, the outer handler logged "Line buffer output FAILED: name 'logger' is not defined" (hiding the real cause), and the step's summary log lines were skipped even though the raw/dissolved line-buffer shapefiles had already been written. Now uses `logging.getLogger(__name__)`, so a heatmap failure is a warning and the step completes.
+
+**Files touched.** `app/main.py`, `app/modules/data_ingestion.py`, `app/modules/population_outputs.py`, `Start App.bat`, `INFORMATION.md`.
+
+### 2026-10-08 — Fixed: average/median start-end dates skewed by multi-year date math and non-circular day-of-year averaging
+
+**Reported:** a herd's `SequencesSummary.csv` showed `average_start [Fall]` per-year values that all looked right (13-Oct, 24-Oct, 16-Oct, 21-Oct, 19-Oct, 26-Sep across 2020–2025) but an `All_Years` value of **11-Dec** — months later than any individual year.
+
+**Root cause #1 — `SequencesSummary.csv`'s `average_start`/`median_start`/`average_end`/`median_end` (`All_Years` column):** `_median_avg_mmdd()` picked `ref = min(dates)` (the single earliest *actual* date across every pooled bio-year, e.g. 13-Oct-2020) and averaged `(d - ref).days`. Within one bio-year this is harmless — all the dates are only days apart. Pooled across bio-years for `All_Years`, a 2025 start date isn't "~13 days into fall," it's "~1,800 days since 13-Oct-2020" (it also carries ~5 years of elapsed time). Averaging those inflated offsets and adding the result back onto the 2020 reference date lands the "average" months in the future.
+
+**Root cause #2 — main `MigMetadata.csv`'s `mean_start_fall`/`mean_end_fall`/`mean_start_spring`/`mean_end_spring`:** `_mean_mmdd()` already stripped the calendar year (day-of-year only), so it didn't have root cause #1's multi-year drift problem — but it averaged day-of-year with a plain linear mean, which breaks for any season whose dates straddle New Year's Eve (e.g. a fall sequence that doesn't end until early January). Late-Dec and early-Jan dates are only days apart on the calendar, but a linear average treats Jan as if it came nearly a full year after Dec, pulling the average toward mid-year (e.g. June) instead of late Dec/early Jan.
+
+**Fix:** both helpers in `population_outputs.py` now convert each date to day-of-year (month/day only, calendar year discarded) and compute a **circular mean** (treat day-of-year as an angle around a 365-day circle, average via sin/cos, `atan2` back to a day) instead of a linear mean. `_median_avg_mmdd()`'s median also went circular (rotate to the largest gap between points, then take the ordinary median of the unrolled values). This fixes the multi-year-pooling bug (root cause #1) and also makes both functions correct for any season that spans New Year's Eve (root cause #2), without changing the already-correct single-year/non-wrapping results.
+
+**Scope:** affects every row that goes through these two helpers — `SequencesSummary.csv`'s `average_start`/`median_start`/`average_end`/`median_end` for every season, in every bio-year column *and* `All_Years` (though only `All_Years` was actually wrong before, since per-year pools don't span multiple years); and `MigMetadata.csv`'s `mean_start_*`/`mean_end_*` for every season. Only affects output written by `write_herd_metadata()` going forward — existing CSVs already on disk keep the old (wrong) `All_Years`/`mean_*` values until the herd is re-run.
+
+**Files touched.** `app/modules/population_outputs.py`, `INFORMATION.md`.
 
 ### 2026-09-21 — Road/highway crossings follow the mig-year start; migtime autosave; UI polish
 

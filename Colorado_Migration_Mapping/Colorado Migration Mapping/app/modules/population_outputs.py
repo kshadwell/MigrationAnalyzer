@@ -287,10 +287,13 @@ def calc_population_use(
         - ``['year', 'id']``: average each year across individuals first,
           then average across years.
     contour_type : str
-        ``'Area'``  – contour level = % of individuals whose UD > 0 at cell.
-        ``'Volume'`` – contour level = % of total UD volume.
+        ``'Area'``  – contour level = % of individuals whose UD > 0 at cell
+        (5 → cells used by at least 5 % of individuals; lower = larger).
+        ``'Volume'`` – contour level = volume isopleth of the mean population
+        UD, as in home-range contours (95 → smallest area holding 95 % of
+        use; higher = larger).
     contour_levels : list of float
-        Contour percentage levels (e.g. 50 → 50 % isopleths).
+        Contour percentage levels, interpreted per ``contour_type``.
     min_area_drop : float
         Minimum polygon area in CRS units (metres² if projected).
         Polygons smaller than this are removed.
@@ -307,7 +310,8 @@ def calc_population_use(
     Returns
     -------
     GeoDataFrame
-        Columns: ``contour``, ``geometry``, ``area_km2``.
+        Columns: ``contour``, ``ctype`` (``'Area'``/``'Volume'``),
+        ``geometry``, ``area_km2``.
     """
     transform = grid_meta["transform"]
     src_crs = CRS.from_user_input(grid_meta["crs"])
@@ -363,7 +367,10 @@ def calc_population_use(
     if contour_type == "Area":
         # Proportion of layers with UD > 0 at each cell × 100
         presence = (stack > 0).sum(axis=0) / n_layers * 100.0
-        prop_grid = presence
+        rows = _contours_from_grid(
+            presence, transform, list(contour_levels),
+            min_area_drop, min_area_fill, simplify, smooth_bandwidth,
+        )
     elif contour_type == "Volume":
         # Normalise each layer to sum-to-1 in-place, then accumulate into a
         # 2-D sum to avoid allocating a second full 3-D array.
@@ -374,22 +381,35 @@ def calc_population_use(
             if total > 0:
                 stack[i] /= total
             summed += stack[i]
-        # cumulative volume from highest to lowest
+        # The sum of N unit layers totals N; rescale to 1 so cumulative volume
+        # runs 0–1. (Without this, everything past the top 1/N of volume
+        # clipped to 0 and multi-animal Volume contours came out far too small.)
+        grand = summed.sum()
+        if grand > 0:
+            summed /= grand
+        # Cumulative volume from the highest-use cell down: a cell is inside
+        # the L% isopleth when cum_vol <= L/100. _contours_from_grid keeps
+        # cells >= threshold, so contour 100 - cum_vol*100 at 100 - L and
+        # label the result L.
         flat = summed.ravel()
         order = np.argsort(flat)[::-1]
         cumsum = np.cumsum(flat[order])
-        rank = np.empty_like(cumsum)
-        rank[order] = cumsum
-        prop_grid = (1.0 - rank.reshape(summed.shape)) * 100.0
-        prop_grid = np.clip(prop_grid, 0, 100)
+        cum_vol = np.empty_like(cumsum)
+        cum_vol[order] = cumsum
+        inv_grid = np.clip((1.0 - cum_vol.reshape(summed.shape)) * 100.0, 0, 100)
+        inv_rows = _contours_from_grid(
+            inv_grid, transform, [100.0 - lvl for lvl in contour_levels],
+            min_area_drop, min_area_fill, simplify, smooth_bandwidth,
+        )
+        rows = [{**r, "contour": 100.0 - r["contour"]} for r in inv_rows]
     else:
         raise ValueError(f"contour_type must be 'Area' or 'Volume', got {contour_type!r}")
 
-    rows = _contours_from_grid(
-        prop_grid, transform, list(contour_levels),
-        min_area_drop, min_area_fill, simplify, smooth_bandwidth,
-    )
-    return _build_geodataframe(rows, src_crs, out_crs)
+    gdf = _build_geodataframe(rows, src_crs, out_crs)
+    # Tag the contour type so outputs (and the Tab 5 map shading) can tell a
+    # "5" = 5 % of animals apart from a "95" = 95 % volume isopleth.
+    gdf.insert(1, "ctype", contour_type)
+    return gdf
 
 
 # ---------------------------------------------------------------------------
@@ -537,13 +557,16 @@ def generate_metadata_summary(
         "bandwidth":    config.get("bandwidth",   model_results.get("bandwidth",    "Unknown")),
         "merge_order":  config.get("merge_order",  model_results.get("merge_order",  "Unknown")),
         "contour_type": config.get("contour_type", model_results.get("contour_type", "Unknown")),
+        # Area levels (% of animals) — footprints, and use contours when Area.
         "contour_levels": config.get("contour_levels", model_results.get("contour_levels", "Unknown")),
+        # Volume isopleth levels (95 = 95 % of use) — use contours when Volume.
+        "volume_levels": config.get("volume_levels", model_results.get("volume_levels")),
         "min_area_drop": config.get("min_area_drop", model_results.get("min_area_drop", "Unknown")),
         "min_area_fill": config.get("min_area_fill", model_results.get("min_area_fill", "Unknown")),
         "smooth_bandwidth": config.get("smooth_bandwidth", model_results.get("smooth_bandwidth", "Unknown")),
         **{k: v for k, v in model_results.items()
            if k not in ("kernel_type", "bandwidth", "merge_order",
-                        "contour_type", "contour_levels", "min_area_drop",
+                        "contour_type", "contour_levels", "volume_levels", "min_area_drop",
                         "min_area_fill", "smooth_bandwidth")},
     }
 
@@ -1364,12 +1387,30 @@ def write_herd_metadata(
 
     # ----- Per-season mean start / end dates -----------------------------------
     def _mean_mmdd(dts):
+        # Pools dates across every bio-year for this season, so the year is
+        # stripped off first (day-of-year only). That alone isn't enough: a
+        # plain numeric average of day-of-year still breaks for any season
+        # whose dates straddle New Year's Eve (e.g. a fall sequence that
+        # doesn't end until early January) — late Dec and early Jan are only
+        # a few days apart on the calendar, but a linear average treats them
+        # as if they were nearly a full year apart. Use a circular mean
+        # (treat day-of-year as an angle around a circle) so it wraps correctly.
         dts = [t for t in dts if pd.notna(t)]
         if not dts:
             return "NA"
-        ord_days = [int(t.timetuple().tm_yday) for t in dts]
-        avg = int(round(np.mean(ord_days)))
-        d = _dt.date(2025, 1, 1) + _dt.timedelta(days=avg - 1)
+        NDAYS = 365.0
+
+        def _doy(t):
+            month, day = t.month, t.day
+            if month == 2 and day == 29:
+                day = 28
+            return (_dt.date(2001, month, day) - _dt.date(2001, 1, 1)).days
+
+        angles = [_doy(t) / NDAYS * 2 * np.pi for t in dts]
+        sin_mean = np.mean(np.sin(angles))
+        cos_mean = np.mean(np.cos(angles))
+        avg_doy = (np.arctan2(sin_mean, cos_mean) / (2 * np.pi)) % 1.0 * NDAYS
+        d = _dt.date(2001, 1, 1) + _dt.timedelta(days=int(round(avg_doy)) % int(NDAYS))
         return d.strftime("%m/%d")
 
     for label, abbrev in season_abbrevs:
@@ -1534,11 +1575,55 @@ def write_herd_metadata(
                     row_data[f"earliest_start [{season}]"][yr] = _fmt_date(starts[0]) if starts else "NA"
                     row_data[f"latest_start [{season}]"][yr] = _fmt_date(starts[-1]) if starts else "NA"
                     def _median_avg_mmdd(dates):
-                        ref = min(dates)
-                        offsets = sorted((d - ref).days for d in dates)
-                        med = ref + _dt.timedelta(days=offsets[len(offsets) // 2])
-                        avg = ref + _dt.timedelta(days=int(round(np.mean(offsets))))
-                        return med.strftime("%m/%d"), avg.strftime("%m/%d")
+                        # Average/median "day of the season" using only month/day,
+                        # with the calendar year stripped off. Dates are pooled
+                        # across multiple bio-years in the All_Years column, so
+                        # anchoring to the single earliest *actual* date (as a
+                        # plain (d - ref).days offset) lets multi-year gaps leak
+                        # into the average and drag it months off. Instead, map
+                        # every date onto a 365-day circle (month/day only) and
+                        # use circular statistics, which also keeps a season that
+                        # straddles New Year's (e.g. Dec->Jan) from averaging to
+                        # the wrong side of the year.
+                        NDAYS = 365.0
+
+                        def _doy(d):
+                            # Day-of-year on a fixed non-leap calendar so Feb 29
+                            # doesn't shift everything after it by a day.
+                            month, day = d.month, d.day
+                            if month == 2 and day == 29:
+                                day = 28
+                            return (_dt.date(2001, month, day) - _dt.date(2001, 1, 1)).days
+
+                        doys = [_doy(d) for d in dates]
+                        angles = [doy / NDAYS * 2 * np.pi for doy in doys]
+                        sin_mean = np.mean(np.sin(angles))
+                        cos_mean = np.mean(np.cos(angles))
+                        avg_doy = (np.arctan2(sin_mean, cos_mean) / (2 * np.pi)) % 1.0 * NDAYS
+
+                        # Circular median: rotate so the largest gap between
+                        # consecutive points sits at the "seam," then take the
+                        # ordinary median of the unrolled values.
+                        sorted_doys = sorted(doys)
+                        n = len(sorted_doys)
+                        if n == 1:
+                            med_doy = float(sorted_doys[0])
+                        else:
+                            gaps = [
+                                (sorted_doys[(i + 1) % n] - sorted_doys[i]) % NDAYS
+                                for i in range(n)
+                            ]
+                            seam = int(np.argmax(gaps))
+                            rotated = sorted_doys[seam + 1:] + sorted_doys[: seam + 1]
+                            base = rotated[0]
+                            unrolled = sorted([(v - base) % NDAYS for v in rotated])
+                            med_doy = (base + unrolled[n // 2]) % NDAYS
+
+                        def _fmt_doy(doy):
+                            base = _dt.date(2001, 1, 1) + _dt.timedelta(days=int(round(doy)) % int(NDAYS))
+                            return base.strftime("%m/%d")
+
+                        return _fmt_doy(med_doy), _fmt_doy(avg_doy)
                     if starts:
                         med_s, avg_s = _median_avg_mmdd(starts)
                         row_data[f"median_start [{season}]"][yr] = med_s
@@ -1863,7 +1948,8 @@ def write_mig_outputs(
         (``["Spring", "Fall", ...]``). Used to map each sequence back to
         its ``"mig1".."mig8"`` slot for the ``Mig`` column.
     bio_year_start_month, bio_year_start_day:
-        Bio-year anchor for the ``tempStartM`` / ``tempStartD`` columns.
+        Winter Range Reference (WRR) date, written as the ``wrr_date``
+        column (``"MM-DD"``; shapefile field names cap at 10 chars).
     target_crs:
         Optional CRS to reproject all outputs into. Defaults to whatever
         the sequence geometries are already in.
@@ -1946,8 +2032,7 @@ def write_mig_outputs(
             "newUid": animal_id,
             "bioYear": int(bio_year_2digit),
             "bioYearFul": int(bio_year_full),
-            "tempStartD": int(bio_year_start_day),
-            "tempStartM": int(bio_year_start_month),
+            "wrr_date": f"{int(bio_year_start_month):02d}-{int(bio_year_start_day):02d}",
             "Mig_Start": mig_start_str,
             "Mig_End": mig_end_str,
             "Duration": round(float(duration_days), 4),

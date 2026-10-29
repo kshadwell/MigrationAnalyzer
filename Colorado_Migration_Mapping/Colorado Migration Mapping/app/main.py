@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import math
 import os
 import sys
 import tempfile
@@ -75,7 +76,7 @@ except ImportError:
 #         silent crash at startup. Useful for diagnosing install problems.
 # ---------------------------------------------------------------------------
 try:
-    from app.modules.data_ingestion import DEFAULT_CONFIG, process_data
+    from app.modules.data_ingestion import APP_DOWNLOAD_COLUMN_MAP, DEFAULT_CONFIG, calc_nsd, process_data
     from app.modules.sequencing import (
         apply_auto_detections,
         build_migtime_table,
@@ -131,7 +132,7 @@ try:
     )
 except ImportError:
     try:
-        from modules.data_ingestion import DEFAULT_CONFIG, process_data
+        from modules.data_ingestion import APP_DOWNLOAD_COLUMN_MAP, DEFAULT_CONFIG, calc_nsd, process_data
         from modules.sequencing import (
             apply_auto_detections,
             build_migtime_table,
@@ -206,6 +207,7 @@ except ImportError:
             raise NotImplementedError("wld_reader module not found")
         def merge_wld_to_gps(gps_df, *a, **k):
             return gps_df
+        APP_DOWNLOAD_COLUMN_MAP = {}
         DEFAULT_CONFIG = {
             "animal_id_col": "LoclAID",
             "timestamp_col": "DT_MST",
@@ -220,6 +222,9 @@ except ImportError:
 
         def process_data(filepath, config=None):
             raise NotImplementedError("data_ingestion module not found")
+
+        def calc_nsd(df, *a, **k):
+            return df
 
         def detect_migrations_nsd(*a, **k):
             raise NotImplementedError("sequencing module not found")
@@ -458,6 +463,23 @@ _CLASSIFICATION_NOTE = {
 # Classifications whose animal-years are dropped from the analysis on export
 # (removed from the migtime table, archived to AnimalYearsRemoved.csv).
 _REMOVED_CLASSIFICATIONS = ("resident", "nomadic", "insufficient")
+
+
+def _drop_removed_animal_years(migtime: pd.DataFrame, class_store: dict | None = None):
+    """Drop animal-years classified Resident / Nomadic / Insufficient from a
+    migtime table. Returns (filtered_copy, removed_keys).
+
+    Every analysis path must go through this — not just the migtime CSV export.
+    The in-memory migtime store keeps those rows (so Tab 2 can still show and
+    re-classify them), and Run Models / MigLines used to read the store
+    directly, so a removed animal-year that still had sequence dates was
+    silently modeled. *class_store* is the Tab 2 classification store; if None,
+    the active project's saved classifications are read from disk."""
+    store = class_store if class_store is not None else _load_classifications()
+    removed_keys = {str(k) for k, v in (store or {}).items() if v in _REMOVED_CLASSIFICATIONS}
+    if removed_keys and "id_bio_year" in migtime.columns:
+        migtime = migtime[~migtime["id_bio_year"].astype(str).isin(removed_keys)].copy()
+    return migtime, removed_keys
 
 
 _ROAD_LOCK = threading.Lock()
@@ -1020,79 +1042,184 @@ def _remember_workdir(path: Path) -> None:
         pass
 
 
-def _find_system_python() -> str | None:
-    """Find a system Python that has tkinter (the bundled embed lacks it)."""
-    import shutil, subprocess as _sp
-    candidates = [
-        r"C:\Program Files\Python313\python.exe",
-        r"C:\Program Files\Python312\python.exe",
-        r"C:\Program Files\Python311\python.exe",
-        r"C:\Program Files (x86)\Python313\python.exe",
-        shutil.which("python") or "",
-        shutil.which("python3") or "",
-    ]
-    for p in candidates:
-        if not (p and os.path.isfile(p) and os.path.normcase(p) != os.path.normcase(sys.executable)):
-            continue
-        try:
-            r = _sp.run([p, "-c", "import tkinter"], capture_output=True, timeout=10)
-            if r.returncode == 0:
-                return p
-        except Exception:
-            continue
-    return None
+# Windows' modern "Select Folder" dialog (IFileOpenDialog + FOS_PICKFOLDERS) —
+# the File Explorer-style picker with an address bar, Quick Access and search.
+# Driven from PowerShell via a small inline C# COM shim, so it needs nothing
+# beyond stock Windows (the bundled embeddable Python lacks tkinter, which is
+# why this used to depend on a separately installed Python and otherwise fell
+# back to the old tree-style BrowseForFolder dialog). The dialog is owned by an
+# invisible TopMost form so it opens ON TOP of the browser instead of behind
+# it. Start folder / title arrive via env vars to avoid command-line quoting.
+_FOLDER_PICKER_PS = r'''
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+[ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IShellItem {
+    void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+    void GetParent(out IShellItem ppsi);
+    void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+    void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+    void Compare(IShellItem psi, uint hint, out int piOrder);
+}
+
+[ComImport, Guid("42F85136-DB7E-439C-85F1-E4075D135FC8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IFileDialog {
+    [PreserveSig] int Show(IntPtr parent);
+    void SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);
+    void SetFileTypeIndex(uint iFileType);
+    void GetFileTypeIndex(out uint piFileType);
+    void Advise(IntPtr pfde, out uint pdwCookie);
+    void Unadvise(uint dwCookie);
+    void SetOptions(uint fos);
+    void GetOptions(out uint pfos);
+    void SetDefaultFolder(IShellItem psi);
+    void SetFolder(IShellItem psi);
+    void GetFolder(out IShellItem ppsi);
+    void GetCurrentSelection(out IShellItem ppsi);
+    void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+    void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);
+    void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+    void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);
+    void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+    void GetResult(out IShellItem ppsi);
+}
+
+[ComImport, Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
+public class FileOpenDialogCoClass {}
+
+public static class MCMFolderPicker {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+    static extern void SHCreateItemFromParsingName(string pszPath, IntPtr pbc, ref Guid riid, out IShellItem ppv);
+
+    const uint FOS_NOCHANGEDIR = 0x8, FOS_PICKFOLDERS = 0x20, FOS_FORCEFILESYSTEM = 0x40;
+    const uint SIGDN_FILESYSPATH = 0x80058000;
+
+    public static string Pick(IntPtr owner, string title, string startDir) {
+        IFileDialog dlg = (IFileDialog)new FileOpenDialogCoClass();
+        uint opts;
+        dlg.GetOptions(out opts);
+        dlg.SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR);
+        dlg.SetTitle(title);
+        if (!String.IsNullOrEmpty(startDir) && System.IO.Directory.Exists(startDir)) {
+            try {
+                Guid iid = typeof(IShellItem).GUID;
+                IShellItem start;
+                SHCreateItemFromParsingName(startDir, IntPtr.Zero, ref iid, out start);
+                dlg.SetFolder(start);
+            } catch { }
+        }
+        if (dlg.Show(owner) != 0) return null;   // cancelled (or failed)
+        IShellItem item;
+        dlg.GetResult(out item);
+        string path;
+        item.GetDisplayName(SIGDN_FILESYSPATH, out path);
+        return path;
+    }
+}
+"@
+
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.ShowInTaskbar = $false
+$owner.FormBorderStyle = 'None'
+$owner.Opacity = 0
+$owner.StartPosition = 'CenterScreen'
+$owner.Size = New-Object System.Drawing.Size(1, 1)
+$owner.Show()
+$owner.Activate()
+try {
+    $p = [MCMFolderPicker]::Pick($owner.Handle, $env:MCM_PICKER_TITLE, $env:MCM_PICKER_START)
+    if ($p) { [Console]::Out.Write($p) }
+} finally {
+    $owner.Close()
+}
+'''
 
 
-def _pick_directory_native() -> str | None:
-    """Open a native folder-picker dialog. Returns the chosen path or None.
+# Fallback: the old tree-style BrowseForFolder dialog (no compilation needed).
+# Given the same invisible TopMost owner form so it opens ON TOP of the browser
+# — with no owner (hwnd 0) it lands behind the browser, which is what users
+# complained about. If the owner form can't be created (very locked-down PCs),
+# it still opens, just without an owner.
+_FOLDER_PICKER_FALLBACK_PS = r'''
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$owner = $null
+$hwnd = 0
+try {
+    Add-Type -AssemblyName System.Windows.Forms
+    $owner = New-Object System.Windows.Forms.Form
+    $owner.TopMost = $true
+    $owner.ShowInTaskbar = $false
+    $owner.FormBorderStyle = 'None'
+    $owner.Opacity = 0
+    $owner.StartPosition = 'CenterScreen'
+    $owner.Size = New-Object System.Drawing.Size(1, 1)
+    $owner.Show()
+    $owner.Activate()
+    $hwnd = [int64]$owner.Handle
+} catch { $hwnd = 0 }
+try {
+    $shell = New-Object -ComObject Shell.Application
+    $folder = $shell.BrowseForFolder($hwnd, $env:MCM_PICKER_TITLE, 0x40, 0)
+    if ($folder) { [Console]::Out.Write($folder.Self.Path) }
+} finally {
+    if ($owner) { $owner.Close() }
+}
+'''
 
-    Uses the system Python (with tkinter) in a subprocess — the bundled
-    embeddable Python does not include tkinter.
-    """
+
+def _pick_directory_native(start_dir: str | None = None) -> str | None:
+    """Open Windows' File Explorer-style folder picker (falling back to the
+    old tree-style dialog if it can't open). Returns the chosen path, or None
+    if the user cancelled.
+
+    *start_dir* (e.g. the current working directory) is where the dialog
+    opens; ignored if it doesn't exist."""
+    import base64
+    import logging as _logging
     import subprocess
-    code = (
-        "import tkinter as tk, sys\n"
-        "from tkinter import filedialog\n"
-        "root = tk.Tk()\n"
-        "root.withdraw()\n"
-        "root.attributes('-topmost', True)\n"
-        "path = filedialog.askdirectory(title='Choose project working directory')\n"
-        "root.destroy()\n"
-        "sys.stdout.write(path or '')\n"
-    )
-    sys_py = _find_system_python()
-    if sys_py:
-        try:
-            result = subprocess.run(
-                [sys_py, "-c", code],
-                capture_output=True, text=True, timeout=300,
-            )
-            chosen = result.stdout.strip()
-            if chosen:
-                return chosen
-        except Exception:
-            pass
-
-    # Fallback: PowerShell folder picker (less convenient tree-style dialog)
-    print(
-        "NOTE: For a better folder picker, install Python 3.11+ from "
-        "python.org (full installer, not embeddable). The app will "
-        "automatically detect it and use the File Explorer dialog."
-    )
-    ps_code = (
-        "$shell = New-Object -ComObject Shell.Application; "
-        "$folder = $shell.BrowseForFolder(0, 'Choose project working directory', 0x40, 0); "
-        "if ($folder) { Write-Host $folder.Self.Path -NoNewline }"
-    )
+    _log = _logging.getLogger(__name__)
+    env = dict(os.environ)
+    env["MCM_PICKER_TITLE"] = "Choose project working directory"
+    env["MCM_PICKER_START"] = str(start_dir or "")
+    # -EncodedCommand (base64 UTF-16LE) sidesteps all quoting of the script.
+    encoded = base64.b64encode(_FOLDER_PICKER_PS.encode("utf-16-le")).decode("ascii")
     try:
         result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_code],
-            capture_output=True, text=True, timeout=300,
+            ["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
+             "-EncodedCommand", encoded],
+            capture_output=True, timeout=600, env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        chosen = result.stdout.strip()
-        return chosen or None
+    except Exception as exc:
+        _log.warning("Folder picker failed to launch: %s", exc)
+        return None
+    chosen = result.stdout.decode("utf-8", errors="replace").strip().lstrip("﻿")
+    if chosen:
+        return chosen
+    if result.returncode == 0:
+        return None  # user cancelled
+    # The modern dialog couldn't open (e.g. a locked-down PC that blocks
+    # PowerShell's Add-Type). Fall back to the old tree-style picker, which
+    # needs no compilation, so Browse still works everywhere.
+    _log.warning("Folder picker error, using fallback dialog: %s",
+                 result.stderr.decode("utf-8", errors="replace").strip()[:500])
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
+             "-EncodedCommand",
+             base64.b64encode(_FOLDER_PICKER_FALLBACK_PS.encode("utf-16-le")).decode("ascii")],
+            capture_output=True, timeout=600, env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
     except Exception:
         return None
+    return result.stdout.decode("utf-8", errors="replace").strip().lstrip("﻿") or None
 
 
 # ===========================================================================
@@ -1258,27 +1385,50 @@ def _build_loaded_project_summary(df: pd.DataFrame, project_name: str, meta: dic
     ])
 
 
-def _make_preview_table(df: pd.DataFrame, max_rows: int = 20) -> dash_table.DataTable:
-    preview = df.head(max_rows).copy()
+# Tab 1 preview table: the full DataFrame stays server-side and the table uses
+# custom (server-side) paging, so only the current page is sent to the browser.
+# Set by _make_preview_table; read by page_tab1_preview.
+_TAB1_PREVIEW_DF: pd.DataFrame | None = None
+_TAB1_PREVIEW_PAGE_SIZE = 25
+
+
+def _preview_display_cols(df: pd.DataFrame) -> list[str]:
     # Drop geopandas' geometry column — its Shapely values aren't JSON-serialisable
     # and Dash chokes when sending the preview to the browser. (The lon/lat
     # columns already carry the coords; this is a tabular preview, not a map.)
-    drop_cols = [
-        c for c in preview.columns
-        if c == "geometry" or str(preview[c].dtype) == "geometry"
+    return [
+        c for c in df.columns
+        if c != "geometry" and str(df[c].dtype) != "geometry"
     ]
-    if drop_cols:
-        preview = preview.drop(columns=drop_cols)
-    # Convert remaining non-serialisable types to strings.
-    for col in preview.columns:
-        if pd.api.types.is_datetime64_any_dtype(preview[col]):
-            preview[col] = preview[col].astype(str)
-        elif preview[col].dtype == object:
-            preview[col] = preview[col].astype(str)
-    return dash_table.DataTable(
-        data=preview.to_dict("records"),
-        columns=[{"name": c, "id": c} for c in preview.columns],
-        page_size=10,
+
+
+def _preview_page_records(df: pd.DataFrame, page: int) -> list[dict]:
+    start = max(int(page or 0), 0) * _TAB1_PREVIEW_PAGE_SIZE
+    chunk = df.iloc[start:start + _TAB1_PREVIEW_PAGE_SIZE][_preview_display_cols(df)].copy()
+    # Convert non-serialisable types to strings.
+    for col in chunk.columns:
+        if pd.api.types.is_datetime64_any_dtype(chunk[col]):
+            chunk[col] = chunk[col].astype(str)
+        elif chunk[col].dtype == object:
+            chunk[col] = chunk[col].astype(str)
+    return chunk.to_dict("records")
+
+
+def _make_preview_table(df: pd.DataFrame, note: str | None = None) -> html.Div:
+    global _TAB1_PREVIEW_DF
+    _TAB1_PREVIEW_DF = df
+    n_pages = max(math.ceil(len(df) / _TAB1_PREVIEW_PAGE_SIZE), 1)
+    caption = f"{len(df):,} rows · {_TAB1_PREVIEW_PAGE_SIZE} per page"
+    if note:
+        caption += f" · {note}"
+    table = dash_table.DataTable(
+        id="tab1-preview-table",
+        data=_preview_page_records(df, 0),
+        columns=[{"name": c, "id": c} for c in _preview_display_cols(df)],
+        page_action="custom",
+        page_current=0,
+        page_size=_TAB1_PREVIEW_PAGE_SIZE,
+        page_count=n_pages,
         style_table={"overflowX": "auto"},
         style_cell={
             "backgroundColor": "#2a2a2a",
@@ -1294,6 +1444,10 @@ def _make_preview_table(df: pd.DataFrame, max_rows: int = 20) -> dash_table.Data
             "color": "#aef",
         },
     )
+    return html.Div([
+        html.Small(caption, className="text-muted d-block mb-1"),
+        table,
+    ])
 
 
 # ===========================================================================
@@ -1335,7 +1489,22 @@ navbar = dbc.Navbar(
                         style={
                             "background": "none", "border": "1px solid #9fdc9f",
                             "color": "#9fdc9f", "borderRadius": "4px", "padding": "4px 12px",
-                            "cursor": "pointer", "fontSize": "0.85rem", "marginRight": "8px",
+                            "cursor": "pointer", "fontSize": "0.85rem",
+                        },
+                    ),
+                    # Report a bug / recommendation — opens feedback_modal.
+                    html.Button(
+                        html.Img(
+                            src=app.get_asset_url("bug_icon.png"),
+                            alt="Report a bug",
+                            style={"height": "22px", "display": "block"},
+                        ),
+                        id="feedback-btn",
+                        title="Report a bug or send a recommendation",
+                        style={
+                            "background": "none", "border": "1px solid #7ecfff",
+                            "borderRadius": "4px", "padding": "2px 8px",
+                            "cursor": "pointer", "display": "flex", "alignItems": "center",
                         },
                     ),
                     html.Button(
@@ -1348,7 +1517,7 @@ navbar = dbc.Navbar(
                         },
                     ),
                 ],
-                style={"display": "flex", "alignItems": "center"},
+                style={"display": "flex", "alignItems": "stretch", "gap": "8px"},
             ),
         ],
         fluid=True,
@@ -1437,6 +1606,127 @@ update_modal = dbc.Modal(
     centered=True,
 )
 
+# ---------------------------------------------------------------------------
+# Report a bug / recommendation popup → Google Form.
+# Each submission is POSTed to the form's formResponse endpoint (the form
+# emails the owner on every new response and keeps a response sheet). Fill
+# these in from the form's "Get pre-filled link": the URL's
+# /forms/d/e/<ID>/viewform becomes .../formResponse, and each
+# entry.<number>= parameter maps to one question below. If the form isn't set
+# up yet or the POST fails (e.g. offline), the popup offers a pre-filled email
+# to _FEEDBACK_FALLBACK_EMAIL instead so no report is lost.
+# ---------------------------------------------------------------------------
+_FEEDBACK_FORM_URL = (       # "MAA Edits Recommendations" form
+    "https://docs.google.com/forms/d/e/"
+    "1FAIpQLSdsCuDJVVnh2PxBgRtqC-wRqVtGrQ3LVvbDCRRixJz1Ya7AnA/formResponse"
+)
+_FEEDBACK_FORM_ENTRIES = {   # question -> "entry.<number>"
+    "type": "entry.188604909",
+    "name": "entry.1785287608",
+    "email": "entry.1735787717",
+    "tab": "entry.671740351",
+    "description": "entry.1329174254",
+    "details": "entry.960286450",
+}
+_FEEDBACK_FALLBACK_EMAIL = "keana.shadwell@gmail.com"
+
+_TAB_LABELS = {
+    "tab-1": "1 · Data Import & Cleaning",
+    "tab-2": "2 · Migration Sequencing",
+    "tab-3": "3 · Modeling",
+    "tab-4": "4 · Population Outputs",
+    "tab-5": "5 · Map & Export",
+}
+
+feedback_modal = dbc.Modal(
+    [
+        dbc.ModalHeader(dbc.ModalTitle("Report a Bug or Send a Recommendation"), close_button=True),
+        dbc.ModalBody(
+            [
+                dbc.RadioItems(
+                    id="feedback-type",
+                    options=[
+                        {"label": "Bug", "value": "Bug"},
+                        {"label": "Recommendation", "value": "Recommendation"},
+                    ],
+                    value="Bug",
+                    inline=True,
+                    className="mb-3",
+                ),
+                dbc.Row(
+                    [
+                        dbc.Col(
+                            [
+                                dbc.Label("Name (optional)", style={"fontSize": "0.85rem"}),
+                                dbc.Input(id="feedback-name", type="text", size="sm"),
+                            ],
+                            width=6,
+                        ),
+                        dbc.Col(
+                            [
+                                dbc.Label("Email (optional)", style={"fontSize": "0.85rem"}),
+                                dbc.Input(id="feedback-email", type="email", size="sm"),
+                            ],
+                            width=6,
+                        ),
+                    ],
+                    className="mb-3",
+                ),
+                # Bug-only: which tab. Hidden for recommendations.
+                html.Div(
+                    [
+                        dbc.Label("Which tab is the bug on?",
+                                  style={"fontSize": "0.85rem", "fontWeight": "bold"}),
+                        dbc.Select(
+                            id="feedback-tab",
+                            options=[
+                                {"label": "Tab 1", "value": "Tab 1"},
+                                {"label": "Tab 2", "value": "Tab 2"},
+                                {"label": "Tab 3", "value": "Tab 3"},
+                                {"label": "Tab 4", "value": "Tab 4"},
+                                {"label": "Tab 5", "value": "Tab 5"},
+                                {"label": "Other", "value": "Other"},
+                            ],
+                            value="Tab 1",
+                            size="sm",
+                        ),
+                        dbc.Input(
+                            id="feedback-tab-other",
+                            type="text",
+                            placeholder="Where in the app? (e.g. the startup window, Browse dialog)",
+                            size="sm",
+                            className="mt-1",
+                            style={"display": "none"},
+                        ),
+                    ],
+                    id="feedback-tab-section",
+                    className="mb-3",
+                ),
+                dbc.Label("Describe the issue", id="feedback-description-label",
+                          style={"fontSize": "0.85rem", "fontWeight": "bold"}),
+                dbc.Textarea(
+                    id="feedback-description",
+                    style={"height": "220px", "fontSize": "0.85rem"},
+                ),
+                html.Small(
+                    f"Once submitted, an email will be sent to {_FEEDBACK_FALLBACK_EMAIL} "
+                    "with your responses.",
+                    className="text-muted d-block mt-2",
+                    style={"fontSize": "0.75rem"},
+                ),
+                html.Div(id="feedback-status", className="mt-2 small"),
+            ]
+        ),
+        dbc.ModalFooter(
+            dbc.Button("Submit", id="feedback-submit", color="primary", size="sm"),
+        ),
+    ],
+    id="feedback-modal",
+    size="lg",
+    is_open=False,
+    centered=True,
+)
+
 
 # ---------------------------------------------------------------------------
 # Tab 1: Data Import & Cleaning
@@ -1517,7 +1807,8 @@ def _col_map_row(label, dropdown_id, options=None, multi=False):
 
 _INFO_LABEL_COUNTER = [0]
 
-def _info_label(label_text, description, recommended=None, icon_color="#6c9bd2"):
+def _info_label(label_text, description, recommended=None, icon_color="#6c9bd2", bold=False,
+                font_size="0.85rem"):
     _INFO_LABEL_COUNTER[0] += 1
     btn_id = f"info-btn-{_INFO_LABEL_COUNTER[0]}"
     # `description` is usually a string, but may be a list of Dash components
@@ -1527,7 +1818,8 @@ def _info_label(label_text, description, recommended=None, icon_color="#6c9bd2")
     if recommended is not None and isinstance(body, str):
         body += f"\n\nRecommended: {recommended}"
     return html.Div([
-        dbc.Label(label_text, style={"fontSize": "0.85rem", "display": "inline"}),
+        dbc.Label(label_text, style={"fontSize": font_size, "display": "inline",
+                                     **({"fontWeight": "bold"} if bold else {})}),
         html.Button(
             "ⓘ",
             id=btn_id,
@@ -1550,6 +1842,40 @@ def _info_label(label_text, description, recommended=None, icon_color="#6c9bd2")
             placement="right",
         ),
     ], style={"marginBottom": "2px"})
+
+
+def _wrr_info_body():
+    """ⓘ text for the Winter Range Reference Date (Tab 1 and Tab 2). A fresh
+    component list per call — Dash components can't be shared between two
+    places in the layout."""
+    return [
+        html.B("Winter Range Reference Date (WRR date)"),
+        "\n\nThe WRR date is the day each animal's year begins. It should fall "
+        "while animals are still on their winter range, before spring migration starts.\n\n"
+        "The app uses it to:",
+        html.Ul(
+            [
+                html.Li([
+                    html.B("Split each animal's data into animal-years."),
+                    " Each animal-year runs from the WRR date to the day before the WRR "
+                    "date the next year. Every row in the migtime table is one animal-year.",
+                ]),
+                html.Li([
+                    html.B("Set the NSD graph's starting point."),
+                    " The graph on Tab 2 shows one animal-year, starting on the WRR date. "
+                    "Distance is measured from the animal's average location over its first "
+                    "20 GPS fixes on or after this date, its winter range. Migrations show up "
+                    "as the line rising away from winter range and falling back.",
+                ]),
+            ],
+            style={"paddingLeft": "1.1rem", "margin": "4px 0 8px 0", "whiteSpace": "normal"},
+        ),
+        html.B("Recommended:"),
+        " Mule deer 2/1 (February 1st), Elk 2/15.\n\n"
+        "Choose the WRR date before you start identifying migrations on Tab 2. Changing it "
+        "later regroups the animal-years, so sequences you've already marked may need to "
+        "be checked again.",
+    ]
 
 
 tab1_layout = dbc.Container(
@@ -1608,6 +1934,66 @@ tab1_layout = dbc.Container(
                                             ),
                                         ]),
                                         html.Div(id="workdir-status", className="mt-2 small"),
+                                    ]
+                                ),
+                            ],
+                            className="mb-3",
+                        ),
+                        dbc.Card(
+                            [
+                                dbc.CardHeader("Select or Upload Data"),
+                                dbc.CardBody(
+                                    [
+                                        dbc.Label(
+                                            "Pick from ModelInputs/",
+                                            style={"fontSize": "0.8rem"},
+                                        ),
+                                        dcc.Dropdown(
+                                            id="modelinputs-select",
+                                            options=[],
+                                            placeholder="(set a working directory to populate)",
+                                            style={"fontSize": "0.82rem", "marginBottom": "8px"},
+                                        ),
+                                        html.Small(
+                                            "Files copied into ModelInputs/ when you set a workdir, "
+                                            "plus anything you upload below.",
+                                            className="text-muted d-block mb-2",
+                                            style={"fontSize": "0.72rem"},
+                                        ),
+                                        html.Hr(className="my-1"),
+                                        dcc.Upload(
+                                            id="upload-data",
+                                            children=html.Div(
+                                                [
+                                                    "Drag & Drop or ",
+                                                    html.A("Browse", style={"color": "#7ecfff"}),
+                                                    html.Br(),
+                                                    html.Small(
+                                                        "Accepts .csv or .zip (shapefile)",
+                                                        style={"color": "#B0B0B0"},
+                                                    ),
+                                                ]
+                                            ),
+                                            style={
+                                                "width": "100%",
+                                                "height": "90px",
+                                                "lineHeight": "30px",
+                                                "borderWidth": "2px",
+                                                "borderStyle": "dashed",
+                                                "borderRadius": "8px",
+                                                "borderColor": "#556",
+                                                "textAlign": "center",
+                                                "padding": "12px",
+                                                "cursor": "pointer",
+                                            },
+                                            multiple=False,
+                                            accept=".csv,.zip,.shp",
+                                        ),
+                                        dcc.Loading(
+                                            html.Div(id="upload-filename", className="mt-1 text-muted small"),
+                                            type="circle",
+                                            style={"display": "inline-block"},
+                                        ),
                                     ]
                                 ),
                             ],
@@ -1715,73 +2101,13 @@ tab1_layout = dbc.Container(
                         ),
                         dbc.Card(
                             [
-                                dbc.CardHeader("Select or Upload Data"),
-                                dbc.CardBody(
-                                    [
-                                        dbc.Label(
-                                            "Pick from ModelInputs/",
-                                            style={"fontSize": "0.8rem"},
-                                        ),
-                                        dcc.Dropdown(
-                                            id="modelinputs-select",
-                                            options=[],
-                                            placeholder="(set a working directory to populate)",
-                                            style={"fontSize": "0.82rem", "marginBottom": "8px"},
-                                        ),
-                                        html.Small(
-                                            "Files copied into ModelInputs/ when you set a workdir, "
-                                            "plus anything you upload below.",
-                                            className="text-muted d-block mb-2",
-                                            style={"fontSize": "0.72rem"},
-                                        ),
-                                        html.Hr(className="my-1"),
-                                        dcc.Upload(
-                                            id="upload-data",
-                                            children=html.Div(
-                                                [
-                                                    "Drag & Drop or ",
-                                                    html.A("Browse", style={"color": "#7ecfff"}),
-                                                    html.Br(),
-                                                    html.Small(
-                                                        "Accepts .csv or .zip (shapefile)",
-                                                        style={"color": "#B0B0B0"},
-                                                    ),
-                                                ]
-                                            ),
-                                            style={
-                                                "width": "100%",
-                                                "height": "90px",
-                                                "lineHeight": "30px",
-                                                "borderWidth": "2px",
-                                                "borderStyle": "dashed",
-                                                "borderRadius": "8px",
-                                                "borderColor": "#556",
-                                                "textAlign": "center",
-                                                "padding": "12px",
-                                                "cursor": "pointer",
-                                            },
-                                            multiple=False,
-                                            accept=".csv,.zip,.shp",
-                                        ),
-                                        dcc.Loading(
-                                            html.Div(id="upload-filename", className="mt-1 text-muted small"),
-                                            type="circle",
-                                            style={"display": "inline-block"},
-                                        ),
-                                    ]
-                                ),
-                            ],
-                            className="mb-3",
-                        ),
-                        dbc.Card(
-                            [
                                 dbc.CardHeader("Column Mapping"),
                                 dbc.CardBody(
                                     [
                                         html.Small(
                                             "Select the names of the fields in your dataset that represent "
                                             "animal ID, timestamp, longitude, latitude, DOP (precision), "
-                                            "number of satellites, and age class.",
+                                            "number of satellites, age class, and sex.",
                                             className="text-muted d-block mb-2",
                                             style={"fontSize": "0.75rem"},
                                         ),
@@ -1855,6 +2181,29 @@ tab1_layout = dbc.Container(
                                                 ),
                                             ],
                                             id="age-class-checklist-wrapper",
+                                            style={"display": "none"},
+                                        ),
+                                        html.Hr(className="my-2"),
+                                        _col_map_row("Sex column", "col-sex"),
+                                        html.Div(
+                                            [
+                                                html.Small(
+                                                    "Select which sexes you would like to include in the analysis.",
+                                                    className="text-muted d-block mb-1",
+                                                ),
+                                                dbc.Checklist(
+                                                    id="sex-include",
+                                                    options=[],
+                                                    value=[],
+                                                    inline=True,
+                                                    className="small",
+                                                ),
+                                                html.Small(
+                                                    id="sex-hint",
+                                                    className="text-muted",
+                                                ),
+                                            ],
+                                            id="sex-checklist-wrapper",
                                             style={"display": "none"},
                                         ),
                                     ]
@@ -1986,7 +2335,8 @@ tab1_layout = dbc.Container(
                                             [
                                                 dbc.Col(
                                                     [
-                                                        dbc.Label("Mig Year Start (M/D)", style={"fontSize": "0.85rem", "fontWeight": "bold"}),
+                                                        _info_label("Winter Range Reference Date (WRR date) (M/D)",
+                                                                    _wrr_info_body(), bold=True),
                                                         dbc.InputGroup(
                                                             [
                                                                 dbc.Input(
@@ -2008,7 +2358,7 @@ tab1_layout = dbc.Container(
                                                             ]
                                                         ),
                                                         html.Small(
-                                                            "Recommended: Mule Deer Feb. 1; Elk Feb. 15",
+                                                            "Recommended: Mule deer 2/1 (February 1st), Elk 2/15",
                                                             className="text-muted d-block mt-1",
                                                             style={"fontSize": "0.7rem"},
                                                         ),
@@ -2092,12 +2442,13 @@ tab1_layout = dbc.Container(
                                                             style={"color": "#8FCFFF"},
                                                         ),
                                                         ").\n\n",
-                                                        "Once clicking the Export Migtime Table button on tab 2, if "
-                                                        "an animal-year's track crosses a highway, \"Crosses highway.\" "
-                                                        "is automatically appended to the note in the migtime table "
-                                                        "(MTFCC codes S1100 and S1200, primary and secondary highways). "
-                                                        "If it only crosses a local road (no highway), \"Crosses road.\" "
-                                                        "is appended (MTFCC code S1400).",
+                                                        "Once clicking the Export Migtime Table button on tab 2, a "
+                                                        "crossing note is automatically appended to each animal-year's "
+                                                        "note in the migtime table: \"Crosses highway.\" if its track "
+                                                        "crosses a highway (MTFCC codes S1100 and S1200, primary and "
+                                                        "secondary highways), \"Crosses road.\" if it crosses a local "
+                                                        "road (MTFCC code S1400), or \"Crosses road and highway.\" if "
+                                                        "it crosses both.",
                                                     ],
                                                 ),
                                             ],
@@ -2283,7 +2634,7 @@ tab1_layout = dbc.Container(
                                             style={"fontSize": "0.82rem", "marginBottom": "8px"},
                                             className="dash-dark-dropdown",
                                         ),
-                                        dbc.Label("Mig-year start (month / day)", style={"fontSize": "0.8rem"}),
+                                        dbc.Label("Winter Range Reference Date (WRR date) (month / day)",style={"fontSize": "0.8rem"}),
                                         dbc.Row(
                                             [
                                                 dbc.Col(
@@ -2334,8 +2685,10 @@ tab1_layout = dbc.Container(
                 #   tab1-summary — Processing Summary card built by
                 #                  _build_loaded_project_summary OR the in-line
                 #                  summary block in process_uploaded_data.
-                #   tab1-preview — DataTable of the first 20 rows (made by
-                #                  _make_preview_table).
+                #   tab1-preview — server-side-paged DataTable, 25 rows/page
+                #                  (made by _make_preview_table): the file's
+                #                  first 200 rows on load, then the full
+                #                  processed data (show_processed_in_preview).
                 # dcc.Loading wraps all three so a single circle spinner covers
                 # the whole right column during the long Process Data run.
                 dbc.Col(
@@ -2343,6 +2696,13 @@ tab1_layout = dbc.Container(
                         dcc.Loading(
                             id="loading-tab1",
                             type="circle",
+                            # Only spin for these; otherwise every preview page
+                            # click (tab1-preview-table.data) flashes the spinner.
+                            target_components={
+                                "tab1-status": "children",
+                                "tab1-summary": "children",
+                                "tab1-preview": "children",
+                            },
                             children=[
                                 html.Div(id="tab1-status"),
                                 html.Div(id="tab1-summary", className="mt-2"),
@@ -2429,7 +2789,8 @@ tab2_layout = dbc.Container(
                                 _info_label(
                                     "",
                                     "Load Previous Table loads in the most recently saved migtime "
-                                    "table in the working directory's Migtime_Exports folder. This "
+                                    "table in the working directory's Migtime_Exports folder "
+                                    "(<working directory>/ModelOutputs/Migtime_Exports). This "
                                     "is helpful when you are coming back to a previously created "
                                     "project to check on the status and update migrations. If you "
                                     "are working in a newly created project, this button can be "
@@ -2444,7 +2805,8 @@ tab2_layout = dbc.Container(
                                 dbc.CardHeader("Migration Year & Sequence Settings"),
                                 dbc.CardBody(
                                     [
-                                        dbc.Label("Mig Year Start Date", style={"fontSize": "0.85rem"}),
+                                        _info_label("Winter Range Reference Date (WRR date)",
+                                                    _wrr_info_body(), bold=True),
                                         dbc.Row(
                                             [
                                                 dbc.Col(
@@ -2459,13 +2821,18 @@ tab2_layout = dbc.Container(
                                             className="mb-1",
                                         ),
                                         html.Small(
-                                            "Each animal-year starts on this date. "
-                                            "Recommended: Mule Deer Feb. 1; Elk Feb. 15",
+                                            "Recommended: Mule deer 2/1 (February 1st), Elk 2/15",
                                             className="text-muted d-block mb-2",
+                                            style={"fontSize": "0.7rem"},
                                         ),
-                                        dbc.Label("Max Sequences", style={"fontSize": "0.85rem"}),
-                                        dbc.Input(id="seq-num-sequences", type="number", value=4, min=1, max=8, size="sm", className="mb-1"),
-                                        dbc.Label("Sequence Names", style={"fontSize": "0.85rem"}),
+                                        dbc.Label("Max Sequences", className="mb-0", style={"fontSize": "0.85rem", "fontWeight": "bold"}),
+                                        html.Small(
+                                            "Recommended: 4",
+                                            className="text-muted d-block mb-1",
+                                            style={"fontSize": "0.7rem"},
+                                        ),
+                                        dbc.Input(id="seq-num-sequences", type="number", value=4, min=1, max=8, size="sm", className="mb-2"),
+                                        dbc.Label("Sequence Names", style={"fontSize": "0.85rem", "fontWeight": "bold"}),
                                         html.Div(id="seq-name-inputs"),
                                     ]
                                 ),
@@ -2716,7 +3083,11 @@ tab2_layout = dbc.Container(
                                     html.Div(
                                         html.Iframe(
                                             id="seq-map-iframe",
-                                            src="/assets/maplibre_map.html",
+                                            # ?v=<mtime> so the browser picks up edits
+                                            # to the map page instead of a cached copy.
+                                            src="/assets/maplibre_map.html?v=%d" % int(
+                                                os.path.getmtime(os.path.join(_ASSETS_DIR, "maplibre_map.html"))
+                                            ),
                                             style={
                                                 "height": "100%",
                                                 "width": "100%",
@@ -3079,11 +3450,15 @@ tab3_layout = dbc.Container(
 #                             per year first; see calc_population_use docstring
 #                             for the math.
 #     - pop-contour-type    — area (proportion of individuals whose UD > 0 at
-#                             a cell) vs volume (cumulative UD volume rank).
-#     - pop-contour-levels  — free-text comma-sep list. Each level is the %
-#                             of sequences that must overlap a cell for the
-#                             cell to be inside that contour. 5-30% is the
+#                             a cell) vs volume (isopleth of the mean UD).
+#                             Applies to the Population Use contours only.
+#     - pop-contour-levels  — Area levels, free-text comma-sep list. Each level
+#                             is the % of animals that must overlap a cell for
+#                             the cell to be inside that contour. 5-30% is the
 #                             common corridor band; >50% is rare bottlenecks.
+#                             Always used for footprints.
+#     - pop-volume-levels   — Volume isopleth levels (95 = 95% of use, the
+#                             largest polygon). Shown only for Volume.
 #     - pop-min-drop /
 #       pop-min-fill        — cleanup pass on the contour polygons. Drop
 #                             polygons smaller than min_drop m²; fill holes
@@ -3138,10 +3513,14 @@ tab4_layout = dbc.Container(
                                             className="mb-2",
                                         ),
                                         _info_label("Contour Type",
-                                                   "Area: each contour level is the percentage of sequences "
-                                                   "whose UDs (utilization distributions) overlap a cell. "
-                                                   "Volume: each level is based on the cumulative UD volume rank "
-                                                   "(isopleth), similar to home-range contours.",
+                                                   "Applies to the Population Use contours. "
+                                                   "Area: each level is the % of animals whose UDs (utilization "
+                                                   "distributions) overlap a cell, so 5 = cells used by at least 5% "
+                                                   "of animals (lower = larger polygon). "
+                                                   "Volume: each level is a volume isopleth of the mean population UD, "
+                                                   "like home-range contours, so 95 = the smallest area holding 95% "
+                                                   "of use (higher = larger polygon). "
+                                                   "Footprint contours always use Area levels.",
                                                    "Area"),
                                         dcc.RadioItems(
                                             id="pop-contour-type",
@@ -3154,11 +3533,13 @@ tab4_layout = dbc.Container(
                                             inline=True,
                                             labelStyle={"color": "white"},
                                         ),
-                                        _info_label("Contour Levels (%)",
-                                                   "Comma-separated list of percentage thresholds for generating "
-                                                   "population corridor polygons. Each level produces a separate "
-                                                   "shapefile. Lower values capture broader use areas; higher values "
-                                                   "capture only the most heavily used corridors.",
+                                        _info_label("Area Levels (% of animals)",
+                                                   "Comma-separated list. Each level is the % of animals whose UDs "
+                                                   "(utilization distributions) overlap a cell; each produces one "
+                                                   "polygon. Lower values give broader use areas; higher values give "
+                                                   "only the most heavily shared corridors. Used for the Footprint "
+                                                   "contours, and for the Population Use contours when Contour Type "
+                                                   "is Area. The 1-animal and 2-animal levels are always added.",
                                                    "5, 10, 15, 20, 30, 50"),
                                         dbc.Input(
                                             id="pop-contour-levels",
@@ -3168,11 +3549,40 @@ tab4_layout = dbc.Container(
                                             className="mb-1",
                                         ),
                                         html.Small(
-                                            "Each level is the percentage of sequences whose UDs (utilization distributions) overlap a cell. "
-                                            "For migration corridors, 5-30% gives broad-use polygons; >50% would "
-                                            "require majority overlap and is rare except at bottlenecks.",
+                                            "5 = cells used by at least 5% of animals. For migration corridors, "
+                                            "5-30% gives broad-use polygons; >50% requires majority overlap and is "
+                                            "rare except at bottlenecks.",
                                             className="text-muted d-block mb-2",
                                             style={"fontSize": "0.72rem"},
+                                        ),
+                                        # Shown only when Contour Type = Volume
+                                        # (toggle_pop_volume_levels).
+                                        html.Div(
+                                            id="pop-volume-levels-wrap",
+                                            style={"display": "none"},
+                                            children=[
+                                                _info_label("Volume Isopleth Levels (%)",
+                                                           "Comma-separated list, used for the Population Use "
+                                                           "contours when Contour Type is Volume. Each level is the "
+                                                           "% of the mean population UD's volume enclosed, as in "
+                                                           "home-range contours: 95 = the smallest area holding 95% "
+                                                           "of use (largest polygon), 50 = the core area.",
+                                                           "50, 75, 90, 95"),
+                                                dbc.Input(
+                                                    id="pop-volume-levels",
+                                                    type="text",
+                                                    value="50, 75, 90, 95",
+                                                    placeholder="e.g. 50, 75, 90, 95",
+                                                    className="mb-1",
+                                                ),
+                                                html.Small(
+                                                    "95 = the area holding 95% of use (largest polygon); "
+                                                    "50 = core area. Footprint contours still use the Area "
+                                                    "levels above.",
+                                                    className="text-muted d-block mb-2",
+                                                    style={"fontSize": "0.72rem"},
+                                                ),
+                                            ],
                                         ),
                                         dbc.Row(
                                             [
@@ -3670,6 +4080,7 @@ app.layout = dbc.Container(
         navbar,
         help_modal,
         update_modal,
+        feedback_modal,
         # ---- Application state stores ----
         # Each dcc.Store is one slot of client-side state shared between
         # callbacks. Default storage_type is "memory" (lost on page reload);
@@ -3705,6 +4116,7 @@ app.layout = dbc.Container(
         dcc.Store(id="store-animal-notes", data={}, storage_type="local"),  # persists per-browser across sessions
         dcc.Store(id="store-animal-classification", data={}, storage_type="local"),  # id_bio_year -> resident/nomadic/migratory
         dcc.Store(id="store-map-payload"),       # JSON payload sent into MapLibre iframe (Tab 2)
+        dcc.Store(id="store-map-layers-built", data=False),  # Tab 5 points/tracks are current (update_map_layers)
         dcc.Store(id="store-map-legend"),        # [{name,color}] for the Tab 2 map legend (reactive to seq count/names)
         dcc.Store(id="_legend_push_dummy"),      # throwaway output for the legend->iframe clientside forwarder
         dcc.Store(id="_road_refresh_dummy"),      # throwaway output for the mig-year -> road-crossings refresh
@@ -3837,6 +4249,134 @@ app.clientside_callback(
 )
 
 
+@app.callback(
+    Output("feedback-modal", "is_open"),
+    Output("feedback-status", "children", allow_duplicate=True),
+    Output("feedback-tab", "value"),
+    Input("feedback-btn", "n_clicks"),
+    State("main-tabs", "active_tab"),
+    prevent_initial_call=True,
+)
+def open_feedback_modal(n_clicks, active_tab):
+    # Clear any status left over from a previous submission, and preselect the
+    # tab the user is on ("tab-3" -> "Tab 3").
+    tab = f"Tab {str(active_tab or 'tab-1').split('-')[-1]}"
+    return True, "", tab
+
+
+@app.callback(
+    Output("feedback-tab-section", "style"),
+    Output("feedback-tab-other", "style"),
+    Output("feedback-description-label", "children"),
+    Input("feedback-type", "value"),
+    Input("feedback-tab", "value"),
+)
+def update_feedback_form(fb_type, tab):
+    """Bug: show the tab picker (plus a free-text box for "Other").
+    Recommendation: hide it and relabel the description box."""
+    if fb_type == "Recommendation":
+        return {"display": "none"}, {"display": "none"}, "Describe your recommendation:"
+    other_style = {} if tab == "Other" else {"display": "none"}
+    return {}, other_style, "Describe the issue"
+
+
+def _feedback_mailto(subject: str, body: str) -> str:
+    from urllib.parse import quote
+    return (f"mailto:{_FEEDBACK_FALLBACK_EMAIL}"
+            f"?subject={quote(subject)}&body={quote(body)}")
+
+
+@app.callback(
+    Output("feedback-status", "children", allow_duplicate=True),
+    Output("feedback-description", "value"),
+    Input("feedback-submit", "n_clicks"),
+    State("feedback-type", "value"),
+    State("feedback-name", "value"),
+    State("feedback-email", "value"),
+    State("feedback-tab", "value"),
+    State("feedback-tab-other", "value"),
+    State("feedback-description", "value"),
+    State("main-tabs", "active_tab"),
+    State("project-name", "value"),
+    State("project-selector", "value"),
+    State("store-config", "data"),
+    State("store-workdir", "data"),
+    prevent_initial_call=True,
+)
+def submit_feedback(n_clicks, fb_type, name, email, tab, tab_other, description, active_tab,
+                    project_name, project_loaded, config_json, workdir_path):
+    """Send a bug report / recommendation to the Google Form (see
+    _FEEDBACK_FORM_URL). On failure, offer a pre-filled email instead."""
+    import datetime as _dt
+    from urllib.parse import urlencode
+    from urllib.request import Request, urlopen
+
+    if not n_clicks:
+        raise PreventUpdate
+    description = (description or "").strip()
+    if not description:
+        return _err_alert("Please add a description before submitting."), dash.no_update
+
+    herd_id = ""
+    try:
+        cfg = json.loads(config_json) if isinstance(config_json, str) else (config_json or {})
+        herd_id = str(cfg.get("herd_id") or "")
+    except Exception:
+        pass
+    details = "\n".join([
+        f"Submitted: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Tab: {_TAB_LABELS.get(active_tab, active_tab or '')}",
+        f"Project: {project_name or project_loaded or '(none)'}",
+        f"Herd: {herd_id or '(not processed yet)'}",
+        f"Working directory: {workdir_path or '(not set)'}",
+    ])
+    fb_type = fb_type or "Bug"
+    if fb_type == "Bug":
+        bug_tab = tab or ""
+        if bug_tab == "Other":
+            bug_tab = f"Other: {(tab_other or '').strip() or '(not specified)'}"
+    else:
+        bug_tab = "N/A"
+    fields = {
+        "type": fb_type,
+        "name": (name or "").strip(),
+        "email": (email or "").strip(),
+        "tab": bug_tab,
+        "description": description,
+        "details": details,
+    }
+
+    if _FEEDBACK_FORM_URL and all(_FEEDBACK_FORM_ENTRIES.values()):
+        payload = urlencode({_FEEDBACK_FORM_ENTRIES[k]: v for k, v in fields.items()}).encode("utf-8")
+        try:
+            req = Request(_FEEDBACK_FORM_URL, data=payload, method="POST",
+                          headers={"Content-Type": "application/x-www-form-urlencoded"})
+            with urlopen(req, timeout=15) as resp:
+                if resp.status == 200:
+                    _log_action("FEEDBACK_SUBMIT", type=fb_type)
+                    return _ok_alert("Thanks! Your report was sent."), ""
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("Feedback submit failed: %s", exc)
+
+    # Not configured, offline, or the form rejected it — fall back to email.
+    subject = f"Migration Mapper {fb_type}: {description.splitlines()[0][:60]}"
+    body = (f"Type: {fb_type}\n"
+            f"Name: {fields['name'] or '(not given)'}\n"
+            f"Email: {fields['email'] or '(not given)'}\n"
+            + (f"Tab: {bug_tab}\n" if fb_type == "Bug" else "")
+            + f"\n{description}\n\n--- App details ---\n{details}\n")
+    return dbc.Alert(
+        [
+            "Couldn't send the report automatically (are you connected to the internet?). ",
+            html.A("Click here to send it by email instead",
+                   href=_feedback_mailto(subject, body), className="alert-link"),
+            " — it opens a pre-filled email; just press Send.",
+        ],
+        color="warning", className="mt-2",
+    ), dash.no_update
+
+
 # ===========================================================================
 # Working directory — pick a folder, scaffold ModelInputs/ModelOutputs/log,
 # track recents, persist across sessions.
@@ -3851,13 +4391,14 @@ app.clientside_callback(
 @app.callback(
     Output("store-workdir", "data", allow_duplicate=True),
     Input("btn-pick-workdir", "n_clicks"),
+    State("store-workdir", "data"),
     prevent_initial_call=True,
 )
-def pick_workdir(n_clicks):
+def pick_workdir(n_clicks, current_workdir):
     """Open a native folder picker and set the working directory."""
     if not n_clicks:
         raise PreventUpdate
-    chosen = _pick_directory_native()
+    chosen = _pick_directory_native(current_workdir)
     if not chosen:
         raise PreventUpdate
     resolved = _set_active_workdir(chosen)
@@ -4176,7 +4717,9 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
         source_path = str(file_path)
     elif suffix == ".shp":
         import geopandas as gpd_local
-        gdf_preview = gpd_local.read_file(str(file_path)).head(200)
+        # rows=200: read only the preview rows, not the whole (possibly
+        # multi-GB) .dbf.
+        gdf_preview = gpd_local.read_file(str(file_path), rows=200)
         detected_crs = gdf_preview.crs
         df = gdf_preview
         source_path = str(file_path)
@@ -4198,7 +4741,7 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
                 *_AGE_DEFAULTS,
             )
         import geopandas as gpd_local
-        gdf_preview = gpd_local.read_file(str(shp_files[0])).head(200)
+        gdf_preview = gpd_local.read_file(str(shp_files[0]), rows=200)
         detected_crs = gdf_preview.crs
         df = gdf_preview
         source_path = str(shp_files[0])
@@ -4247,7 +4790,9 @@ def _preview_input_file(file_path: str | Path, display_name: str | None = None) 
     sat_val = _auto(["NumSats", "numsats", "Satellites", "satellites", "n_sats", "NSats", "SatCount"])
     age_val = _auto(["captureAgeClass", "AgeClass", "age_class", "Age", "ageclass"])
 
-    preview_table = _make_preview_table(df)
+    preview_table = _make_preview_table(
+        df, note=f"first {len(df):,} rows of the file; click Process Data to page through the full dataset",
+    )
 
     crs_note = ""
     if detected_crs and detected_crs.to_epsg():
@@ -4648,27 +5193,93 @@ def toggle_stopover_pct(checked):
 def populate_age_class_checklist(age_col, tmp_path):
     """Read unique age-class values from the uploaded data and populate the
     inclusion checklist. Pre-checks all classes except calf/fawn."""
+    return _include_checklist(age_col, tmp_path, exclude_default={"calf", "fawn"}, noun="class(es)")
+
+
+# Checklist value standing in for missing/blank cells in the age-class and sex
+# include filters, so blank rows get a checkbox instead of being silently
+# dropped whenever the filter is active.
+_BLANK_VALUE = "(blank)"
+
+
+def _include_values(series: pd.Series) -> pd.Series:
+    """Normalise a column for the include filters: strip, and map NaN/empty to
+    _BLANK_VALUE. Used both to list checklist options and to filter."""
+    s = series.astype(str).str.strip()
+    return s.mask(series.isna() | s.isin(["", "nan", "None"]), _BLANK_VALUE)
+
+
+def _resolve_input_col(df: pd.DataFrame, col: str | None) -> str | None:
+    """Return the processed-data column holding input column `col`. Wildlife
+    Tracker downloads are renamed during processing (captureAgeClass →
+    AgeClass, sex → Sex), while the Tab 1 dropdowns show the original name."""
+    if not col:
+        return None
+    if col in df.columns:
+        return col
+    renamed = APP_DOWNLOAD_COLUMN_MAP.get(col)
+    return renamed if renamed and renamed in df.columns else None
+
+
+def _include_checklist(col, tmp_path, exclude_default=frozenset(), noun="value(s)"):
+    """Shared body of the Tab 1 age-class / sex include checklists: read the
+    column's unique values from the input file and return
+    (options, checked values, wrapper style, hint). Everything is pre-checked
+    except values in `exclude_default` (case-insensitive)."""
     hidden = {"display": "none"}
-    if not age_col or not tmp_path:
+    if not col or not tmp_path:
         return [], [], hidden, ""
     try:
         p = Path(tmp_path)
         if p.suffix.lower() == ".csv":
-            df = pd.read_csv(str(p), low_memory=False, usecols=[age_col])
+            df = pd.read_csv(str(p), low_memory=False, usecols=[col])
         else:
             import geopandas as _gpd
-            df = _gpd.read_file(str(p))[[age_col]]
-        vals = sorted(df[age_col].dropna().astype(str).str.strip().unique(), key=str.lower)
+            # Read only this column (no geometry) — much faster on large .dbf.
+            df = _gpd.read_file(str(p), columns=[col], ignore_geometry=True)
+        vals = sorted(_include_values(df[col]).unique(), key=str.lower)
         if not vals:
             return [], [], hidden, ""
         options = [{"label": f" {v}", "value": v} for v in vals]
-        _EXCLUDE_DEFAULT = {"calf", "fawn"}
-        included = [v for v in vals if v.lower() not in _EXCLUDE_DEFAULT]
-        excluded = [v for v in vals if v.lower() in _EXCLUDE_DEFAULT]
-        hint = f"{len(excluded)} class(es) unchecked by default" if excluded else ""
+        included = [v for v in vals if v.lower() not in exclude_default]
+        excluded = [v for v in vals if v.lower() in exclude_default]
+        hint = f"{len(excluded)} {noun} unchecked by default" if excluded else ""
         return options, included, {"display": "block"}, hint
     except Exception:
         return [], [], hidden, ""
+
+
+@app.callback(
+    Output("col-sex", "options"),
+    Output("col-sex", "value"),
+    Input("col-age-class", "options"),
+    prevent_initial_call=True,
+)
+def populate_sex_column(col_options):
+    """Mirror the column list into the Sex column dropdown whenever a file is
+    loaded (the age-class dropdown gets the same list), and auto-detect it."""
+    col_options = col_options or []
+    cols = [o["value"] for o in col_options]
+    detected = None
+    for cand in ("sex", "Sex", "SEX", "animalSex", "captureSex", "gender"):
+        detected = next((c for c in cols if c.lower() == cand.lower()), None)
+        if detected:
+            break
+    return col_options, detected
+
+
+@app.callback(
+    Output("sex-include", "options"),
+    Output("sex-include", "value"),
+    Output("sex-checklist-wrapper", "style"),
+    Output("sex-hint", "children"),
+    Input("col-sex", "value"),
+    State("store-upload-path", "data"),
+    prevent_initial_call=True,
+)
+def populate_sex_checklist(sex_col, tmp_path):
+    """Read unique sex values from the uploaded data; all pre-checked."""
+    return _include_checklist(sex_col, tmp_path)
 
 
 @app.callback(
@@ -4684,6 +5295,40 @@ def toggle_minimumx(checked):
         n_animals = len(set(seq_animal.values()))
     label = f"Minimum number of animals (1–{n_animals})"
     return bool(checked), label, n_animals
+
+
+@app.callback(
+    Output("tab1-preview-table", "data"),
+    Input("tab1-preview-table", "page_current"),
+    prevent_initial_call=True,
+)
+def page_tab1_preview(page_current):
+    """Serve one page of the Tab 1 preview (custom paging) from _TAB1_PREVIEW_DF."""
+    if _TAB1_PREVIEW_DF is None:
+        raise PreventUpdate
+    return _preview_page_records(_TAB1_PREVIEW_DF, page_current)
+
+
+@app.callback(
+    Output("tab1-preview", "children", allow_duplicate=True),
+    Input("store-processed-data", "data"),
+    prevent_initial_call=True,
+)
+def show_processed_in_preview(processed_json):
+    """After Process Data (or Load Project), page through the full processed
+    dataset in the Tab 1 preview instead of the 200-row file sample."""
+    if not processed_json:
+        raise PreventUpdate
+    try:
+        df = _json_to_df(processed_json, "processed")
+    except Exception:
+        raise PreventUpdate
+    # Flag clicks and the Tab 2 NSD recompute edit the cached df in place and
+    # re-emit the store; the table already reads that same object, so don't
+    # rebuild it (which would jump back to page 1).
+    if df is _TAB1_PREVIEW_DF:
+        raise PreventUpdate
+    return _make_preview_table(df, note="processed data")
 
 
 @app.callback(
@@ -4724,6 +5369,8 @@ def toggle_minimumx(checked):
     State("age-class-include", "value"),
     State("col-age-class", "value"),
     State("auto-flagging-toggle", "value"),
+    State("sex-include", "value"),
+    State("col-sex", "value"),
     prevent_initial_call=True,
 )
 def process_uploaded_data(
@@ -4734,7 +5381,7 @@ def process_uploaded_data(
     existing_processed_json, workdir_path, detect_roads,
     herd_id_override, use_utm, utm_easting_col, utm_northing_col,
     dop_col, sat_col, age_class_include, age_class_col,
-    auto_flagging_enabled,
+    auto_flagging_enabled, sex_include, sex_col,
 ):
     """Run the full data processing pipeline.
 
@@ -4839,40 +5486,55 @@ def process_uploaded_data(
     except Exception as exc:
         return _err_alert(f"Processing failed: {exc}\n{traceback.format_exc()}"), "", None, None, dash.no_update, dash.no_update, ""
 
-    # ---- Stage 3b: filter by age class ----
-    _age_col = age_class_col or "captureAgeClass"
-    _included = set(age_class_include or [])
-    if _included and _age_col in gdf.columns:
-        actual_vals = set(gdf[_age_col].astype(str).str.strip().unique())
-        excluded_vals = actual_vals - _included
-        if excluded_vals:
-            exclude_mask = gdf[_age_col].astype(str).str.strip().isin(excluded_vals)
-            excluded_df = gdf[exclude_mask].copy()
-            n_excluded = len(excluded_df)
-            if n_excluded:
-                gdf = gdf[~exclude_mask].copy()
-                _aid = "animal_id" if "animal_id" in excluded_df.columns else config["animal_id_col"]
-                processing_log.append(
-                    f"Age-class filter: {n_excluded:,} fixes removed ({excluded_df[_aid].nunique()} animals) "
-                    f"— excluded classes: {', '.join(sorted(excluded_vals))}"
-                )
-                excluded_out = excluded_df.drop(columns=["geometry"], errors="ignore").copy()
-                excluded_out["removal_reason"] = "Age class excluded: " + excluded_df[_age_col].astype(str).str.strip()
-                if workdir_path:
-                    try:
-                        removed_dir = _workdir_version(Path(workdir_path)) / "RemovedPoints"
-                        removed_dir.mkdir(parents=True, exist_ok=True)
-                        excluded_out.to_csv(
-                            removed_dir / "AgeClassRemoved.csv", index=False,
-                        )
-                    except Exception:
-                        pass
-            else:
-                processing_log.append("Age-class filter: no fixes matched excluded classes")
-        else:
-            processing_log.append("Age-class filter: all classes included, none removed")
-    elif _age_col not in (gdf.columns if hasattr(gdf, 'columns') else []):
-        processing_log.append(f"Age-class filter: column '{_age_col}' not found, skipped")
+    # ---- Stage 3b: filter by age class, then sex ----
+    def _apply_include_filter(gdf, col, included, label, reason, csv_name):
+        """Drop fixes whose `col` value (blank → _BLANK_VALUE) isn't in
+        `included`; log it and write the removed fixes to RemovedPoints/."""
+        included = set(included or [])
+        if not included:
+            return gdf
+        resolved = _resolve_input_col(gdf, col)
+        if resolved is None:
+            processing_log.append(f"{label} filter: column '{col}' not found, skipped")
+            return gdf
+        col = resolved
+        vals = _include_values(gdf[col])
+        excluded_vals = set(vals.unique()) - included
+        if not excluded_vals:
+            processing_log.append(f"{label} filter: all values included, none removed")
+            return gdf
+        exclude_mask = vals.isin(excluded_vals)
+        excluded_df = gdf[exclude_mask].copy()
+        gdf = gdf[~exclude_mask].copy()
+        _aid = "animal_id" if "animal_id" in excluded_df.columns else config["animal_id_col"]
+        processing_log.append(
+            f"{label} filter: {len(excluded_df):,} fixes removed ({excluded_df[_aid].nunique()} animals) "
+            f"— excluded: {', '.join(sorted(excluded_vals))}"
+        )
+        excluded_out = excluded_df.drop(columns=["geometry"], errors="ignore").copy()
+        excluded_out["removal_reason"] = f"{reason} excluded: " + vals[exclude_mask]
+        if workdir_path:
+            try:
+                removed_dir = _workdir_version(Path(workdir_path)) / "RemovedPoints"
+                removed_dir.mkdir(parents=True, exist_ok=True)
+                excluded_out.to_csv(removed_dir / csv_name, index=False)
+            except Exception:
+                pass
+        return gdf
+
+    gdf = _apply_include_filter(
+        gdf, age_class_col or "captureAgeClass", age_class_include,
+        "Age-class", "Age class", "AgeClassRemoved.csv",
+    )
+    if sex_col:
+        gdf = _apply_include_filter(
+            gdf, sex_col, sex_include, "Sex", "Sex", "SexRemoved.csv",
+        )
+    # Remember which processed-data columns hold age class / sex, so the
+    # migtime export can add per-animal age_class / sex columns (saved with the
+    # project config, so it survives Load Project).
+    final_config["age_class_col"] = _resolve_input_col(gdf, age_class_col or "captureAgeClass")
+    final_config["sex_col"] = _resolve_input_col(gdf, sex_col)
 
     # Manual Herd ID override from the Tab 1 input field. Stripped + sanitised
     # to the same character set the auto-derivation uses (alnum + _ + -).
@@ -5122,8 +5784,12 @@ def process_uploaded_data(
         def _road_worker():
             try:
                 _compute_road_crossings(_rc_df, _rc_m, _rc_d, proj, workdir_path)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Used to be swallowed silently — exports then just had no
+                # crossing notes with no hint why.
+                import logging as _logging
+                _logging.getLogger(__name__).warning("Road-crossing detection failed: %s", exc)
+                print(f"WARNING: Road-crossing detection failed: {exc}")
 
         _th_roads.Thread(target=_road_worker, daemon=True).start()
         processing_log.append("Road-crossing detection running in background...")
@@ -5262,8 +5928,12 @@ def render_seq_name_inputs(n, seq_names):
             return str(seq_names[i]).strip()
         return defaults[i] if i < len(defaults) else f"Migration{i+1}"
 
+    # Recommended label for each of the first four slots (shown under its box).
+    recommended = ["Spring", "Summer", "Fall", "Winter"]
+
     rows = []
     for i in range(n):
+        has_rec = i < len(recommended)
         rows.append(
             dbc.InputGroup(
                 [
@@ -5279,9 +5949,17 @@ def render_seq_name_inputs(n, seq_names):
                     ),
                 ],
                 size="sm",
-                className="mb-1",
+                className="mb-0" if has_rec else "mb-1",
             )
         )
+        if has_rec:
+            rows.append(
+                html.Small(
+                    f"Recommended: {recommended[i]}",
+                    className="text-muted d-block mb-1",
+                    style={"fontSize": "0.7rem"},
+                )
+            )
     return rows
 
 
@@ -5301,9 +5979,16 @@ def sync_seq_names(values):
 
 def _seq_working_df(processed_json, bio_month, bio_day):
     """Load the processed DataFrame from cache and re-derive bio_year /
-    id_bio_year from the UI's current bio-year start. Shared by the Tab-2
+    id_bio_year from the UI's current bio-year (WRR) start. Shared by the Tab-2
     migtime writer and renderer so both key off identical animal-year windows.
-    Returns (df, nsd_col)."""
+
+    NSD per animal-year (nsd_/displacement_id_bio_year) is recomputed to match:
+    Process Data computes it with Tab 1's WRR date (reference = mean of each
+    animal-year's first n_ref_points fixes), so after a Tab-2 WRR change the
+    windows would otherwise move while distance was still measured from the
+    old winter-range reference. df.attrs["nsd_wrr"] records the WRR date the
+    NSD columns were last computed for, so this only reruns on a change (and
+    once per freshly loaded df). Returns (df, nsd_col)."""
     df = _json_to_df(processed_json, "processed")
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
@@ -5316,6 +6001,12 @@ def _seq_working_df(processed_json, bio_month, bio_day):
         bio_year_arr = np.where(before_start, year_ - 1, year_)
         df["bio_year"] = bio_year_arr
         df["id_bio_year"] = df["animal_id"].astype(str) + "_" + bio_year_arr.astype(str)
+        wrr = (int(bio_month), int(bio_day))
+        if df.attrs.get("nsd_wrr") != wrr and {"x", "y"}.issubset(df.columns):
+            calc_nsd(df, id_col="animal_id", date_col="timestamp",
+                     group_col="id_bio_year",
+                     n_ref_points=int(DEFAULT_CONFIG.get("n_ref_points", 20)))
+            df.attrs["nsd_wrr"] = wrr
     nsd_col = "nsd_id_bio_year" if "nsd_id_bio_year" in df.columns else None
     if nsd_col is None:
         nsd_cols = [c for c in df.columns if c.startswith("nsd_")]
@@ -5463,11 +6154,33 @@ def refresh_road_crossings_on_migyear(month, day, processed_json, workdir_path):
     def _worker():
         try:
             _compute_road_crossings(df, m, d, proj, workdir_path, only_if_enabled=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("Road-crossing refresh failed: %s", exc)
+            print(f"WARNING: Road-crossing refresh failed: {exc}")
 
     threading.Thread(target=_worker, daemon=True).start()
     raise PreventUpdate
+
+
+def _animal_attr_text(df: pd.DataFrame | None, selected_animal: str, config_json) -> str:
+    """"Age = <age class>, Sex = <sex>" for the animal in an animal-year key,
+    from the processed data ("—" when missing). Shown under the animal-year ID
+    in the Tab 2 chart titles."""
+    attrs = {"age_class": "—", "sex": "—"}
+    try:
+        cfg = json.loads(config_json) if isinstance(config_json, str) else (config_json or {})
+        if df is not None and "animal_id" in df.columns:
+            animal_id = str(selected_animal).rsplit("_", 1)[0]
+            sub = df[df["animal_id"].astype(str) == animal_id]
+            for key, src in _animal_attr_sources(df, cfg if isinstance(cfg, dict) else {}).items():
+                if src and len(sub):
+                    per_animal = _animal_attr_per_animal(sub, src)
+                    if animal_id in per_animal.index:
+                        attrs[key] = per_animal[animal_id]
+    except Exception:
+        pass
+    return f"Age = {attrs['age_class']}, Sex = {attrs['sex']}"
 
 
 @app.callback(
@@ -5488,9 +6201,10 @@ def refresh_road_crossings_on_migyear(month, day, processed_json, workdir_path):
     Input("seq-bio-year-month", "value"),
     Input("seq-bio-year-day", "value"),
     State("store-processed-data", "data"),
+    State("store-config", "data"),
     prevent_initial_call=True,
 )
-def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_overlays, bio_month, bio_day, processed_json):
+def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_overlays, bio_month, bio_day, processed_json, config_json=None):
     """Tab-2 RENDERER: rebuild the four plots + the slider cards from the
     migtime table, which is the single source of truth for which sequences
     exist for this animal.
@@ -5509,6 +6223,9 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_over
     bio_day = int(bio_day or 1)
 
     df, nsd_col = _seq_working_df(processed_json, bio_month, bio_day)
+    # Every chart title: "<metric> — <animal-year>" with "Age = …, Sex = …"
+    # on a smaller second line.
+    _title_id = f" — {selected_animal}<br><sup>{_animal_attr_text(df, selected_animal, config_json)}</sup>"
 
     disp_col = "displacement_id_bio_year" if "displacement_id_bio_year" in df.columns else None
     if disp_col is None:
@@ -5620,11 +6337,11 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_over
     nsd_fig.update_layout(
         template="plotly_dark",
         uirevision=selected_animal,
-        title=f"NSD — {selected_animal}",
+        title=f"NSD{_title_id}",
         xaxis_title="", yaxis_title="NSD (km²)",
         yaxis={"rangemode": "nonnegative"},
         dragmode="pan",
-        margin={"l": 50, "r": 20, "t": 40, "b": 40},
+        margin={"l": 50, "r": 20, "t": 60, "b": 40},
         legend={"orientation": "h"},
     )
 
@@ -5643,10 +6360,10 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_over
     disp_fig.update_layout(
         template="plotly_dark",
         uirevision=selected_animal,
-        title="Displacement (km)",
+        title="Displacement (km)" + _title_id,
         xaxis_title="", yaxis_title="km",
         dragmode="pan",
-        margin={"l": 50, "r": 20, "t": 30, "b": 30},
+        margin={"l": 50, "r": 20, "t": 60, "b": 30},
         legend={"orientation": "h"},
     )
 
@@ -5665,10 +6382,10 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_over
     speed_fig.update_layout(
         template="plotly_dark",
         uirevision=selected_animal,
-        title="Speed (km/h)",
+        title="Speed (km/h)" + _title_id,
         xaxis_title="", yaxis_title="km/h",
         dragmode="pan",
-        margin={"l": 50, "r": 20, "t": 30, "b": 30},
+        margin={"l": 50, "r": 20, "t": 60, "b": 30},
         legend={"orientation": "h"},
     )
 
@@ -5690,10 +6407,10 @@ def render_seq_panels(selected_animal, migtime_json, seq_names, n_seqs, nsd_over
     elev_fig.update_layout(
         template="plotly_dark",
         uirevision=selected_animal,
-        title=elev_title,
+        title=elev_title + _title_id,
         xaxis_title="", yaxis_title="m",
         dragmode="pan",
-        margin={"l": 50, "r": 20, "t": 30, "b": 30},
+        margin={"l": 50, "r": 20, "t": 60, "b": 30},
         legend={"orientation": "h"},
     )
 
@@ -5995,7 +6712,24 @@ def _sniff_migtime_columns(raw_text: str):
 
     month = _first_int("tempstartmonth") or _first_int("startmonth") or _first_int("biostartmonth")
     day = _first_int("tempstartday") or _first_int("startday") or _first_int("biostartday")
+    # Our own exports carry the WRR date as a single "MM-DD" column.
+    wrr_col = norm.get("wrrstartdate")
+    if wrr_col and (month is None or day is None):
+        wrr = _parse_wrr_mmdd(df[wrr_col].dropna().iloc[0]) if df[wrr_col].notna().any() else None
+        if wrr:
+            month, day = wrr
     return headers, guess, month, day
+
+
+def _parse_wrr_mmdd(val):
+    """Parse a ``wrr_start_date`` cell ("MM-DD") into (month, day), or None."""
+    try:
+        m, d = (int(x) for x in str(val).strip().split("-")[:2])
+    except (ValueError, TypeError):
+        return None
+    if 1 <= m <= 12 and 1 <= d <= 31:
+        return m, d
+    return None
 
 
 def _parse_external_migtime(
@@ -6263,9 +6997,18 @@ def clear_single_sequence(n_clicks):
     return [0, 0]
 
 
+# Every crossing phrase _crossing_phrase can emit — longest first, so stripping
+# a prior copy never leaves a partial phrase behind.
+_CROSSING_PHRASES = ("Crosses road and highway.", "Crosses highway.", "Crosses road.")
+
+
 def _crossing_phrase(crosses_road: bool, crosses_highway: bool) -> str:
     """Single canonical statement about road/highway crossings for a notes
-    cell. Highway supersedes road — at most one phrase is ever returned."""
+    cell. Road (S1400) and highway (S1100/S1200) are detected independently
+    (since 2026-09-02), so an animal-year crossing both gets the combined
+    phrase — previously highway superseded road and the road crossing was lost."""
+    if crosses_road and crosses_highway:
+        return "Crosses road and highway."
     if crosses_highway:
         return "Crosses highway."
     if crosses_road:
@@ -6307,10 +7050,16 @@ def _compose_notes(user_note: str, crosses_road: bool, crosses_highway: bool) ->
     exactly one canonical phrase (we strip any prior copy).
     """
     note = (user_note or "").strip()
-    # Remove any previously-appended crossing phrase so re-exports don't double up.
-    for phrase in ("Crosses highway.", "Crosses road."):
-        if note.endswith(phrase):
-            note = note[: -len(phrase)].rstrip()
+    # Remove any previously-appended crossing phrase(s) so re-exports don't
+    # double up (loops in case an older note carries more than one).
+    stripped = True
+    while stripped:
+        stripped = False
+        for phrase in _CROSSING_PHRASES:
+            if note.endswith(phrase):
+                note = note[: -len(phrase)].rstrip()
+                stripped = True
+                break
     phrase = _crossing_phrase(crosses_road, crosses_highway)
     if not phrase:
         return note
@@ -6334,14 +7083,64 @@ def _fix_removal_note(is_problem: bool, is_mortality: bool,
     return "  ".join(parts)
 
 
+def _add_animal_attrs(migtime: pd.DataFrame, processed_df: pd.DataFrame | None, config: dict) -> pd.DataFrame:
+    """Add per-animal `age_class` and `sex` columns (right after `animal_id`)
+    from the processed data — each animal's most common non-blank value, or ""
+    if the column/value is missing. Columns come from the Process Data config
+    (age_class_col / sex_col); projects processed before that was recorded fall
+    back to the usual column names."""
+    if "animal_id" not in migtime.columns:
+        return migtime
+    ids = migtime["animal_id"].astype(str)
+    pos = list(migtime.columns).index("animal_id") + 1
+    for out_col, src in _animal_attr_sources(processed_df, config).items():
+        values = pd.Series("", index=migtime.index)
+        if src:
+            values = ids.map(_animal_attr_per_animal(processed_df, src)).fillna("")
+        if out_col in migtime.columns:
+            migtime[out_col] = values
+        else:
+            migtime.insert(pos, out_col, values)
+        pos = list(migtime.columns).index(out_col) + 1
+    return migtime
+
+
+def _animal_attr_sources(processed_df: pd.DataFrame | None, config: dict) -> dict[str, str | None]:
+    """{"age_class": col, "sex": col} — the processed-data columns holding each
+    animal's age class / sex (None if absent). Uses the columns recorded at
+    Process Data; projects processed before that fall back to the usual names."""
+    fallbacks = {
+        "age_class": ["AgeClass", "captureAgeClass", "age_class", "Age"],
+        "sex": ["Sex", "sex", "animalSex", "captureSex", "gender"],
+    }
+    out: dict[str, str | None] = {}
+    for out_col, cfg_key in (("age_class", "age_class_col"), ("sex", "sex_col")):
+        src = None
+        if processed_df is not None and "animal_id" in processed_df.columns:
+            if cfg_key in config:
+                src = _resolve_input_col(processed_df, config.get(cfg_key))
+            else:
+                src = next((c for c in fallbacks[out_col] if c in processed_df.columns), None)
+        out[out_col] = src
+    return out
+
+
+def _animal_attr_per_animal(df: pd.DataFrame, src: str) -> pd.Series:
+    """Each animal's most common non-blank `src` value, indexed by animal_id."""
+    vals = _include_values(df[src])
+    vals = vals[vals != _BLANK_VALUE]
+    return vals.groupby(df.loc[vals.index, "animal_id"].astype(str)).agg(lambda s: s.mode().iloc[0])
+
+
 def _build_migtime_export_df(
     migtime_json, notes_store, road_store, class_store, seq_names,
-    workdir_path, processed_json, bio_month, bio_day,
+    workdir_path, processed_json, bio_month, bio_day, config_json=None,
 ):
     """Shared core of a migtime save (manual Export Migtime Table AND the
     periodic autosave below): resolve road crossings, populate notes, drop
-    animal-years classified Resident/Nomadic/Insufficient, and rename columns
-    to the user's sequence labels. Returns
+    animal-years classified Resident/Nomadic/Insufficient, fill the
+    classification + reviewed columns, and rename columns to the user's
+    sequence labels. Returns
     (migtime_after_removal, export_df, removed_keys, road_store)."""
     migtime = _json_to_df(migtime_json, "migtime")
     _rc_df = None
@@ -6360,15 +7159,52 @@ def _build_migtime_export_df(
     # AnimalYearsRemoved.csv. Per-fix problem/mortality removals from the animals
     # that were KEPT go to Problems_Morts_Removed.csv/.shp.
     class_store = class_store or {}
-    removed_keys = {
-        str(k) for k, v in class_store.items() if v in _REMOVED_CLASSIFICATIONS
-    }
-    if removed_keys and "id_bio_year" in migtime.columns:
-        migtime = migtime[~migtime["id_bio_year"].astype(str).isin(removed_keys)].copy()
+    migtime, removed_keys = _drop_removed_animal_years(migtime, class_store)
+
+    # classification (from the Tab 2 radios, or "unclassified") and reviewed =
+    # "has a classification OR at least one sequence". `reviewed` used to be a
+    # placeholder that was never set during review, so it read FALSE for every
+    # row. (Sequences without a radio still read "unclassified" — and are still
+    # modeled; only Resident/Nomadic/Insufficient are excluded.)
+    if "id_bio_year" in migtime.columns:
+        migtime = migtime.copy()  # don't add export-only columns to the live table
+        classification = (
+            migtime["id_bio_year"].astype(str).map(class_store).fillna("unclassified")
+        )
+        if "classification" in migtime.columns:
+            migtime["classification"] = classification
+        else:
+            pos = (list(migtime.columns).index("notes")
+                   if "notes" in migtime.columns else len(migtime.columns))
+            migtime.insert(pos, "classification", classification)
+        def _blank(v) -> bool:
+            # Empty slot in any of the forms the store holds: NaT/NaN/None or
+            # a blank/"NaT" string (astype(str) can't be trusted — NaT may
+            # stringify to a float NaN).
+            if v is None or (not isinstance(v, str) and pd.isna(v)):
+                return True
+            return str(v).strip() in ("", "NaT", "nan", "None", "<NA>")
+
+        start_cols = [f"mig{i}_start" for i in range(1, 9) if f"mig{i}_start" in migtime.columns]
+        has_sequence = (
+            ~migtime[start_cols].apply(lambda col: col.map(_blank)).all(axis=1)
+            if start_cols else pd.Series(False, index=migtime.index)
+        )
+        migtime["reviewed"] = (classification != "unclassified") | has_sequence
+
+    # Per-animal age class + sex from the processed data (export-only columns).
+    try:
+        cfg = json.loads(config_json) if isinstance(config_json, str) else (config_json or {})
+    except Exception:
+        cfg = {}
+    migtime = _add_animal_attrs(migtime.copy(), _rc_df, cfg if isinstance(cfg, dict) else {})
 
     # Friendly column names (Spring_start, …) for the CSV + a seq_map legend so
     # the labels follow the project into the export and round-trip back on load.
     export_df = _friendly_migtime_for_export(migtime, seq_names)
+    # Winter Range Reference date the animal-years were split on, so a reload
+    # restores the same WRR date (see load_previous_migtime).
+    export_df["wrr_start_date"] = f"{int(bio_month or 2):02d}-{int(bio_day or 1):02d}"
     return migtime, export_df, removed_keys, road_store
 
 
@@ -6403,7 +7239,7 @@ def export_migtime(n_clicks, migtime_json, workdir_path, notes_store, road_store
 
     migtime, export_df, removed_keys, road_store = _build_migtime_export_df(
         migtime_json, notes_store, road_store, class_store, seq_names,
-        workdir_path, processed_json, bio_month, bio_day,
+        workdir_path, processed_json, bio_month, bio_day, config_json,
     )
     n_removed_years = len(removed_keys)
 
@@ -6591,11 +7427,12 @@ _LAST_MIGTIME_AUTOSAVE_REV: int | None = None
     State("store-seq-names", "data"),
     State("seq-bio-year-month", "value"),
     State("seq-bio-year-day", "value"),
+    State("store-config", "data"),
     prevent_initial_call=True,
 )
 def autosave_migtime_periodic(
     n_intervals, migtime_json, workdir_path, notes_store, road_store,
-    processed_json, class_store, seq_names, bio_month, bio_day,
+    processed_json, class_store, seq_names, bio_month, bio_day, config_json,
 ):
     """Every few minutes, quietly re-save the migtime table so sequence edits,
     notes, and classifications aren't lost if the app is closed or crashes
@@ -6626,7 +7463,7 @@ def autosave_migtime_periodic(
     try:
         migtime, export_df, _removed_keys, _road_store = _build_migtime_export_df(
             migtime_json, notes_store, road_store, class_store, seq_names,
-            workdir_path, processed_json, bio_month, bio_day,
+            workdir_path, processed_json, bio_month, bio_day, config_json,
         )
         import datetime as _dt
         stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -6648,26 +7485,39 @@ def autosave_migtime_periodic(
     Output("store-migtime-table", "data", allow_duplicate=True),
     Output("load-migtime-status", "children", allow_duplicate=True),
     Output("store-seq-names", "data", allow_duplicate=True),
+    Output("seq-bio-year-month", "value", allow_duplicate=True),
+    Output("seq-bio-year-day", "value", allow_duplicate=True),
     Input("btn-load-migtime", "n_clicks"),
     State("store-workdir", "data"),
     prevent_initial_call=True,
 )
 def load_previous_migtime(n_clicks, workdir_path):
+    _nu = dash.no_update
     exports_dir = _migtime_exports_dir(workdir_path)
     if exports_dir is None:
-        return dash.no_update, _err_alert("Set a working directory in Tab 1 first."), dash.no_update
+        return _nu, _err_alert("Set a working directory in Tab 1 first."), _nu, _nu, _nu
     if not exports_dir.exists():
-        return dash.no_update, _err_alert("No migtime tables have been created for this project yet."), dash.no_update
+        return _nu, _err_alert("No migtime tables have been created for this project yet."), _nu, _nu, _nu
 
     csvs = sorted(exports_dir.glob("migtime_*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not csvs:
-        return dash.no_update, _err_alert("No migtime tables have been created for this project yet."), dash.no_update
+        return _nu, _err_alert("No migtime tables have been created for this project yet."), _nu, _nu, _nu
 
     latest = csvs[0]
     try:
         migtime = pd.read_csv(latest)
     except Exception as exc:
-        return dash.no_update, _err_alert(f"Could not read {latest.name}: {exc}"), dash.no_update
+        return _nu, _err_alert(f"Could not read {latest.name}: {exc}"), _nu, _nu, _nu
+
+    # Restore the WRR date the table was built on (older exports lack it).
+    wrr_month: Any = _nu
+    wrr_day: Any = _nu
+    if "wrr_start_date" in migtime.columns:
+        vals = migtime["wrr_start_date"].dropna()
+        wrr = _parse_wrr_mmdd(vals.iloc[0]) if len(vals) else None
+        if wrr:
+            wrr_month, wrr_day = wrr
+        migtime = migtime.drop(columns=["wrr_start_date"])
 
     # Restore friendly-named exports (Spring_start, …) back to the canonical
     # mig{n}_start/_end schema the pipeline relies on, using the seq_map legend
@@ -6707,7 +7557,7 @@ def load_previous_migtime(n_clicks, workdir_path):
     _log_action("MIGTIME_LOAD", path=str(latest), rows=len(migtime))
     return _df_to_json(migtime, "migtime"), _ok_alert(
         f"Loaded {latest.name} ({len(migtime)} rows)."
-    ), seq_names_out
+    ), seq_names_out, wrr_month, wrr_day
 
 
 # ---------------------------------------------------------------------------
@@ -7315,6 +8165,12 @@ def update_seq_map(selected_animal, migtime_json, processed_json, notes_store, c
     if dash.callback_context.triggered_id != "store-migtime-table":
         map_payload["center"] = entry["center"]
         map_payload["zoom"] = entry["zoom"]
+        # The dropdown value is re-set to the same animal whenever
+        # store-processed-data changes (e.g. a flag click), which re-runs this
+        # callback as if the animal changed. The iframe only flies when
+        # view_key differs from the last one it zoomed to, so those re-runs
+        # keep the user's view; a new animal or WRR date still re-centers.
+        map_payload["view_key"] = f"{selected_animal}|{bio_month}-{bio_day}"
 
     # Notes — load from store
     notes_store = notes_store or {}
@@ -7583,6 +8439,8 @@ def _apply_flag_to_selection(
     processed_json: str | None,
     flag_kind: str,
     config_json: str | None = None,
+    migtime_json: str | None = None,
+    wld_labels: dict | None = None,
 ) -> tuple[str | None, dict | None, dbc.Alert]:
     """Shared core of Flag-as-Problem / Flag-as-Mortality / Unflag callbacks.
 
@@ -7696,16 +8554,18 @@ def _apply_flag_to_selection(
     )
 
     # Rebuild the map payload for this animal so the UI shows the new
-    # outline colors immediately.
+    # outline colors immediately. No center/zoom, so the iframe keeps the
+    # user's current view instead of zooming out to the full extent; pass the
+    # migtime table so points keep their sequence colors.
     map_payload = None
     if animal_key in _MAP_CACHE:
         entry = _MAP_CACHE[animal_key]
         env_labels = dict(AVAILABLE_VARIABLES)
+        if wld_labels:
+            env_labels.update(wld_labels)
         map_payload = {
             "type": "update-data",
-            "center": entry["center"],
-            "zoom": entry["zoom"],
-            "points": _build_point_geojson(entry, None, animal_key),
+            "points": _build_point_geojson(entry, migtime_json, animal_key),
             "line": entry["line_geojson"],
             "env_labels": env_labels,
         }
@@ -7724,11 +8584,14 @@ def _apply_flag_to_selection(
     State("seq-animal-dropdown", "value"),
     State("store-processed-data", "data"),
     State("store-config", "data"),
+    State("store-migtime-table", "data"),
+    State("store-wld-env-labels", "data"),
     prevent_initial_call=True,
 )
-def flag_selected_problem(n_clicks, selection, animal_key, processed_json, config_json):
+def flag_selected_problem(n_clicks, selection, animal_key, processed_json, config_json, migtime_json, wld_labels):
     new_json, payload, alert = _apply_flag_to_selection(
         selection, animal_key, processed_json, "problem", config_json,
+        migtime_json, wld_labels,
     )
     if new_json is None:
         return dash.no_update, dash.no_update, alert
@@ -7744,11 +8607,14 @@ def flag_selected_problem(n_clicks, selection, animal_key, processed_json, confi
     State("seq-animal-dropdown", "value"),
     State("store-processed-data", "data"),
     State("store-config", "data"),
+    State("store-migtime-table", "data"),
+    State("store-wld-env-labels", "data"),
     prevent_initial_call=True,
 )
-def flag_selected_mortality(n_clicks, selection, animal_key, processed_json, config_json):
+def flag_selected_mortality(n_clicks, selection, animal_key, processed_json, config_json, migtime_json, wld_labels):
     new_json, payload, alert = _apply_flag_to_selection(
         selection, animal_key, processed_json, "mortality", config_json,
+        migtime_json, wld_labels,
     )
     if new_json is None:
         return dash.no_update, dash.no_update, alert
@@ -7764,11 +8630,14 @@ def flag_selected_mortality(n_clicks, selection, animal_key, processed_json, con
     State("seq-animal-dropdown", "value"),
     State("store-processed-data", "data"),
     State("store-config", "data"),
+    State("store-migtime-table", "data"),
+    State("store-wld-env-labels", "data"),
     prevent_initial_call=True,
 )
-def unflag_selected(n_clicks, selection, animal_key, processed_json, config_json):
+def unflag_selected(n_clicks, selection, animal_key, processed_json, config_json, migtime_json, wld_labels):
     new_json, payload, alert = _apply_flag_to_selection(
         selection, animal_key, processed_json, "clear", config_json,
+        migtime_json, wld_labels,
     )
     if new_json is None:
         return dash.no_update, dash.no_update, alert
@@ -7960,22 +8829,49 @@ def render_model_params(model, processed_json):
                 "(or is missing a bounding migration date); skips are noted in processing_log.txt.",
                 className="text-muted d-block mb-2", style={"fontSize": "0.68rem"},
             ),
-            dbc.Checkbox(
-                id={"type": "model-param", "key": "bbmm_linebuffer"},
-                label="Line buffer (buffered migration lines stacked per animal)",
-                value=False,
-                style={"fontSize": "0.8rem"},
-            ),
+            # Line buffer gets its own outlined section (users missed it as the
+            # last small checkbox in "Extra BBMM outputs").
             html.Div(
-                id="bbmm-linebuffer-distance-wrapper",
-                children=[
-                    dbc.Label("Buffer distance (m, total width — applied as half on each side)", style={"fontSize": "0.8rem", "marginTop": "4px"}),
-                    dbc.Input(
-                        id={"type": "model-param", "key": "bbmm_linebuffer_distance"},
-                        type="number", value=400, min=1, step=1, size="sm",
+                [
+                    _info_label("Line Buffer Output",
+                                "Connects each migration sequence's fixes in time order into a line, "
+                                "buffers it, and combines the buffers per animal. Writes to "
+                                "ModelOutputs/LineBuffer/: raw_linebuffer.shp (one polygon per animal), "
+                                "by_Animal_linebuffer_dissolved.shp (all animals merged into one polygon), "
+                                "and linebuffer_heatmap.tif (how many animals' buffers overlap each cell). "
+                                "A simple, model-free corridor to compare against the BBMM outputs.",
+                                "400 m total width (Jerod Merkle)",
+                                bold=True, font_size="1rem"),
+                    dbc.Checkbox(
+                        id={"type": "model-param", "key": "bbmm_linebuffer"},
+                        label="Create line buffer output (buffered migration lines stacked per animal)",
+                        value=False,
+                        style={"fontSize": "0.9rem"},
+                    ),
+                    html.Div(
+                        id="bbmm-linebuffer-distance-wrapper",
+                        children=[
+                            dbc.Label("Buffer distance (m)", className="fw-bold mt-2 mb-1", style={"fontSize": "0.9rem"}),
+                            dbc.InputGroup(
+                                [
+                                    dbc.Input(
+                                        id={"type": "model-param", "key": "bbmm_linebuffer_distance"},
+                                        type="number", value=400, min=1, step=1,
+                                    ),
+                                    dbc.InputGroupText("m total width"),
+                                ],
+                            ),
+                            html.Small(
+                                "Total width of the buffer, applied as half on each side of the line "
+                                "(400 m = 200 m each side). Recommended: 400 m.",
+                                className="text-muted d-block mt-1", style={"fontSize": "0.75rem"},
+                            ),
+                        ],
+                        style={"display": "none"},
                     ),
                 ],
-                style={"display": "none"},
+                className="mt-3 mb-2 p-2 rounded",
+                style={"border": "1px solid #6c9bd2", "background": "rgba(108,155,210,0.08)"},
             ),
         ]
     elif model == "DBBMM":
@@ -8252,7 +9148,8 @@ def _build_linebuffer_output(
         ) as dst:
             dst.write(heatmap, 1)
     except Exception as exc:
-        logger.warning("Line buffer heatmap failed: %s", exc)
+        import logging as _logging
+        _logging.getLogger(__name__).warning("Line buffer heatmap failed: %s", exc)
 
     _append_processing_log(
         [f"Buffer distance: {buffer_distance} m ({half} m each side, round caps)",
@@ -8354,11 +9251,12 @@ def _apply_model_ui_params(config: dict, model: str, p: dict) -> None:
     State({"type": "model-param", "key": dash.ALL}, "value"),
     State({"type": "model-param", "key": dash.ALL}, "id"),
     State("model-cell-size", "value"),
+    State("store-animal-classification", "data"),
     prevent_initial_call=True,
 )
 def run_modeling(
     n_clicks, processed_json, migtime_json, model, n_cores, seq_name_inputs, config_json,
-    model_param_values, model_param_ids, cell_size,
+    model_param_values, model_param_ids, cell_size, class_store,
 ):
     """Launch the modelling pipeline in a background thread so it survives
     browser disconnects and computer sleep. Returns immediately with a
@@ -8378,7 +9276,7 @@ def run_modeling(
     _MODEL_RUN["progress_msg"] = f"Starting {model.upper()} model run..."
 
     args = (processed_json, migtime_json, model, n_cores, seq_name_inputs,
-            config_json, model_param_values, model_param_ids, cell_size)
+            config_json, model_param_values, model_param_ids, cell_size, class_store)
     t = threading.Thread(target=_run_modeling_impl, args=args, daemon=True)
     t.start()
     _MODEL_RUN["thread"] = t
@@ -8426,7 +9324,7 @@ def poll_model_run(n_intervals, run_id):
 
 def _run_modeling_impl(
     processed_json, migtime_json, model, n_cores, seq_name_inputs, config_json,
-    model_param_values, model_param_ids, cell_size,
+    model_param_values, model_param_ids, cell_size, class_store=None,
 ):
     """Background thread target — runs the full modelling pipeline and stores
     its result in _MODEL_RUN for the polling callback to pick up."""
@@ -8447,6 +9345,15 @@ def _run_modeling_impl(
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         migtime = _json_to_df(migtime_json, "migtime")
+        # Resident / Nomadic / Insufficient animal-years are out of the
+        # analysis — drop them before ANY sequence/range/MigLines extraction.
+        migtime, _removed_ay = _drop_removed_animal_years(migtime, class_store)
+        if _removed_ay:
+            _append_processing_log(
+                [f"Excluded {len(_removed_ay)} animal-year(s) classified Resident / "
+                 "Nomadic / Insufficient data from modeling."],
+                header="MODEL RUN",
+            )
 
         # Build a GeoDataFrame in WGS-84 first (for extract_sequences), then
         # project to UTM for modelling (the R workflow requires metre units).
@@ -9178,6 +10085,15 @@ def refresh_pop_seasons_checklist(_model_results_json, _active_tab):
 
 
 @app.callback(
+    Output("pop-volume-levels-wrap", "style"),
+    Input("pop-contour-type", "value"),
+)
+def toggle_pop_volume_levels(contour_type):
+    """Show the Volume isopleth levels box only when Contour Type = Volume."""
+    return {"display": "block"} if (contour_type or "area").lower() == "volume" else {"display": "none"}
+
+
+@app.callback(
     Output("pop-status", "children"),
     Output("pop-map-preview", "children"),
     Output("store-pop-outputs", "data"),
@@ -9197,13 +10113,14 @@ def refresh_pop_seasons_checklist(_model_results_json, _active_tab):
     State("pop-minimumx-toggle", "value"),
     State("pop-minimumx-value", "value"),
     State("store-config", "data"),
+    State("pop-volume-levels", "value"),
     prevent_initial_call=True,
 )
 def generate_pop_outputs(
     n_clicks, processed_json, model_results_json,
     seasons, merge_order, contour_type, contour_levels_str,
     min_drop, min_fill, smooth, smooth_bw, stopover_on, stopover_pct,
-    minimumx_on, minimumx_value, config_json,
+    minimumx_on, minimumx_value, config_json, volume_levels_str,
 ):
     if not processed_json:
         return _err_alert("No processed data. Complete Tab 1 first."), "", None
@@ -9224,7 +10141,16 @@ def generate_pop_outputs(
     try:
         contour_levels = [float(x.strip()) for x in (contour_levels_str or "5,10,15,20,30,50").split(",")]
     except ValueError:
-        return _err_alert("Invalid contour levels. Use comma-separated numbers like: 50, 75, 95, 99"), "", None
+        return _err_alert("Invalid Area levels. Use comma-separated numbers like: 5, 10, 15, 20, 30, 50"), "", None
+    is_volume = (contour_type or "area").lower() == "volume"
+    volume_levels: list[float] = []
+    if is_volume:
+        try:
+            volume_levels = [float(x.strip()) for x in (volume_levels_str or "50,75,90,95").split(",")]
+        except ValueError:
+            return _err_alert("Invalid Volume isopleth levels. Use comma-separated numbers like: 50, 75, 90, 95"), "", None
+        if any(not (0 < v < 100) for v in volume_levels):
+            return _err_alert("Volume isopleth levels must be between 0 and 100 (e.g. 50, 75, 90, 95)."), "", None
 
     try:
         # Normalise Tab 4 form values into what the population_outputs module wants.
@@ -9353,7 +10279,10 @@ def generate_pop_outputs(
             "seasons": seasons or [],
             "merge_order": list(merge_order_tuple),
             "contour_type": contour_type_norm,
+            # Area levels (% of animals): footprints always, use contours when Area.
             "contour_levels": contour_levels,
+            # Volume isopleth levels for the use contours (Volume only).
+            "volume_levels": volume_levels if is_volume else None,
             "min_area_drop": float(min_drop) if min_drop not in (None, "") else 10000.0,
             "min_area_fill": float(min_fill) if min_fill not in (None, "") else 5000.0,
             "smooth": bool(smooth),
@@ -9373,7 +10302,7 @@ def generate_pop_outputs(
             grid_meta=pop_grid,
             merge_order=merge_order_tuple,
             contour_type=contour_type_norm,
-            contour_levels=contour_levels,
+            contour_levels=volume_levels if is_volume else contour_levels,
             min_area_drop=pop_config["min_area_drop"],
             min_area_fill=pop_config["min_area_fill"],
             simplify=pop_config["smooth"],
@@ -9676,8 +10605,12 @@ def generate_pop_outputs(
             preview_children.append(wrote_card)
         if stacked_card is not None:
             preview_children.append(stacked_card)
-        preview_children.append(_contour_table(pop_use_gdf, "Population Use Contours"))
-        preview_children.append(_contour_table(pop_foot_gdf, "Population Footprint Contours"))
+        preview_children.append(_contour_table(
+            pop_use_gdf,
+            "Population Use Contours (volume isopleths: 95% = area holding 95% of use)" if is_volume
+            else "Population Use Contours (% of animals)",
+        ))
+        preview_children.append(_contour_table(pop_foot_gdf, "Population Footprint Contours (% of animals)"))
         preview = html.Div(preview_children)
 
         # Build a "what's actually possible" line so the user can pick sensible
@@ -9705,8 +10638,13 @@ def generate_pop_outputs(
                 f"Input data date range: {date_range[0]} — {date_range[1]}" if date_range else "Input data date range: unknown",
                 f"Seasons merged: {', '.join(seasons) if seasons else 'all'}",
                 f"Merge order: {pop_config['merge_order']}",
-                f"Contour type: {pop_config['contour_type']}",
-                f"Contour levels: {', '.join(lvl_strs)}",
+                f"Contour type (population use): {pop_config['contour_type']}",
+                f"Area levels (% of animals; footprints"
+                + ("" if is_volume else " + population use") + f"): {', '.join(lvl_strs)}",
+            ] + (
+                [f"Volume isopleth levels (population use): {', '.join(f'{v:g}%' for v in volume_levels)}"]
+                if is_volume else []
+            ) + [
                 f"min_area_drop: {pop_config['min_area_drop']:g} m2   min_area_fill: {pop_config['min_area_fill']:g} m2",
                 f"Smoothing (ksmooth): {'on' if pop_config['smooth'] else 'off'}"
                 + (f", smoothness={pop_config['smooth_bandwidth']:g}" if pop_config['smooth'] else ""),
@@ -10525,12 +11463,14 @@ app.clientside_callback(
 @app.callback(
     Output("map-geojson-points", "data"),
     Output("map-geojson-tracks", "data"),
+    Output("store-map-layers-built", "data"),
     Input("store-processed-data", "data"),
-    Input("store-migtime-table", "data"),
     Input("map-layers", "value"),
+    Input("main-tabs", "active_tab"),
+    State("store-map-layers-built", "data"),
     prevent_initial_call=True,
 )
-def update_map_layers(processed_json, migtime_json, active_layers):
+def update_map_layers(processed_json, active_layers, active_tab, layers_built):
     """Build GeoJSON overlays for the map — vectorized for speed.
 
     Two output layers (points + tracks); footprint/pop-contour layers are
@@ -10541,7 +11481,26 @@ def update_map_layers(processed_json, migtime_json, active_layers):
     LineStrings capped at 2,000 vertices. Both via numpy strided slicing
     (`::step`) so we keep the deterministic visual envelope (start, end,
     rough trajectory) without sending 50k+ features through dash-leaflet.
+
+    Only built while Tab 5 is open. The tracks layer is ~9 MB on a 440-animal
+    herd, and the hidden Tab 5 map still parses + draws it, which froze the
+    browser right after Process Data (the Tab 2 sequence box couldn't load).
+    A processed-data change on another tab just marks the layers stale
+    (store-map-layers-built = False); they rebuild the next time Tab 5 opens.
+    The flag lives in the browser, so a page reload (empty map) rebuilds too.
     """
+    if active_tab != "tab-5":
+        if ctx.triggered_id == "store-processed-data" and layers_built:
+            return dash.no_update, dash.no_update, False
+        raise PreventUpdate
+    if ctx.triggered_id == "main-tabs" and layers_built:
+        raise PreventUpdate
+    points_geojson, tracks_geojson = _build_map_layers(processed_json, active_layers)
+    return points_geojson, tracks_geojson, True
+
+
+def _build_map_layers(processed_json, active_layers):
+    """Points + tracks GeoJSON for the Tab 5 map (see update_map_layers)."""
     empty = {"type": "FeatureCollection", "features": []}
     points_geojson = empty
     tracks_geojson = empty.copy()
@@ -10747,10 +11706,11 @@ def _write_processing_report(df, out_path: Path) -> str:
     State("store-migtime-table", "data"),
     State("store-config", "data"),
     State("store-seq-names", "data"),
+    State("store-animal-classification", "data"),
     prevent_initial_call=True,
 )
 def handle_export(selected_clicks, all_clicks, bios_clicks, group_values, out_dir, processed_json, workdir_path,
-                  migtime_json, config_json, seq_names):
+                  migtime_json, config_json, seq_names, class_store):
     """Flush population outputs from the in-memory _POP_OUTPUT_CACHE to disk.
 
     "Export Selected" writes only the ticked checklist items; "Export All"
@@ -10854,7 +11814,7 @@ def handle_export(selected_clicks, all_clicks, bios_clicks, group_values, out_di
             sequences_dict = _MODEL_CACHE.get("sequences_dict")
             if not sequences_dict and processed_json and migtime_json:
                 _rdf = _json_to_df(processed_json, "processed")
-                _rmig = _json_to_df(migtime_json, "migtime")
+                _rmig, _ = _drop_removed_animal_years(_json_to_df(migtime_json, "migtime"), class_store)
                 _rnames = _MODEL_CACHE.get("seq_labels") or seq_names or [f"mig{i+1}" for i in range(8)]
                 try:
                     import geopandas as _gpd_re
@@ -10878,7 +11838,7 @@ def handle_export(selected_clicks, all_clicks, bios_clicks, group_values, out_di
                 proc_df = _json_to_df(processed_json, "processed")
                 if "timestamp" in proc_df.columns:
                     proc_df["timestamp"] = pd.to_datetime(proc_df["timestamp"], errors="coerce")
-                mig_df = _json_to_df(migtime_json, "migtime")
+                mig_df, _ = _drop_removed_animal_years(_json_to_df(migtime_json, "migtime"), class_store)
                 herd_id = "Herd"
                 bio_month, bio_day = 2, 1
                 if config_json:
@@ -10981,15 +11941,27 @@ def handle_export(selected_clicks, all_clicks, bios_clicks, group_values, out_di
 if __name__ == "__main__":
     import logging as _logging
     _logging.getLogger("werkzeug").setLevel(_logging.ERROR)
-    # Open the browser once, ~1.5 s after boot — but NOT when Start App.bat is
-    # the launcher: it sets MCM_NO_BROWSER=1 and opens the browser itself, only
-    # after polling the server to readiness (avoids a premature "can't reach"
-    # flash). Without this guard, main.py's open AND the batch's open both fire
-    # → a second window/tab. The separate WERKZEUG_RUN_MAIN check keeps the
-    # debug reloader's two processes from each opening it.
+    # Open the browser once the server actually answers (avoids a premature
+    # "can't reach" flash). It's opened from THIS process, not Start App.bat:
+    # this server window holds the foreground, so Windows lets the browser come
+    # to the front; when the batch opened it, the browser landed behind the
+    # terminal. MCM_NO_BROWSER=1 still suppresses it; the WERKZEUG_RUN_MAIN
+    # check keeps the debug reloader's two processes from each opening it.
+    def _open_browser_when_ready(url="http://127.0.0.1:8050", timeout_s=60):
+        import time as _time
+        import urllib.request as _urlreq
+        deadline = _time.monotonic() + timeout_s
+        while _time.monotonic() < deadline:
+            try:
+                _urlreq.urlopen(url, timeout=1)
+                break
+            except Exception:
+                _time.sleep(0.5)
+        webbrowser.open(url)
+
     if (os.environ.get("WERKZEUG_RUN_MAIN") != "true"
             and os.environ.get("MCM_NO_BROWSER") != "1"):
-        threading.Timer(1.5, webbrowser.open, args=("http://127.0.0.1:8050",)).start()
+        threading.Thread(target=_open_browser_when_ready, daemon=True).start()
     print("Migration Corridor Mapper running at http://127.0.0.1:8050")
     # debug=False for the distributed build: no Werkzeug auto-reloader (which
     # spawns a second process — the source of the double-browser-open) and no
