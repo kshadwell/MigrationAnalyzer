@@ -59,6 +59,13 @@ _contour_style = {"variable": "dashExtensions.default.contourStyle"}
 _seq_line_style = {"variable": "dashExtensions.default.seqLineStyle"}
 _vec_point_style = {"variable": "dashExtensions.default.vecPointStyle"}
 
+# In-app updater (stdlib only, so it is imported separately from the
+# analysis modules and never falls back to a stub).
+try:
+    from app.modules import updater as _updater
+except ImportError:
+    from modules import updater as _updater  # type: ignore[no-redef]
+
 # ---------------------------------------------------------------------------
 # Module imports — three-tier fallback so the Dash UI still loads even when
 # the analysis modules can't be imported (e.g., missing geopandas/rasterio).
@@ -1476,6 +1483,15 @@ navbar = dbc.Navbar(
             ),
             html.Div(
                 [
+                    html.Button(
+                        "Check for Updates",
+                        id="update-btn",
+                        style={
+                            "background": "none", "border": "1px solid #9fdc9f",
+                            "color": "#9fdc9f", "borderRadius": "4px", "padding": "4px 12px",
+                            "cursor": "pointer", "fontSize": "0.85rem",
+                        },
+                    ),
                     # Report a bug / recommendation — opens feedback_modal.
                     html.Button(
                         html.Img(
@@ -1526,6 +1542,66 @@ help_modal = dbc.Modal(
     ],
     id="help-guide-modal",
     size="xl",
+    is_open=False,
+    centered=True,
+)
+
+# ---------------------------------------------------------------------------
+# Update modal. Opening it checks the git server; "Install & Restart" pulls
+# the latest code over this install and relaunches the server. All the work
+# happens in app/modules/updater.py; this is just the UI.
+# ---------------------------------------------------------------------------
+update_modal = dbc.Modal(
+    [
+        dbc.ModalHeader(dbc.ModalTitle("Check for Updates"), close_button=True),
+        dbc.ModalBody(
+            [
+                html.Div(id="update-status", className="mb-2", style={"fontSize": "1rem"}),
+                html.Div(
+                    id="update-version",
+                    className="text-muted mb-3",
+                    style={"fontSize": "0.8rem"},
+                ),
+                dbc.Progress(
+                    id="update-progress", value=100, striped=True, animated=True,
+                    style={"height": "6px", "display": "none"}, className="mb-3",
+                ),
+                html.Details(
+                    [
+                        html.Summary("Details", style={"cursor": "pointer", "fontSize": "0.8rem"}),
+                        html.Pre(
+                            id="update-log",
+                            style={
+                                "fontSize": "0.72rem", "maxHeight": "220px", "overflowY": "auto",
+                                "backgroundColor": "#111", "padding": "8px", "marginTop": "6px",
+                                "whiteSpace": "pre-wrap",
+                            },
+                        ),
+                    ],
+                ),
+                html.Div(
+                    "Your environmental data and saved sessions are not touched by an update.",
+                    className="text-muted mt-3",
+                    style={"fontSize": "0.75rem"},
+                ),
+                # Polls updater status while the modal is open.
+                dcc.Interval(id="update-poll", interval=1000, disabled=True),
+                # Set to the state string so a clientside callback can reload
+                # the page once the restarted server is back.
+                dcc.Store(id="update-state", data="idle"),
+                html.Div(id="update-reload-dummy", style={"display": "none"}),
+            ],
+            style={"backgroundColor": "#1a1a2e"},
+        ),
+        dbc.ModalFooter(
+            [
+                dbc.Button("Check Again", id="update-check-btn", color="secondary", outline=True, size="sm"),
+                dbc.Button("Install Update & Restart", id="update-install-btn", color="success", disabled=True),
+            ]
+        ),
+    ],
+    id="update-modal",
+    size="md",
     is_open=False,
     centered=True,
 )
@@ -4003,6 +4079,7 @@ app.layout = dbc.Container(
     children=[
         navbar,
         help_modal,
+        update_modal,
         feedback_modal,
         # ---- Application state stores ----
         # Each dcc.Store is one slot of client-side state shared between
@@ -4076,6 +4153,100 @@ def toggle_help_modal(n_clicks, is_open):
     if n_clicks:
         return not is_open
     return is_open
+
+
+# ---------------------------------------------------------------------------
+# Update modal callbacks
+# ---------------------------------------------------------------------------
+@app.callback(
+    Output("update-modal", "is_open"),
+    Input("update-btn", "n_clicks"),
+    Input("update-check-btn", "n_clicks"),
+    Input("update-install-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def update_modal_actions(_open, _check, _install):
+    """Navbar button and 'Check Again' both re-check the server; 'Install'
+    kicks off the background update. All three leave the modal open."""
+    if ctx.triggered_id == "update-install-btn":
+        _updater.start_update()
+    else:
+        threading.Thread(target=_updater.check_for_update, daemon=True).start()
+    return True
+
+
+@app.callback(
+    Output("update-poll", "disabled"),
+    Input("update-modal", "is_open"),
+)
+def update_poll_toggle(is_open):
+    return not bool(is_open)
+
+
+@app.callback(
+    Output("update-status", "children"),
+    Output("update-version", "children"),
+    Output("update-log", "children"),
+    Output("update-install-btn", "disabled"),
+    Output("update-check-btn", "disabled"),
+    Output("update-progress", "style"),
+    Output("update-state", "data"),
+    Input("update-poll", "n_intervals"),
+)
+def update_poll(_n):
+    st = _updater.get_status()
+    state = st["state"]
+    busy = state in ("checking", "updating", "restarting")
+    colors = {
+        "available": "#9fdc9f", "uptodate": "#7ecfff", "error": "#ff8080",
+        "restarting": "#ffd966", "updating": "#ffd966",
+    }
+    status = html.Span(
+        st["message"] or "Click 'Check Again' to look for a newer version.",
+        style={"color": colors.get(state, "#ddd")},
+    )
+    local = st.get("local_sha") or _updater.local_version()
+    remote = st.get("remote_sha")
+    ver_bits = [f"Installed: {local[:8] if local else 'unknown'}"]
+    if remote:
+        ver_bits.append(f"Latest: {remote[:8]}")
+        if st.get("remote_date"):
+            ver_bits.append(str(st["remote_date"])[:10])
+    version = "  |  ".join(ver_bits)
+    log = "\n".join(st["log"][-60:])
+    progress_style = {"height": "6px", "display": "block" if busy else "none"}
+    # Install is allowed whenever we are not busy and the install is either
+    # known to be behind or of unknown version (fresh install, no marker yet).
+    can_install = (not busy) and state in ("available", "error") and bool(remote)
+    return status, version, log, not can_install, busy, progress_style, state
+
+
+# Once the updater says "restarting", the server is about to exit. Poll the
+# root URL until it answers again, then reload the page into the new version.
+app.clientside_callback(
+    """
+    function(state) {
+        if (state !== "restarting" || window.__mcmReloadPoll) { return ""; }
+        window.__mcmReloadPoll = true;
+        var started = Date.now();
+        var wentDown = false;
+        function tick() {
+            fetch("/", {cache: "no-store"}).then(function(r) {
+                if (wentDown && r.ok) { location.reload(); return; }
+                setTimeout(tick, 1500);
+            }).catch(function() {
+                wentDown = true;
+                if (Date.now() - started > 180000) { return; }
+                setTimeout(tick, 1500);
+            });
+        }
+        setTimeout(tick, 2500);
+        return "";
+    }
+    """,
+    Output("update-reload-dummy", "children"),
+    Input("update-state", "data"),
+)
 
 
 @app.callback(

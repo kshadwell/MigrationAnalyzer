@@ -21,3 +21,7 @@ WesternCorridorMappingTeam-main/
 # Bundled Python — Setup.bat downloads and installs this
 python-3.13/
 
+# Per-install updater state (may hold a token)
+.installed_version
+update_config.json
+_backup_*/
